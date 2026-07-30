@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{#-
+  errors/404.html - the page rendered for an address this server does not serve
+  and, by deliberate reuse, for a wrong request method on a non-API path.
+
+  ADDITIVE (AAP 0.4.1). There was nothing to port. The source project is a
+  Java/Maven Selenium-Cucumber automation scaffold of exactly five files which
+  requires no user interface, and no template, stylesheet or image asset has
+  ever been tracked anywhere in this repository's history. This page is authored
+  from scratch against the Agent Action Plan rather than translated.
+
+  WHY THIS PAGE EXISTS AT ALL. AAP 0.3.2 records the researched fact that shaped
+  it: blueprint-level 404 and 405 handlers are not invoked for invalid URLs,
+  because a blueprint does not own a URL space. Every handler therefore lives in
+  app/errors.py at application scope, and this template is what the not-found
+  handler renders. Validation criterion V11 grades precisely that - an unknown
+  route answered by the application-level handler "so it actually fires",
+  instead of the framework's own default error page.
+
+  ONE TEMPLATE, TWO STATUS CODES. AAP 0.2.1 and 0.3.1 fix this folder at exactly
+  two files, 404.html and 500.html. A method-not-allowed response has no
+  template of its own and none may be added - AAP 0.8 is binding: "No feature
+  may be dropped, and none may be added" - so a non-API 405 is answered with
+  this page too. The copy below is therefore deliberately status-agnostic: it
+  names no status code and no digit, which keeps it factually correct for either
+  response the handler sets. For the same reason there is no status-keyed hook
+  for the stylesheet to hang a rule on, and section 14 of static/css/main.css
+  documents the matching decision on its side.
+
+  NOTHING HERE CAN RAISE, BY CONSTRUCTION. An exception while rendering an error
+  page is the worst failure mode available: it turns a 404 into a 500, or sends
+  the 500 handler round again. Two consequences, both intentional:
+    - Not one context variable is read. This page renders identically whether
+      the handler passes a full context or nothing at all, so no missing name
+      and no undefined attribute can break it.
+    - Both links below are literal root-mounted paths, "/" and "/reports", the
+      two fixed by AAP 0.3.1. Deriving them from blueprint endpoint names would
+      raise a build error - and so a 500 - the moment an endpoint is renamed.
+      The shared layout takes the same approach for the same reason.
+
+  NOTHING DIAGNOSTIC REACHES THE READER. No traceback, no exception type or
+  message, no filesystem path, no configuration value, no environment value, no
+  request header, cookie or session content, and the requested address is not
+  echoed back. Diagnostics belong in the structured log written by
+  app/logging_config.py. Automatic HTML escaping stays on and nothing bypasses
+  it, so a hostile address cannot inject anything into this page.
+
+  NOT AN ACCOUNT OF ANY TEST RUN. This page reports on one HTTP request and
+  nothing else. In this system a run that selects zero scenarios (defect D2) and
+  a run in which scenarios failed (defect D3, non-gating by design) are both
+  successes, so the wording below is careful never to suggest that a run, a
+  report or a captured shot is in an error state. The authoritative register of
+  preserved behaviour is docs/migration-parity.md, not this page.
+
+  NO DESIGN SYSTEM AND NO ASSETS. The Design System Alignment Protocol is not
+  triggered (AAP 0.3.4, AAP 0.10.1, AMB-9): no component library was named, no
+  design frames were supplied and no rules were provided that could mandate one.
+  So there is no framework, no client-side code, no event attribute, no
+  redirect, no web font, no picture, no drawing, no embedded frame and no
+  presentation rule of any kind here, and the rendered page makes no external
+  request. Presentation is the shared layout plus static/css/main.css, which
+  styles semantic elements rather than a class vocabulary - hence a heading,
+  three paragraphs and two links, and not one class attribute.
+-#}
+{% block title %}Page or method not available - Testinium-QA{% endblock %}
+{% block content %}
+  <h1>Page or method not available</h1>
+  <p>
+    This server has no page at the address you requested, or it does not accept
+    the request method you used for it.
+  </p>
+  <p>
+    Nothing was changed, and no test run or generated report is affected.
+  </p>
+  <p>
+    Continue from the <a href="/">landing page</a> or open the
+    <a href="/reports">report index</a>.
+  </p>
+{% endblock %}

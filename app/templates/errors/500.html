@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{#-
+  errors/500.html - the page the application-level 500 handler renders.
+
+  ADDITIVE, authored from scratch. Nothing here is ported: the pre-migration
+  project was a five-file Java/Maven Selenium-Cucumber scaffold that required no
+  user interface, and no HTML, stylesheet or image asset has ever been tracked
+  anywhere in this repository's history. The Design System Alignment Protocol is
+  not triggered either - no component library was named and no design frames were
+  supplied - so there is no token vocabulary to honour and none is invented
+  (AAP 0.3.4, AAP 0.10.1, AMB-9).
+
+  WHY THIS FILE EXISTS. A 404, 405 or 500 handler registered on a blueprint never
+  fires for an unmatched URL, because a blueprint owns no URL space. The handlers
+  are therefore registered on the application itself in app/errors.py, and this
+  is the page its 500 handler renders for the root-mounted web blueprint; the API
+  blueprint receives a structured JSON body instead (AAP 0.3.2, AAP 0.4.1).
+  Registration, status codes and branching all belong to app/errors.py, so there
+  is deliberately no route, no handler and no Python module in this folder - and
+  deliberately no third error template: a 405 reuses the 404 page.
+
+  THE BODY IS DELIBERATELY GENERIC. A 500 is raised by a real unhandled exception
+  carrying real internal state, so none of that state is shown: no traceback or
+  stack frame, no exception type or message, no filesystem path, no environment
+  or configuration value, no request header, cookie or session content. The
+  handler's exception object is never rendered - neither its description nor the
+  original_exception a Werkzeug InternalServerError carries - and no correlation
+  identifier is invented to stand in for one, because a made-up identifier that
+  maps to nothing is worse than none. The full diagnostic detail goes to the log
+  configured by app/logging_config.py, on a path the *.log rule in .gitignore
+  keeps untracked, and that log is the only place it is kept.
+
+  IT CANNOT REPORT A TEST OUTCOME, AND SAYS SO. Two outcomes of this system look
+  like failures and are deliberate successes: a run that selects no scenario at
+  all, because the preserved default tag filter matches none of the authored tags
+  and pytest then exits 5, and a run in which scenarios fail, because ignored
+  test failures plus six -1 publisher thresholds make the pipeline non-gating.
+  Neither is an application error and neither reaches this page. The copy below
+  therefore states plainly that a 500 is a fault in this service, since a reader
+  of a report surface could otherwise misread it as a verdict on a run.
+
+  IT MUST NEVER RAISE. An exception while rendering the 500 page would defeat the
+  handler that exists to recover from one. So this template reads no context
+  variable whatsoever and renders correctly against a completely empty context;
+  it builds no URL from a blueprint endpoint name, because doing so raises
+  BuildError the moment that endpoint is absent or renamed, and uses the literal
+  root-mounted paths fixed by AAP 0.3.1 instead; and it marks nothing safe, so
+  autoescaping stays on and nothing from a request can be reflected unescaped.
+
+  Every piece of document chrome - doctype, html lang, charset, viewport, the one
+  stylesheet link, header, nav and footer - is inherited from base.html, whose
+  only two blocks are the two overridden below. There is no script and no inline
+  event handler, no meta refresh (an auto-retry here would hammer a failing
+  service), no framework or content-delivery link, no font, no image, no inline
+  vector, no iframe and no inline style rule; the rendered page makes no external
+  network request at all. Presentation is entirely static/css/main.css, which
+  styles semantic elements rather than a class taxonomy - hence not one class
+  attribute here, and hence a heading, a short paragraph and a link back is the
+  whole page.
+#}
+{% block title %}Internal server error - Testinium-QA{% endblock %}
+{% block content %}
+  <h1>Something went wrong</h1>
+  <p>The server ran into an unexpected error while handling this request.</p>
+  <p>
+    The fault is in this service itself. It is not a test result, and it says
+    nothing about whether a scenario passed, failed or was selected at all. The
+    detail has been recorded in the application log, which is where it is kept.
+  </p>
+  <p>
+    Go back to the <a href="/">start page</a>, or open the
+    <a href="/reports">report index</a>.
+  </p>
+{% endblock %}

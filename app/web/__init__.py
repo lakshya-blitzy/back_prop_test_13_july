@@ -54,4 +54,4 @@ web_bp: Blueprint = Blueprint("web", __name__)
 # reads that name back off this partially initialised module via ``sys.modules``.
 # Moving it to the top of the file, or deleting it as an "unused" import, would
 # register a blueprint carrying zero rules and silently remove both routes.
-from app.web import routes  # noqa: E402,F401
+from app.web import routes as routes  # noqa: E402,F401

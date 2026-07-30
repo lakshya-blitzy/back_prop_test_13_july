@@ -225,4 +225,4 @@ api_bp: Blueprint = Blueprint("api", __name__, url_prefix="/api/v1")
 # ``sys.modules``, so the name must already be bound when routes.py runs. A
 # module-level import placed below other statements is exactly what E402 reports,
 # hence the narrowly scoped suppression below - the only suppression in this file.
-from app.api import routes  # noqa: E402,F401
+from app.api import routes as routes  # noqa: E402,F401

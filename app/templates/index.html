@@ -1,0 +1,122 @@
+{% extends "base.html" %}
+{#-
+  index.html - the landing page served at GET /.
+
+  ADDITIVE, and authored from scratch. The source project is a Java/Maven
+  Selenium-Cucumber automation scaffold of exactly five tracked files that
+  requires no user interface at all, and no template, stylesheet or asset has
+  ever existed anywhere in this repository's history. There was therefore no
+  markup to port and no local convention to imitate: everything below is written
+  against the Agent Action Plan (AAP 0.3.4) rather than translated.
+
+  SCOPE CEILING (AAP 0.3.4). The plan describes this file in five words -
+  "index.html as the landing page" - and fixes the goal of the whole surface as
+  making the report artifacts, the screen shots and the error shots retrievable
+  and browsable over HTTP, "and nothing more". That brevity is the
+  specification, so this page does exactly three things: it names the project,
+  it states plainly what the service exposes, and it points at the report index.
+  It is an internal engineering utility page, so there is no banner, no
+  promotional copy, no feature grid and no dashboard widget - none of those would
+  trace back to anything the source system did.
+
+  NO RULES WERE PROVIDED for this project: the rules document is empty on a full
+  read, so nothing here is written to satisfy a rule and no rule is invented.
+  The enterprise baseline of AAP 0.7 applies instead, and four of its items bear
+  on this file. The shared layout owns the one stylesheet reference, so this page
+  never restates it. A template has no imports at all, which is how the
+  one-direction dependency rule is satisfied here. The file is plain ASCII with
+  LF endings and a single trailing newline. And it is served verbatim, with no
+  build, compile or bundling step of any kind.
+
+  WHAT IS DELIBERATELY ABSENT. Each of these is a requirement, not an oversight:
+    - No client-side code, and no inline event-handler attribute. AAP 0.3.4:
+      "no client-side framework is introduced."
+    - No CSS framework, component library or design system, and no external
+      design-token vocabulary. The Design System Alignment Protocol is not
+      triggered: no library was named, no design frames were supplied and no
+      rules were provided that could mandate one (AAP 0.3.4, AAP 0.10.1, AMB-9).
+    - No web font, no icon font and no content-delivery reference. The rendered
+      page makes no external network request whatsoever.
+    - No picture, inline vector or favicon. The only two pictures the source
+      documentation points at were already broken and are out of scope (defect
+      D8), and Rule T6 forbids fabricating a replacement or a mark.
+    - No inline presentation rule and not one class attribute. The single
+      hand-written sheet at static/css/main.css styles semantic elements rather
+      than a class taxonomy, so this page is composed only from elements that
+      sheet already styles - h1, p, a, h2, ul, li, code and small - and it reads
+      correctly with every class attribute stripped out.
+    - No emoji and no emoji shortcode. The README title line carries GitHub
+      shortcodes, which are plain text a browser does not render, so the plain
+      project name is used instead.
+    - No artifact table. The report index owns that (AAP 0.3.4: "reports.html as
+      an index over generated artifacts"), and repeating it here would create a
+      second place to keep in step - exactly the divergence Rule T2 exists to
+      prevent.
+    - No version, date, author, statistic or status badge (Rule T6). Every claim
+      on this page traces to one of the five source files.
+
+  WHY THE LINKS ARE LITERAL PATHS. The root-mounted blueprint's endpoint names
+  are not knowable from a template, and building a link out of an endpoint name
+  raises BuildError the moment that name differs - which would turn this page's
+  200 into a 500. The two page paths are fixed by AAP 0.3.1, so they are written
+  out literally. Nothing here points at the liveness probe, which answers with
+  JSON rather than a page, and nothing points at a POST rule, an /api/v1 rule or
+  any external address: both repository addresses the source documentation names
+  are out of scope (AMB-7, defect D7).
+
+  WHY NO CONTEXT VARIABLE IS READ. The view function behind GET / is authored
+  separately, so which variables it passes - if any - cannot be known from here.
+  Reading one would make this page a latent 500 the moment the context differed.
+  The whole body is therefore static prose plus one link, and this template
+  renders identically under an empty context. Escaping is left entirely at its
+  default and no value is ever marked as trusted markup.
+
+  TEMPLATE API. Extends base.html and overrides exactly the two blocks that
+  layout defines - title and content - because it defines no others. That layout
+  deliberately carries no heading of its own, so the single h1 below belongs to
+  this page.
+#}
+{% block title %}Home - Testinium-QA{% endblock %}
+{% block content %}
+  <h1>Testinium-QA</h1>
+
+  {#- The summary line. Ported from the tagline on the second line of the README,
+      with the parenthesised stack swapped from the Java toolchain to the Python
+      one this rewrite targets. The sheet styles the paragraph immediately after
+      the page title as a summary, so this has to stay the h1's next sibling. #}
+  <p>Automating the Testinium browser (PYTHON, Flask, Selenium, pytest-bdd, Jira, Jenkins)</p>
+
+  {#- What the service is for. The three report kinds, the opt-in screen shots
+      and the failure-only error shots are the README's own words (lines 42-43);
+      the rendered report directory is the fourth plugin output declared in the
+      runner block (line 81). The source's exact terms are kept, including the
+      internal space in "screen shots" and "error shots". #}
+  <p>
+    This service makes the artifacts of a test run retrievable and browsable over
+    HTTP. The suite generates JSON, HTML and Txt reports as well as a rendered
+    <code>PrettyReports</code> directory. It also generates
+    <code>screen shots</code> for your tests if you enable it, and
+    <code>error shots</code> for your failed test cases as well.
+  </p>
+
+  <p>Start at the <a href="/reports">report index</a>.</p>
+
+  <h2>Entry points</h2>
+
+  {#- Two items, and each one is a rule that genuinely exists. The liveness probe
+      is named but not pointed at, because it answers with JSON and is not a
+      page. Nothing else on the ten-rule surface belongs on a landing page. #}
+  <ul>
+    <li>
+      <a href="/reports">/reports</a> - the index over the generated reports,
+      screen shots and error shots.
+    </li>
+    <li>
+      <code>GET /health</code> - a JSON liveness response, not a page.
+    </li>
+  </ul>
+
+  <p>
+    <small>Artifacts are written under <code>target/</code>.</small>
+  </p>
+{% endblock %}

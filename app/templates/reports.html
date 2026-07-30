@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+{#-
+  reports.html - the index over the generated report artifacts, served at
+  GET /reports.
+
+  ADDITIVE, and authored from scratch. There was no page to port. The source
+  project is a Java/Maven Selenium-Cucumber automation scaffold of exactly five
+  tracked files, it requires no user interface at all, and no template, style
+  sheet or image asset has ever existed anywhere in this repository's history.
+  This page is therefore written against the Agent Action Plan (AAP 0.3.4)
+  rather than translated from anything.
+
+  WHAT THIS PAGE IS FOR. The design goal of this whole surface is narrow and
+  explicit: make the four report artifacts, the screen shots and the error shots
+  retrievable and browsable over HTTP, "and nothing more" (AAP 0.3.4). This page
+  is that goal. It adds no product capability and no domain concept - the
+  artifacts already existed and were reachable only from a CI job, and this is a
+  delivery mechanism for them.
+
+  THE ARTIFACTS, AND WHERE EVERY LITERAL COMES FROM. The first four are the four
+  report plugins the documented test runner declares, quoted verbatim from the
+  runner block in the project README at lines 79 to 82:
+
+      html:target/cucumber-reports.html                     [README.md:L79]
+      json:target/cucumber.json                             [README.md:L80]
+      rerun:target/rerun.txt                                [README.md:L81]
+      me.jvt.cucumber.report.PrettyReports:target/cucumber   [README.md:L82]
+
+  The next two are the screen shots and the error shots the project
+  documentation records at [README.md:L42-L43]: produced "for your tests if you
+  enable it" and "for your failed test cases" respectively. The Surefire report
+  directory is listed as well - its name is retained verbatim so that any report
+  consumer keyed on that path keeps finding content.
+
+  Those seven paths are defined once, in app/utils/paths.py, which is the single
+  place in the application package that spells the artifact root. This page
+  prefers to be handed them; the literal set below is a fallback for the case
+  where it is handed nothing, and it is kept character-for-character identical to
+  that module.
+
+  WHY THE ROOT IS STILL CALLED `target`. The CI pipeline publishes reports with a
+  glob rooted at the workspace - fileIncludePattern '**/*.json' [Jenkins:L15] -
+  and keeping the output underneath the original artifact root is precisely why
+  that value needs no edit at all. The glob is carried over as data, never
+  rewritten, so the directory name is a contract rather than a leftover. Every
+  path shown here is spelled exactly as the pipeline, the test configuration and
+  the committed configuration templates already spell it: no re-labelling, no
+  shortening and no stripped prefix, however tempting either might look.
+
+  ABSENCE IS THE ORDINARY CASE, NOT AN ERROR. The artifact root is ignored by
+  version control, so it is absent in a fresh checkout; it is wiped and rebuilt
+  by every clean step; screen shots are produced only when they are enabled; and
+  error shots appear only once a test case has failed. This page therefore lists
+  an artifact that is not there in exactly the same shape as one that is,
+  describes the difference in words, and simply leaves the hyperlink off. It
+  never raises, never warns and never gates - it reports.
+
+  A RUN THAT SELECTS NOTHING IS A SUCCESS, AND SO IS A RUN THAT FAILS. The
+  preserved default selection expression matches no scenario at all, and the test
+  stage tolerates failures by design: failure tolerance is on [pom.xml:L25] and
+  all six report thresholds are -1 [Jenkins:L15], which the publisher reads as
+  no threshold. Both outcomes are ordinary successes in this system, and the
+  report stage runs either way. Nothing below presents either as a fault: there
+  is no error treatment, no alarm colour and no call to action anywhere on this
+  page. The register of deliberately preserved behaviours belongs in
+  docs/migration-parity.md, not on an operator page.
+
+  RENDER CONTEXT - the contract this page offers its view function. Every name is
+  optional and every reference below is guarded, because the page is required to
+  render with an entirely empty context.
+
+    artifacts   An iterable of artifact records, rendered strictly in the order
+                given. Ordering is the reporting layer's decision - the source
+                pipeline asks for alphabetical sorting [Jenkins:L15] - so this
+                page never re-orders, groups or filters what it is handed. A
+                record may be a mapping or a plain descriptor: attribute access
+                and key access resolve identically here, so the frozen
+                descriptors in app/reporting/ can be passed through as they are.
+                Fields:
+                  name       Human-readable artifact name. Falls back to `path`.
+                  path       The artifact path, relative to the repository root
+                             and spelled with forward slashes. Hand over the
+                             already-POSIX form - to_posix() in
+                             app/utils/paths.py, or a descriptor's `posix_path`
+                             property - so a platform-native separator can never
+                             reach this page and invalidate the publisher glob.
+                  kind       "file" or "directory".
+                  available  Whether the artifact can be served right now. This
+                             is what the availability wording keys on; `exists`
+                             is consulted when it is not supplied, and the state
+                             reads as unavailable when neither is.
+                  exists     Whether anything at all is present at `path`.
+                  detail     One operator-safe sentence explaining the state.
+                  url        Where to retrieve the artifact. A hyperlink is
+                             rendered only while this is truthy, which is what
+                             guarantees this page can never emit a dead link.
+    run         A summary of the most recent run. Fields: `id`, `status`,
+                `scenarios`, `detail`. A scenario count of zero is rendered like
+                any other count, because zero is a successful outcome here.
+
+  When `artifacts` is missing or empty the table falls back to the seven known
+  paths, every row reading as not generated yet. That is the state of a fresh
+  checkout and of every moment before the first run finishes, and it is far more
+  useful than an empty page.
+
+  LINKS COME FROM THE VIEW FUNCTION, NEVER FROM AN ENDPOINT NAME. Building a
+  link out of a blueprint endpoint name raises at render time the moment that
+  endpoint is renamed or is not registered, which would turn this page's 200 into
+  a 500. Only the view function knows which download rules exist, so it hands in
+  each artifact URL. The single exception in this whole surface is the style
+  sheet reference in the shared layout, which the framework registers itself and
+  which therefore can never fail to build.
+
+  DELIBERATE NON-GOALS, each a requirement rather than an omission:
+    - No CSS framework, no component library, no design system and no external
+      design token vocabulary. The Design System Alignment Protocol is not
+      triggered: no library was named, no design frames were supplied and no
+      rules were provided that could mandate one (AAP 0.3.4, AAP 0.10.1, AMB-9).
+    - No client-side code and no inline handler attribute. Nothing here sorts,
+      searches, filters, collapses or refreshes in the browser: the page is
+      server-rendered and complete when it arrives.
+    - No image, no inline vector and no glyph standing in for a state.
+      Availability is carried by words, which the style sheet renders through
+      weight and colour alone.
+    - No web font and no external network request of any kind.
+    - No re-rendering of the generated HTML report. It is self-contained, carries
+      its own styling, and is linked and served exactly as the toolchain wrote
+      it, because re-rendering it would risk diverging from that output.
+    - No control that starts a run or publishes a report. Doing either is not
+      this page's business; it lists what already exists.
+    - No document shell and no second style sheet reference. The shared layout
+      owns both, plus the two landmarks around this content, so this file
+      overrides exactly the two blocks that layout publishes.
+    - Nothing opts out of the escaping Jinja applies to every value it renders.
+      Report fields carry scenario names, step names and an asserted message from
+      the application under test, and that escaping is the only thing standing
+      between such data and an injection.
+#}
+{% block title %}Report artifacts - Testinium-QA{% endblock %}
+{% block content %}
+  {#- The seven artifact paths, in the plugin order of [README.md:L79-L82], then
+      the two shot directories of [README.md:L42-L43], then the retained Surefire
+      directory. Used only when the view function supplies no artifacts. -#}
+  {%- set fallback_artifacts = [
+        {"name": "Cucumber HTML report", "path": "target/cucumber-reports.html", "kind": "file"},
+        {"name": "Cucumber JSON report", "path": "target/cucumber.json", "kind": "file"},
+        {"name": "Rerun manifest", "path": "target/rerun.txt", "kind": "file"},
+        {"name": "Pretty reports", "path": "target/cucumber", "kind": "directory"},
+        {"name": "Screen shots", "path": "target/screenshots", "kind": "directory"},
+        {"name": "Error shots", "path": "target/error-shots", "kind": "directory"},
+        {"name": "Surefire reports", "path": "target/surefire-reports", "kind": "directory"}
+      ] -%}
+  {%- set supplied_artifacts = artifacts | default([], true) -%}
+  {%- set artifact_rows = supplied_artifacts if supplied_artifacts else fallback_artifacts -%}
+  <h1>Report artifacts</h1>
+  <p>Every report artifact a test run writes, the path it is written to, and whether it is
+    there right now.</p>
+  <table>
+    <caption>
+      The four report artifacts the test runner declares, the screen shots, the error shots
+      and the retained Surefire report directory.
+    </caption>
+    <thead>
+      <tr>
+        <th scope="col">Artifact</th>
+        <th scope="col">Path</th>
+        {#- Spelled out rather than abbreviated to "Kind": the stylesheet holds header
+            cells on one line, so the header's own width is this column's floor, and a
+            four-letter heading would squeeze the widest value ("directory") into a
+            mid-word break under the load-bearing `overflow-wrap: anywhere`. -#}
+        <th scope="col">File or directory</th>
+        <th scope="col">Availability</th>
+      </tr>
+    </thead>
+    <tbody>
+      {%- for artifact in artifact_rows %}
+      {#- Each field is resolved once, through a guard, so that a record which
+          omits it renders as ordinary empty text rather than raising or printing
+          a placeholder word. `available` wins over `exists` when both are given,
+          because only the former means servable. -#}
+      {%- set artifact_path = artifact.path | default('', true) %}
+      {%- set artifact_name = artifact.name | default(artifact_path, true) %}
+      {%- set artifact_kind = artifact.kind | default('', true) %}
+      {%- set artifact_url = artifact.url | default('', true) %}
+      {%- set artifact_detail = artifact.detail | default('', true) %}
+      {%- set artifact_available =
+            (artifact.available if artifact.available is defined else artifact.exists)
+            | default(false, true) %}
+      <tr>
+        <th scope="row">{{ artifact_name }}</th>
+        <td>
+          {%- if artifact_url %}
+          <a href="{{ artifact_url }}"><code>{{ artifact_path }}</code></a>
+          {%- else %}
+          <code>{{ artifact_path }}</code>
+          {%- endif %}
+        </td>
+        <td>{{ artifact_kind }}</td>
+        <td>
+          {%- if artifact_available %}
+          <strong>Available</strong>
+          {%- else %}
+          <em>Not generated yet</em>
+          {%- endif %}
+          {%- if artifact_detail %}
+          <small>{{ artifact_detail }}</small>
+          {%- endif %}
+        </td>
+      </tr>
+      {%- endfor %}
+    </tbody>
+  </table>
+  {%- if run is defined and run %}
+  {%- set run_id = run.id | default('', true) %}
+  {%- set run_status = run.status | default('', true) %}
+  {%- set run_detail = run.detail | default('', true) %}
+  {#- Zero is a real, successful scenario count here, and zero is falsy, so this
+      one field is tested for absence rather than for truth. -#}
+  {%- set run_scenarios = run.scenarios if run.scenarios is defined else none %}
+  {%- if run_id or run_status or run_scenarios is not none or run_detail %}
+  <h2>Latest run</h2>
+  <dl>
+    {%- if run_id %}
+    <dt>Run</dt>
+    <dd><code>{{ run_id }}</code></dd>
+    {%- endif %}
+    {%- if run_status %}
+    <dt>Status</dt>
+    <dd>{{ run_status }}</dd>
+    {%- endif %}
+    {%- if run_scenarios is not none %}
+    <dt>Scenarios</dt>
+    <dd>{{ run_scenarios }}</dd>
+    {%- endif %}
+    {%- if run_detail %}
+    <dt>Detail</dt>
+    <dd>{{ run_detail }}</dd>
+    {%- endif %}
+  </dl>
+  {%- endif %}
+  {%- endif %}
+  <h2>Where these artifacts come from</h2>
+  <p>The four report artifacts are the four report plugins the test runner declares. Each
+    declaration names the output path it writes to, and those are the paths listed above:</p>
+  <dl>
+    <dt>Cucumber HTML report</dt>
+    <dd><code>html:target/cucumber-reports.html</code></dd>
+    <dt>Cucumber JSON report</dt>
+    <dd><code>json:target/cucumber.json</code></dd>
+    <dt>Rerun manifest</dt>
+    <dd><code>rerun:target/rerun.txt</code></dd>
+    <dt>Pretty reports</dt>
+    <dd><code>me.jvt.cucumber.report.PrettyReports:target/cucumber</code></dd>
+  </dl>
+  <p>Screen shots are produced for your tests if you enable them, and error shots are
+    produced for your failed test cases, so either directory can legitimately be missing
+    after a run that went perfectly well. Everything under <code>target/</code> is rewritten
+    by every run, which is why an artifact listed as not generated yet is an ordinary state
+    rather than a fault.</p>
+  <p>The test stage is non-gating by design: a run that selects no scenarios and a run that
+    records failing scenarios both complete successfully, and the artifacts above are
+    published either way.</p>
+  <p><small>The Cucumber HTML report is self-contained and carries its own styling. It is
+    served exactly as the test toolchain wrote it and is never re-rendered here, so what it
+    shows can never drift from what that toolchain produced.</small></p>
+{% endblock %}
