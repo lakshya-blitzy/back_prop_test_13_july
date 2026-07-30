@@ -229,6 +229,28 @@ python_version = "3.14"
 files = ["app", "tests", "scripts", "run.py", "wsgi.py", "gunicorn.conf.py"]
 exclude = "(^|/)(\\.venv|target|build|dist)/"
 
+# Path-to-module mapping. Module names are rooted at the repository directory,
+# so `app/web/__init__.py` is `app.web` and `tests/unit/__init__.py` is
+# `tests.unit`, which is exactly how the code imports itself.
+#
+# This is not cosmetic. Left to its default, mypy derives a module name by
+# walking up from a file only while each parent directory holds an
+# `__init__.py`. `app/` is an implicit namespace package, so that walk stops at
+# `app/` and names `app/web/__init__.py` as plain `web` - while the absolute
+# import inside that same file, `from app.web import routes`, makes mypy resolve
+# the very same file a second time as `app.web`. mypy then aborts the entire run
+# with "Source file found twice under different module names: web and app.web"
+# and, because that is a collection error, checks nothing at all. Rooting the
+# package base here is the resolution mypy's own documentation recommends
+# (https://mypy.readthedocs.io/en/stable/running_mypy.html#mapping-file-paths-to-modules),
+# and it keeps producing the same module names once `app/__init__.py` exists, so
+# it is a permanent setting rather than a workaround for a transient layout.
+# `namespace_packages` is stated explicitly because `explicit_package_bases`
+# depends on it.
+mypy_path = "."
+explicit_package_bases = true
+namespace_packages = true
+
 # Strictness. Annotations are required across the whole tree - the application
 # package and the test harness alike - so that the type-check gate is a real
 # gate rather than decoration.

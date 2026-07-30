@@ -24,63 +24,63 @@ configuration.properties
 hs_err_pid*
 
 # =============================================================================
-# Python 3 / Flask port (the JVM block above is retained as historical record;
-# `configuration.properties` and `*.log` remain ignored exactly as before)
+# Python 3 / Flask port
+#
+# The JVM block above is retained verbatim as historical record - nothing was
+# deleted. Two of its entries are load-bearing for the Python application and
+# must never be removed:
+#
+#   configuration.properties  The real runtime configuration file stays
+#                             untracked, so a developer's local credentials for
+#                             the application under test can never be committed.
+#                             Only configuration.properties.example is tracked.
+#   *.log                     The structured log destination written by
+#                             app/logging_config.py stays untracked.
 # =============================================================================
 
-# Byte-compiled / optimized / cache files
+# Python bytecode
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
 
 # Virtual environments
 .venv/
 venv/
-env/
-ENV/
 
-# Tooling caches
+# Test and type-check caches
+#
+# __pycache__/ above and .pytest_cache/ below are correctness controls, not
+# cosmetics. A stale bytecode cache carried into a duplicated test directory
+# once produced a false result while the duplicate-scenario-name defect was
+# being analysed, so a committed cache could make the defect-preservation parity
+# suite report the wrong scenario-collection count. `make clean` removes both
+# for exactly the same reason.
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.dmypy.json
-dmypy.json
 
-# Coverage artifacts
+# Coverage
 .coverage
-.coverage.*
-coverage.xml
 htmlcov/
 
-# Packaging / build output
+# Build and distribution
 build/
 dist/
 *.egg-info/
-.eggs/
-pip-wheel-metadata/
 
-# Ephemeral report artifacts, wiped by `make clean` (parity with `mvn clean`):
-# cucumber.json, cucumber-reports.html, rerun.txt, cucumber/, screenshots/,
-# error-shots/, surefire-reports/
-target/
-
-# Local runtime configuration (the committed templates are .env.example and
-# configuration.properties.example)
+# Runtime configuration
+#
+# Ignore the real .env only. The committed template is .env.example, which this
+# exact (non-glob) pattern does not match, so no `!.env.example` negation is
+# needed - and none must be introduced. A broader glob such as `.env*` would
+# silently untrack the template.
 .env
-.env.*
-!.env.example
 
-# Log output directory (*.log itself is already ignored above)
-logs/
-
-# Agent / CI scratch space for screenshots and screen recordings
-blitzy/
-
-# OS and IDE noise
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
-*.swp
-*.swo
+# Test and report output
+#
+# The Java-flavoured directory name `target/` is retained deliberately: the
+# Jenkins cucumber publisher matches reports with fileIncludePattern '**/*.json',
+# so keeping the artifacts here means that contract needs no change at all.
+# Everything the run produces below it is ephemeral and is wiped by `make clean`
+# (the port of `mvn clean`): cucumber.json, cucumber-reports.html, rerun.txt,
+# cucumber/, screenshots/, error-shots/ and surefire-reports/.
+target/

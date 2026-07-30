@@ -1,10 +1,37 @@
 *.html linguist-detectable=false
 
-# Line-ending pins. Required so that tests/features/login.feature stays
-# BYTE-IDENTICAL to the Gherkin block documented in README.md on every platform:
-# without an explicit eol pin, end-of-line normalisation could silently alter
-# the file's bytes and break byte-parity.
+# =============================================================================
+# Line 1 above is preserved byte-identically from the pre-migration file: it
+# keeps GitHub Linguist from counting generated or served HTML - the Cucumber
+# report at target/cucumber-reports.html and the Jinja2 templates under
+# app/templates/ - as detectable language content. It is still correct after the
+# Java/Maven -> Python 3/Flask migration, so it stays exactly as it was.
+#
+# Everything below pins end-of-line normalisation. With no explicit eol
+# attribute a checkout under core.autocrlf=true (the Windows default) rewrites
+# every LF to CRLF on the way out of the object store, silently changing the
+# bytes of files whose exact bytes are part of this project's contract.
+# =============================================================================
+
+# Gherkin - the byte-parity contract this file exists to protect.
+# tests/features/login.feature is a verbatim copy of README.md lines 104-148 and
+# must stay exactly 1864 bytes / 45 lines / pure ASCII, with sha256
+# 112d90560569d3011bb8a2c32d9acbc65d346be8f70ad7c182105b934079504c, first line
+# "@Login" and last line "      |posmanager6@info.com   |posmanager|". CRLF
+# normalisation would inflate it to 1909 bytes and break the byte-parity
+# assertion in tests/parity/test_feature_file_byte_parity.py.
+# The block also holds three whitespace-only lines (README L121, L129 and L143 =
+# 2, 4 and 6 spaces). No git attribute can protect trailing whitespace, so this
+# pin is the only guarantee available: never run a "trim trailing whitespace"
+# tool over the feature file. The rule is deliberately "text" and deliberately
+# carries no "whitespace=" attribute - "-text"/binary would defeat diffing.
 *.feature text eol=lf
-*.py      text eol=lf
-*.sh      text eol=lf
-*.bat     text eol=crlf
+
+# Python sources under app/, tests/ and scripts/.
+*.py text eol=lf
+
+# Ported CI runners: a CRLF shebang fails at runtime with "bad interpreter:
+# /bin/sh^M", so scripts/run_tests.sh must be LF, while Windows cmd.exe needs
+# CRLF, making scripts/run_tests.bat the one and only eol=crlf rule here.
+*.sh text eol=lf
+*.bat text eol=crlf

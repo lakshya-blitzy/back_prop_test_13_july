@@ -113,9 +113,20 @@ format: ## Apply ruff and black formatting (never used by the verify gate)
 	$(BLACK) .
 
 typecheck: ## mypy static type checking
-	@paths=""; for d in app tests scripts; do [ -d "$$d" ] && paths="$$paths $$d"; done; \
+# A source root is only handed to mypy once it actually holds a type-checkable
+# file. Testing mere directory existence is not enough: mypy exits 2 with "There
+# are no .py[i] files in directory" when pointed at a directory that exists but
+# contains none, which happens whenever the first file to land under a root is a
+# non-Python asset - app/static/css/main.css, tests/features/login.feature or
+# scripts/run_tests.sh, for example. Once every root holds Python this selects
+# all three, exactly as before.
+	@paths=""; for d in app tests scripts; do \
+	  if [ -d "$$d" ] && [ -n "$$(find "$$d" \( -name '*.py' -o -name '*.pyi' \) -print 2>/dev/null | head -n 1)" ]; then \
+	    paths="$$paths $$d"; \
+	  fi; \
+	done; \
 	if [ -z "$$paths" ]; then \
-	  echo "[make typecheck] none of app/ tests/ scripts/ exists yet - nothing to type-check"; \
+	  echo "[make typecheck] no type-checkable sources under app/ tests/ scripts/ yet - nothing to type-check"; \
 	else \
 	  echo "[make typecheck] mypy$$paths"; $(MYPY) $$paths; \
 	fi

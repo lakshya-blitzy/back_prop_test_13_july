@@ -1,0 +1,710 @@
+/* =============================================================================
+ * main.css - the single hand-written stylesheet for the minimal report surface
+ * =============================================================================
+ *
+ * ADDITIVE. There was no stylesheet to port. The source project is a
+ * Java/Maven Selenium-Cucumber automation scaffold of exactly five files and
+ * it requires no user interface at all: no HTML, no CSS and no image asset has
+ * ever existed anywhere in this repository's history. This file is therefore
+ * authored from scratch against the Agent Action Plan (AAP 0.3.4) rather than
+ * translated from an existing sheet.
+ *
+ * SCOPE CEILING (AAP 0.3.4). The design goal is narrow and explicit: make the
+ * four report artifacts, the screen shots and the error shots retrievable and
+ * browsable over HTTP, "and nothing more". This surface introduces no new
+ * product capability and no new domain concepts - it is a delivery mechanism
+ * for artifacts that already existed. It is an internal engineering utility
+ * page, not a product or marketing surface, so the visual register is
+ * deliberately plain, legible and unbranded.
+ *
+ * DELIBERATE NON-GOALS. Each of these is a requirement, not an omission:
+ *
+ *   - No CSS framework, no component library and no design system. The Design
+ *     System Alignment Protocol is not triggered: no component library was
+ *     named, no attachments or design frames were supplied, and no rules were
+ *     provided that could mandate one (AAP 0.3.4, AAP 0.10.1, AMB-9). Adding
+ *     one would introduce a token vocabulary no requirement asks for and would
+ *     contradict the parity mandate in Rule T3.
+ *   - No external design-token vocabulary. The custom properties in section 1
+ *     are plain local conveniences, defined and consumed only by this file.
+ *   - No preprocessor and no build step. This is plain CSS served verbatim;
+ *     the deployment image installs a pinned Python runtime and nothing else,
+ *     so a compile step would break reproducible container serving.
+ *   - No JavaScript of any kind, and no scripted theme switching.
+ *   - No web font, no icon font, no imported sheet, no content-delivery link
+ *     and no external network request. This sheet has zero dependencies.
+ *   - No referenced asset whatsoever - not an image, font, sprite, cursor or
+ *     inline data payload. The only two images the source documentation links
+ *     are broken and out of scope, and Rule T6 forbids fabricating a
+ *     replacement, a logo or a favicon.
+ *
+ * WRITTEN AGAINST PLAIN SEMANTIC HTML. The five templates this sheet serves -
+ * the shared layout, the landing page, the report index and the 404 and 500
+ * error pages - carry no class taxonomy that could be relied upon here, so
+ * every rule below hangs off a semantic element selector. The handful of
+ * helper classes in section 13 are optional: a page that uses none of them
+ * must still render correctly and legibly.
+ *
+ * SERVING CONTRACT. Flask's default static folder resolves to app/static, so
+ * this file is served by the framework's automatic static route at exactly
+ * /static/css/main.css. That path is a contract, not a convention: a sibling
+ * module names it verbatim among its dependencies. Do not rename, flatten or
+ * relocate this file.
+ *
+ * HANDS OFF THE GENERATED REPORT. The generated Cucumber HTML report is
+ * self-contained and carries its own embedded styling. It is linked and served
+ * verbatim, never re-rendered, because re-rendering it would risk diverging
+ * from the source toolchain's output. Nothing here targets its internal markup
+ * and no rule below references any generated artifact path - those artifacts
+ * are ephemeral and are wiped by every clean step.
+ *
+ * Section map:
+ *   1  Local custom properties          9  Lists
+ *   2  Dark colour scheme              10  Tables
+ *   3  Baseline reset                  11  Code and preformatted text
+ *   4  Page frame                      12  Artifact availability
+ *   5  Layout landmarks                13  Optional helper classes
+ *   6  Headings                        14  Error pages
+ *   7  Body copy                       15  Narrow viewports
+ *   8  Links
+ * ========================================================================== */
+
+
+/* -----------------------------------------------------------------------------
+ * 1. Local custom properties
+ *
+ * A short, flat set of local conveniences so that a colour or a spacing step
+ * is stated once. This is not, and must not grow into, an external token
+ * vocabulary: nothing outside this file defines or consumes these names.
+ * -------------------------------------------------------------------------- */
+
+:root {
+  /* System type stacks only - nothing is downloaded and nothing is requested
+   * over the network. The monospace stack matters more than usual here because
+   * every artifact path on the report index is rendered as code. */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial,
+    "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  /* Palette. Every foreground below was contrast-checked against the surface
+   * it sits on, and each clears the WCAG AA 4.5:1 requirement for body text
+   * with room to spare: body text 16.4:1, secondary text 6.2:1, headings
+   * 18.5:1, links 7.9:1, visited links 7.6:1 and the available-artifact
+   * colour 9.1:1, all against the page background. The focus ring reaches
+   * 7.9:1 against a 3:1 requirement for non-text indicators. */
+  --color-bg: #ffffff;
+  --color-surface: #f4f6f8;
+  --color-text: #1c2024;
+  --color-text-muted: #576270;
+  --color-heading: #0f1418;
+  --color-border: #d3d9e0;
+  --color-link: #0b4fa2;
+  --color-link-hover: #08376f;
+  --color-link-visited: #6a3d9a;
+  --color-focus: #0b4fa2;
+  --color-available: #14532d;
+
+  /* Spacing steps, in rem so the whole page scales with the reader's own
+   * base font size rather than fighting it. */
+  --space-3xs: 0.25rem;
+  --space-2xs: 0.375rem;
+  --space-xs: 0.5rem;
+  --space-sm: 0.75rem;
+  --space-md: 1rem;
+  --space-lg: 1.5rem;
+  --space-xl: 2rem;
+  --space-2xl: 3rem;
+
+  /* This is a text-and-links page, so the measure is capped for readability
+   * while staying wide enough for a three-column artifact table. */
+  --content-width: 60rem;
+
+  --radius: 4px;
+  --border-thin: 1px;
+
+  /* Lets the engine render scrollbars and any native control to match the
+   * active scheme, which keeps the dark variant in section 2 coherent. */
+  color-scheme: light dark;
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 2. Dark colour scheme
+ *
+ * Honoured through a plain media query and nothing else - there is no toggle,
+ * no persisted preference and no script. Only the custom properties are
+ * restated, so every rule after this point is written once. The dark values
+ * were contrast-checked exactly as the light ones were: body text 14.3:1,
+ * secondary text 7.8:1, headings 16.2:1, links 8.4:1, visited links 8.7:1 and
+ * the available-artifact colour 9.3:1 against the dark page background.
+ * -------------------------------------------------------------------------- */
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #15181c;
+    --color-surface: #1e2329;
+    --color-text: #e3e7ea;
+    --color-text-muted: #a3adb9;
+    --color-heading: #f2f4f6;
+    --color-border: #333b44;
+    --color-link: #7db4ff;
+    --color-link-hover: #a9cdff;
+    --color-link-visited: #c6a8ec;
+    --color-focus: #7db4ff;
+    --color-available: #63d089;
+  }
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 3. Baseline reset
+ *
+ * Just enough to make the sheet predictable. A border-box model everywhere
+ * means the padding on a table cell or a code block never widens the element
+ * past the measure set in section 4.
+ * -------------------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* Keep the root size at the reader's default so the rem scale above stays
+   * meaningful, and stop mobile engines inflating text after a rotation. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 4. Page frame
+ *
+ * The measure is constrained on body rather than on the individual landmarks.
+ * That is a deliberate choice: the templates are plain semantic HTML whose
+ * nesting depth is not knowable from a stylesheet, so anchoring the constraint
+ * to body centres and caps every page however the markup happens to nest, and
+ * degrades to a sensible full-width column if a landmark is missing entirely.
+ * -------------------------------------------------------------------------- */
+
+body {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: var(--space-xl) var(--space-md) var(--space-2xl);
+  font-family: var(--font-sans);
+  font-size: 1rem;
+  line-height: 1.6;
+  color: var(--color-text);
+  background-color: var(--color-bg);
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 5. Layout landmarks
+ *
+ * header, nav, main and footer are given separation and rhythm only. No grid,
+ * no framework layout primitive and no positioning tricks.
+ * -------------------------------------------------------------------------- */
+
+header {
+  padding-bottom: var(--space-md);
+  margin-bottom: var(--space-lg);
+  border-bottom: var(--border-thin) solid var(--color-border);
+}
+
+nav {
+  margin-top: var(--space-sm);
+}
+
+/* A navigation list is a list semantically but reads as a row of links, so the
+ * markers and indent are dropped and the items are laid out inline. Wrapping
+ * is enabled so a narrow viewport stacks them instead of overflowing. */
+nav ul,
+nav ol {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs) var(--space-md);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+nav li {
+  margin: 0;
+}
+
+nav a {
+  font-weight: 600;
+  text-decoration: none;
+}
+
+nav a:hover {
+  text-decoration: underline;
+}
+
+main {
+  /* Stated explicitly so the element behaves as a block in every engine. */
+  display: block;
+}
+
+/* Never open a landmark with a stray gap inherited from its first child. */
+main > :first-child,
+header > :first-child,
+footer > :first-child {
+  margin-top: 0;
+}
+
+footer {
+  margin-top: var(--space-2xl);
+  padding-top: var(--space-md);
+  border-top: var(--border-thin) solid var(--color-border);
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 6. Headings
+ *
+ * Three levels are treated deliberately and are distinguishable from one
+ * another by size, by colour and by whether they carry a rule, because the
+ * source report documentation itself uses three distinct heading levels: one
+ * top-level title, nine section headings and two sub-section headings for the
+ * HTML and text report descriptions. The remaining levels are pinned to the
+ * body size so a deeply nested heading can never render smaller than the prose
+ * around it.
+ * -------------------------------------------------------------------------- */
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  margin: 0 0 var(--space-sm);
+  color: var(--color-heading);
+  font-weight: 600;
+  line-height: 1.25;
+  /* Page titles can carry an artifact name, which may be a long unbroken
+   * token, so a heading is allowed to wrap rather than overflow. */
+  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* Largest, no rule: one per page. */
+h1 {
+  font-size: 1.875rem;
+  letter-spacing: -0.01em;
+}
+
+/* Mid-level, set apart by a hairline rule - the strongest of the three cues. */
+h2 {
+  margin-top: var(--space-xl);
+  padding-bottom: var(--space-3xs);
+  border-bottom: var(--border-thin) solid var(--color-border);
+  font-size: 1.375rem;
+}
+
+/* Smallest of the three, and the only one in body-text colour rather than
+ * heading colour, so it never reads as a section break. */
+h3 {
+  margin-top: var(--space-lg);
+  color: var(--color-text);
+  font-size: 1.125rem;
+}
+
+h4,
+h5,
+h6 {
+  margin-top: var(--space-md);
+  font-size: 1rem;
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 7. Body copy
+ * -------------------------------------------------------------------------- */
+
+p {
+  margin: 0 0 var(--space-md);
+}
+
+/* A paragraph immediately after the page title reads as a summary line. This
+ * serves the landing page and the error pages equally, which is why it is a
+ * generic rule here rather than anything keyed to a particular page. */
+h1 + p {
+  color: var(--color-text-muted);
+  font-size: 1.0625rem;
+}
+
+small {
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+strong,
+b {
+  color: var(--color-heading);
+  font-weight: 600;
+}
+
+em,
+i {
+  font-style: italic;
+}
+
+hr {
+  height: 0;
+  margin: var(--space-xl) 0;
+  border: 0;
+  border-top: var(--border-thin) solid var(--color-border);
+}
+
+/* Trailing space inside a container is the container's business, not the last
+ * child's, so the final block in any box gives its bottom margin back. */
+p:last-child,
+ul:last-child,
+ol:last-child,
+dl:last-child,
+pre:last-child,
+table:last-child {
+  margin-bottom: 0;
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 8. Links
+ *
+ * Links are the primary control on this surface: every report artifact is
+ * reached by following one. Underlines are kept - colour alone is not a
+ * sufficient affordance - and the focus indicator is replaced, never removed.
+ * -------------------------------------------------------------------------- */
+
+a {
+  color: var(--color-link);
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
+  /* Link text is frequently an artifact path, so it wraps instead of pushing
+   * the layout sideways on a narrow viewport. */
+  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+a:visited {
+  color: var(--color-link-visited);
+}
+
+a:hover,
+a:active {
+  color: var(--color-link-hover);
+}
+
+/* A clearly visible ring on both the broad and the modern focus selector, so
+ * keyboard users always get an indicator whatever the engine supports. No rule
+ * anywhere in this file sets outline to none. */
+a:focus,
+a:focus-visible {
+  border-radius: var(--radius);
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 9. Lists
+ *
+ * The landing page and the report index both list artifacts, and a definition
+ * list is the natural shape for a name-and-path pair, so both forms are given
+ * a proper treatment.
+ * -------------------------------------------------------------------------- */
+
+ul,
+ol {
+  margin: 0 0 var(--space-md);
+  padding-left: var(--space-lg);
+}
+
+li {
+  margin-bottom: var(--space-3xs);
+}
+
+li:last-child {
+  margin-bottom: 0;
+}
+
+/* A nested list belongs to its parent item, so it tightens up rather than
+ * repeating the full block spacing. */
+ul ul,
+ul ol,
+ol ul,
+ol ol {
+  margin-top: var(--space-3xs);
+  margin-bottom: 0;
+}
+
+dl {
+  margin: 0 0 var(--space-md);
+}
+
+dt {
+  margin-top: var(--space-sm);
+  color: var(--color-heading);
+  font-weight: 600;
+}
+
+dt:first-child {
+  margin-top: 0;
+}
+
+dd {
+  margin: 0 0 var(--space-2xs) var(--space-md);
+  /* A description is usually the artifact path, so it must be breakable. */
+  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+dd:last-child {
+  margin-bottom: 0;
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 10. Tables
+ *
+ * The report index is naturally tabular - artifact name, artifact path,
+ * availability - so tables get a real treatment rather than browser defaults.
+ * -------------------------------------------------------------------------- */
+
+table {
+  width: 100%;
+  margin: 0 0 var(--space-lg);
+  border-collapse: collapse;
+  /* Automatic layout lets the name column stay compact while the path column
+   * absorbs the remaining measure. */
+  table-layout: auto;
+  font-size: 0.9375rem;
+}
+
+caption {
+  margin-bottom: var(--space-xs);
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+  text-align: left;
+}
+
+th,
+td {
+  padding: var(--space-xs) var(--space-sm);
+  text-align: left;
+  vertical-align: top;
+  /* Load-bearing. A cell can hold a long unbroken artifact identifier - the
+   * longest one this surface lists is the fully qualified pretty-report plugin
+   * name, me.jvt.cucumber.report.PrettyReports, followed by its output path,
+   * with no space anywhere to break at. The "anywhere" value also shrinks the
+   * cell's minimum content width, and that is what actually stops the table
+   * forcing a horizontal overflow on a narrow screen; the preceding
+   * declaration is the fallback for engines without it. */
+  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* The separator belongs to the row, not to each cell in it. Under the collapsed
+ * border model set on the table above, one declaration here replaces one per
+ * cell, and the final row can then drop its rule with a single selector. */
+tr {
+  border-bottom: var(--border-thin) solid var(--color-border);
+}
+
+thead tr {
+  border-bottom-width: 2px;
+}
+
+/* The table's own bottom margin provides the separation, so the final row does
+ * not need a rule under it as well. */
+tbody tr:last-child {
+  border-bottom: 0;
+}
+
+thead th {
+  background-color: var(--color-surface);
+  color: var(--color-heading);
+  font-weight: 600;
+  /* A path column heading should never be the thing that wraps. */
+  white-space: nowrap;
+}
+
+tbody tr:hover {
+  background-color: var(--color-surface);
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 11. Code and preformatted text
+ *
+ * Every artifact path on this surface is rendered as code, and those paths are
+ * long single tokens with no spaces to break at. Overflow handling here is a
+ * functional requirement, not a refinement.
+ * -------------------------------------------------------------------------- */
+
+code,
+kbd,
+samp,
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+
+code {
+  padding: 0.15em 0.35em;
+  border: var(--border-thin) solid var(--color-border);
+  border-radius: var(--radius);
+  background-color: var(--color-surface);
+  /* Breaking at any point is the only reliable way to keep a token such as
+   * me.jvt.cucumber.report.PrettyReports, and the output path that follows it,
+   * inside the viewport. */
+  overflow-wrap: break-word;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+pre {
+  max-width: 100%;
+  margin: 0 0 var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border: var(--border-thin) solid var(--color-border);
+  border-radius: var(--radius);
+  background-color: var(--color-surface);
+  /* A preformatted block scrolls within its own box instead of stretching the
+   * page, which keeps multi-line report output from breaking the layout. */
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* Inside a block, pre owns the border, the background and the wrapping
+ * decision, so the nested code element steps out of the way entirely. */
+pre code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background-color: transparent;
+  font-size: 1em;
+  overflow-wrap: normal;
+  word-break: normal;
+  white-space: inherit;
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 12. Artifact availability
+ *
+ * Screen shots are produced only when they are enabled, and error shots only
+ * appear once a test case has failed, so the report index legitimately lists
+ * artifacts that are present alongside artifacts that are not. That difference
+ * is carried entirely by type weight, colour and spacing. It is never carried
+ * by an icon, an image or a web font, because this sheet references no asset
+ * at all.
+ *
+ * The semantic form is styled first, so a template needs no class to read
+ * correctly: within a table cell, emphasis marks an artifact that is present
+ * and de-emphasis marks one that is not yet generated.
+ * -------------------------------------------------------------------------- */
+
+td strong {
+  color: var(--color-available);
+}
+
+td em {
+  color: var(--color-text-muted);
+  font-weight: 400;
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 13. Optional helper classes
+ *
+ * Conveniences, not a taxonomy. Deliberately tiny, because the templates this
+ * sheet serves are authored separately and their class names cannot be known
+ * from here: inventing a vocabulary they will not use would be dead weight.
+ * Every rule in sections 1 to 12 stands on its own, so a page that uses none
+ * of the three classes below still renders correctly and legibly - stripping
+ * every class attribute from a rendered page is one of this file's checks.
+ * -------------------------------------------------------------------------- */
+
+.available {
+  color: var(--color-available);
+  font-weight: 600;
+}
+
+.unavailable {
+  color: var(--color-text-muted);
+  font-style: italic;
+}
+
+.muted {
+  color: var(--color-text-muted);
+}
+
+
+/* -----------------------------------------------------------------------------
+ * 14. Error pages
+ *
+ * The rendered error pages need no rules of their own: each one extends the
+ * shared layout and is a heading, a short explanatory paragraph and a link
+ * back, all of which sections 5 to 8 already style. The summary-line rule in
+ * section 7 gives the explanatory paragraph its treatment.
+ *
+ * There is deliberately no selector keyed to a status code. Only two error
+ * templates exist - 404 and 500 - and a 405 has no template of its own, so a
+ * status-keyed rule would either sit permanently unused or quietly assume a
+ * page that is not there. Styling them generically is what keeps this sheet
+ * correct for whichever error the application-level handlers render.
+ * -------------------------------------------------------------------------- */
+
+
+/* -----------------------------------------------------------------------------
+ * 15. Narrow viewports
+ *
+ * One plain media query. No framework grid and no breakpoint system: the
+ * layout is a single column at every width, so all that is needed is to
+ * reclaim horizontal space and pull the type scale in a little.
+ * -------------------------------------------------------------------------- */
+
+@media (max-width: 40rem) {
+  body {
+    padding: var(--space-lg) var(--space-sm) var(--space-xl);
+    font-size: 0.9375rem;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+  }
+
+  h2 {
+    font-size: 1.25rem;
+  }
+
+  h3 {
+    font-size: 1.0625rem;
+  }
+
+  table {
+    font-size: 0.875rem;
+  }
+
+  th,
+  td {
+    padding: var(--space-2xs) var(--space-xs);
+  }
+
+  /* On the narrowest screens a long path column heading may wrap after all -
+   * better that than a table the reader has to scroll sideways. */
+  thead th {
+    white-space: normal;
+  }
+
+  pre {
+    padding: var(--space-xs) var(--space-sm);
+  }
+}
