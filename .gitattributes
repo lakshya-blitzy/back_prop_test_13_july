@@ -1,1 +1,10 @@
 *.html linguist-detectable=false
+
+# Line-ending pins. Required so that tests/features/login.feature stays
+# BYTE-IDENTICAL to the Gherkin block documented in README.md on every platform:
+# without an explicit eol pin, end-of-line normalisation could silently alter
+# the file's bytes and break byte-parity.
+*.feature text eol=lf
+*.py      text eol=lf
+*.sh      text eol=lf
+*.bat     text eol=crlf

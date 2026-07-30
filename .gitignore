@@ -22,3 +22,65 @@ configuration.properties
 
 # virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
 hs_err_pid*
+
+# =============================================================================
+# Python 3 / Flask port (the JVM block above is retained as historical record;
+# `configuration.properties` and `*.log` remain ignored exactly as before)
+# =============================================================================
+
+# Byte-compiled / optimized / cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# Coverage artifacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Packaging / build output
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Ephemeral report artifacts, wiped by `make clean` (parity with `mvn clean`):
+# cucumber.json, cucumber-reports.html, rerun.txt, cucumber/, screenshots/,
+# error-shots/, surefire-reports/
+target/
+
+# Local runtime configuration (the committed templates are .env.example and
+# configuration.properties.example)
+.env
+.env.*
+!.env.example
+
+# Log output directory (*.log itself is already ignored above)
+logs/
+
+# Agent / CI scratch space for screenshots and screen recordings
+blitzy/
+
+# OS and IDE noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
