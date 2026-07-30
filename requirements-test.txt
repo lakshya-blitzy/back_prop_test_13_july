@@ -1,94 +1,310 @@
 # =============================================================================
-# testinium-qa - BDD / test HARNESS dependencies
-# -----------------------------------------------------------------------------
-# One-to-one port of the eight <dependency> declarations and the Surefire
-# plugin declared in pom.xml (REFERENCE, never compiled):
+# testinium-qa -- BDD / test HARNESS dependencies (exact pins)
+# =============================================================================
+# Project : testinium-qa, the Python 3 / Flask rewrite of the Java and Maven
+#           Selenium-Cucumber QA skeleton declared as
+#           org.example:testinium-qa:1.0-SNAPSHOT [pom.xml:L7-L9].
+# Purpose : the Python counterpart of the eight dependency declarations
+#           [pom.xml:L36-L80] and of the Surefire plugin [pom.xml:L17-L30].
+# Source  : pom.xml -- REFERENCE ONLY. It is the read-only parity contract for
+#           this migration: never compiled, never edited, read statically only.
+# Runtime : CPython 3.14.6 (see .python-version and the requires-python value
+#           in pyproject.toml), the Python analogue of the Java language level
+#           maven.compiler.source / maven.compiler.target = 8 [pom.xml:L12-L13].
 #
-#   io.cucumber:cucumber-java:7.2.3              -> pytest-bdd
-#   io.cucumber:cucumber-junit:7.2.3 (test)      -> pytest-bdd + pytest
-#   io.cucumber:cucumber-junit:7.3.4 (duplicate) -> collapses into the single
-#                                                   pinned pytest-bdd (the one
-#                                                   forced correction: a Python
-#                                                   requirements file cannot
-#                                                   express two versions of one
-#                                                   distribution; Maven already
-#                                                   resolved to the last
-#                                                   declaration alone)
-#   junit:junit:4.13.2                           -> pytest
-#   me.jvt.cucumber:reporting-plugin:7.2.0       -> pytest-bdd native Cucumber
-#                                                   JSON writer + pytest-html
-#   org.seleniumhq.selenium:selenium-java:3.141.59 -> selenium (4.x uplift)
-#   io.github.bonigarcia:webdrivermanager:5.1.0  -> webdriver-manager
-#   com.github.javafaker:javafaker:1.0.2         -> Faker
-#   maven-surefire-plugin:3.0.0-M5
-#     parallel=methods + useUnlimitedThreads=true -> pytest-xdist
+# FILENAME -- this file is `requirements-test.txt`. The target file tree, the
+#   file-by-file transformation table and pyproject.toml all use that exact
+#   name. Two validation lines elsewhere in the plan say `requirements-dev.txt`;
+#   that is an internal inconsistency, and the target-tree name wins. There is
+#   deliberately no `requirements-dev.txt`, no alias and no symlink.
 #
-# This file is intentionally SELF-CONTAINED (no `-r requirements.txt` include):
-# every line is an exact `==` pin. Install both files together:
-#     pip install -r requirements.txt -r requirements-test.txt
+# PIN CONTRACT -- every distribution below is declared with an exact `==` pin.
+#   No version ranges, no floating or unpinned versions, no placeholder
+#   versions and no environment markers. Deterministic resolution is a hard
+#   requirement of a behavioural-parity port: a loose specifier here would let
+#   a future install silently change behaviour, which is precisely what this
+#   migration must not permit.
+#
+# INSTALL -- this manifest includes the runtime manifest, so both of the
+#   following are complete, and they are equivalent:
+#       pip install -r requirements-test.txt
+#       pip install -r requirements.txt -r requirements-test.txt   (Makefile)
 # =============================================================================
 
-# --- Test engine (replaces junit:junit:4.13.2) -------------------------------
+# -----------------------------------------------------------------------------
+# The Flask RUNTIME stack (11 exact pins) is declared in requirements.txt and
+# included here so that a harness environment is always a superset of a runtime
+# environment: the integration suites import the application factory and drive
+# it through the Flask test client, so the runtime stack must be present.
+#
+# Those 11 distributions are declared THERE and are deliberately NOT
+# re-declared here. Every distribution in this project is declared exactly
+# once, in exactly one manifest: 11 runtime plus 9 harness, which is 20
+# directly declared distributions in total.
+# -----------------------------------------------------------------------------
+-r requirements.txt
+
+
+# =============================================================================
+# PARITY MAPPING -- the nine source coordinates that this file answers
+# -----------------------------------------------------------------------------
+# Recorded here so the correspondence is auditable by inspection alone, and so
+# that docs/migration-parity.md and tests/parity/test_dependency_parity.py have
+# one readable reference. Each Maven coordinate is quoted exactly as declared,
+# together with the pom.xml lines it occupies.
+#
+#   org.seleniumhq.selenium:selenium-java            3.141.59  [pom.xml:L36-L40]
+#       Python counterpart: selenium==4.46.0
+#   io.github.bonigarcia:webdrivermanager            5.1.0     [pom.xml:L42-L46]
+#       Python counterpart: webdriver-manager==4.1.2
+#   com.github.javafaker:javafaker                   1.0.2     [pom.xml:L48-L52]
+#       Python counterpart: Faker==40.36.0
+#   io.cucumber:cucumber-java                        7.2.3     [pom.xml:L54-L58]
+#       Python counterpart: pytest-bdd==8.1.0
+#   io.cucumber:cucumber-junit  (scope test)         7.2.3     [pom.xml:L60-L65]
+#       Python counterpart: pytest-bdd==8.1.0 plus pytest==9.1.1
+#   me.jvt.cucumber:reporting-plugin                 7.2.0     [pom.xml:L66-L70]
+#       Python counterpart: pytest-bdd's native Cucumber JSON writer plus
+#       pytest-html==4.2.0
+#   junit:junit                                      4.13.2    [pom.xml:L71-L75]
+#       Python counterpart: pytest==9.1.1
+#   io.cucumber:cucumber-junit  (no scope)           7.3.4     [pom.xml:L76-L80]
+#       Python counterpart: collapses into the single pinned pytest-bdd==8.1.0
+#       (see DEFECT D6 / AMB-8 below)
+#   org.apache.maven.plugins:maven-surefire-plugin   3.0.0-M5  [pom.xml:L17-L30]
+#       Python counterpart: pytest==9.1.1 plus pytest-xdist==3.8.0 plus
+#       pytest.ini
+#
+# Note that pytest-bdd==8.1.0 alone answers THREE Java coordinates
+# (cucumber-java 7.2.3, cucumber-junit 7.2.3 and cucumber-junit 7.3.4) and,
+# through its native Cucumber JSON writer, substantially answers a fourth
+# (me.jvt.cucumber:reporting-plugin 7.2.0). That is why the duplicate
+# declaration recorded as defect D6 collapses in this file and nowhere else.
+# =============================================================================
+
+
+# --- Test engine -------------------------------------------------------------
+# Replaces junit:junit:4.13.2 [pom.xml:L71-L75]. JUnit 4's Assert.assertEquals
+# becomes a bare `assert` statement, rewritten by pytest's assertion rewriting.
 pytest==9.1.1
 
-# --- Gherkin/BDD engine (replaces Cucumber-JVM 7.x) --------------------------
-# Also supplies the native Cucumber JSON writer used for report parity, so the
-# third-party me.jvt.cucumber reporting-plugin needs no Python counterpart.
+# --- Gherkin / BDD engine ----------------------------------------------------
+# Replaces Cucumber-JVM: io.cucumber:cucumber-java:7.2.3 [pom.xml:L54-L58] and
+# both io.cucumber:cucumber-junit declarations [pom.xml:L60-L65, L76-L80].
+# The documented runner's RunWith(Cucumber.class) and CucumberOptions become a
+# `scenarios()` call in tests/step_defs/test_cukes_runner.py plus the settings
+# in pytest.ini. Gherkin tags become pytest marks with the leading marker
+# character stripped, which is what preserves Jira traceability without
+# introducing any Jira client.
+# This distribution also supplies the native Cucumber JSON writer; see the
+# reporting note further below.
 pytest-bdd==8.1.0
 
-# --- Parallel execution (replaces Surefire parallel=methods/unlimited threads)-
+# --- Parallel execution ------------------------------------------------------
+# Replaces the Surefire execution semantics [pom.xml:L17-L30]:
+#   parallel = methods                  [pom.xml:L22]
+#   useUnlimitedThreads = true          [pom.xml:L23]   becomes `-n logical`
+# The commented-out threadCount value 4 [pom.xml:L24] is preserved as a
+# disabled tuning default (a commented `-n 4`) in pytest.ini, never enabled,
+# exactly as it is commented out in the POM.
 pytest-xdist==3.8.0
 
-# --- HTML report (replaces the html:target/cucumber-reports.html plugin) ------
+# --- HTML report -------------------------------------------------------------
+# Replaces the Cucumber plugin `html:target/cucumber-reports.html`. Combined
+# with `--self-contained-html` so the artifact stays a single portable file
+# that the CI publisher and a browser can both consume.
 pytest-html==4.2.0
+
+# --- HTML report metadata ----------------------------------------------------
+# Required by pytest-html. Declared explicitly rather than left implicit so its
+# resolved version is pinned and reproducible like every other distribution the
+# report artifacts depend on.
 pytest-metadata==3.1.1
 
-# --- Browser automation (replaces selenium-java 3.141.59) --------------------
+# --- Browser automation ------------------------------------------------------
+# Replaces org.seleniumhq.selenium:selenium-java:3.141.59 [pom.xml:L36-L40].
+#
+# RISK R2 -- this is a MAJOR-VERSION UPLIFT, not a like-for-like swap.
+# Selenium 3 to Selenium 4 changed the API surface materially, and no Python
+# binding equivalent to the Selenium 3 Java API is in current support. This is
+# a deliberate and documented consequence of the migration rather than an
+# oversight. Mitigation: every browser interaction is confined to
+# tests/pages/* and tests/support/driver_factory.py, so the surface exposed to
+# the API difference stays small and isolated.
 selenium==4.46.0
 
-# --- Driver provisioning (replaces io.github.bonigarcia:webdrivermanager) -----
-# Selenium 4's built-in Selenium Manager is the zero-dependency alternative and
-# is used automatically when no explicit driver path is supplied.
+# --- Driver provisioning -----------------------------------------------------
+# Replaces io.github.bonigarcia:webdrivermanager:5.1.0 [pom.xml:L42-L46].
+# Retained so the POM entry keeps a one-to-one Python counterpart, even though
+# Selenium 4 ships Selenium Manager -- the modern zero-dependency alternative,
+# which resolves and provisions drivers automatically when no explicit driver
+# path is supplied. Both paths are wired in tests/support/driver_factory.py.
 webdriver-manager==4.1.2
 
-# --- Synthetic test data (replaces com.github.javafaker:javafaker) ------------
+# --- Synthetic test data -----------------------------------------------------
+# Replaces com.github.javafaker:javafaker:1.0.2 [pom.xml:L48-L52].
+# Declared and wired through tests/support/data_factory.py but DELIBERATELY
+# LEFT UNEXERCISED, matching the source status of the synthetic-test-data
+# feature: the dependency was declared but no code ever exercised it. The
+# Gherkin Examples tables supply static data, so generating data instead would
+# ADD behaviour the source never had, which a strict parity port must not do.
+# Casing note: the distribution name is `Faker` with a capital F; the import is
+# `from faker import Faker`. The casing here is significant because
+# tests/parity/test_dependency_parity.py reads these lines.
 Faker==40.36.0
 
-# --- HTTP client used by the integration suites against the running service ---
+# --- HTTP client -------------------------------------------------------------
+# No POM counterpart. Used by the integration suites to exercise the Flask
+# pipeline and report endpoints of the running service over real HTTP.
 requests==2.34.2
 
-# -----------------------------------------------------------------------------
-# Transitive dependencies of record. Pinned deliberately because their behaviour
-# is load-bearing for behavioural parity, not merely incidental.
-# -----------------------------------------------------------------------------
-# The actual Gherkin parser: it determines how the byte-exact feature file is
-# interpreted, and therefore how the preserved defects manifest.
-gherkin-official==29.0.0
-parse==1.22.1
-parse_type==0.6.6
 
-# pytest / xdist substrate
-execnet==2.1.2
-pluggy==1.6.0
-iniconfig==2.3.0
-packaging==26.2
-
-# Selenium 4 transport layer
-trio==0.33.0
-trio-websocket==0.12.2
-websocket-client==1.9.0
-
-# Shared HTTP and typing substrate
-urllib3==2.7.0
-certifi==2026.7.22
-attrs==26.1.0
-typing_extensions==4.16.0
-
+# =============================================================================
+# DEFECT D6 / AMB-8 - FORCED CORRECTION (the ONLY one in this migration)
 # -----------------------------------------------------------------------------
-# Technical requirement of the ported parallelism setting.
-# pytest-xdist resolves `-n logical` (the port of Surefire
-# useUnlimitedThreads=true) through psutil.cpu_count(logical=True); without
-# psutil installed, xdist aborts the run with
-# "-n logical requires psutil (see xdist docs)".
+# pom.xml declares io.cucumber:cucumber-junit TWICE, at two different versions:
+#
+#     io.cucumber:cucumber-junit  7.2.3  scope test   [pom.xml:L60-L65]
+#     io.cucumber:cucumber-junit  7.3.4  no scope     [pom.xml:L76-L80]
+#
+# A Python requirements file CANNOT express two versions of one distribution.
+# Two exact pins for the same distribution name are a hard resolution conflict,
+# not a last-one-wins override the way a POM treats them, so the duplicate
+# simply cannot be carried across in any form.
+#
+# Why collapsing it is nevertheless EXACT rather than lossy: Maven had already
+# resolved this to the last declaration alone, version 7.3.4. The redundant
+# earlier declaration never affected the build's behaviour, only its text.
+# Pinning one Python distribution therefore reproduces the RESOLVED behaviour
+# precisely; the only thing that disappears is the redundant declaration
+# itself. Both declarations are answered by the single pinned pytest-bdd==8.1.0
+# above.
+#
+# This is the ONE defect in the entire migration that is CORRECTED rather than
+# preserved, and it is corrected only because the file format makes preserving
+# it impossible. Every other catalogued defect is PRESERVED as the default and
+# is merely made overridable through configuration: the tag expression that
+# selects zero scenarios, the never-failing non-gating build, the Examples
+# tables that bind to only the third Scenario Outline, the password value fed
+# into the username field, the English comment sitting beside the French
+# assertion, the two contradictory clone URLs, the non-discoverable CI
+# filename, and the duplicate scenario name that silently destroys one
+# scenario's coverage. None of those is fixed here.
+#
+# Recorded in full, together with the preservation status of every other
+# defect, in docs/migration-parity.md.
+# =============================================================================
+
+
+# =============================================================================
+# WHY NO PYTHON REPORTING PLUGIN IS NEEDED
 # -----------------------------------------------------------------------------
-psutil==7.2.2
+# me.jvt.cucumber:reporting-plugin:7.2.0 [pom.xml:L66-L70] needs no direct
+# Python analogue. pytest-bdd 8.1.0 ships a NATIVE Cucumber JSON writer,
+# exposed as `--cucumberjson`, verified to emit the same schema the Jenkins
+# cucumber publisher consumes: tag values without the leading marker character,
+# and the feature, scenario and step key sets the publisher expects. That
+# single fact is what makes report parity achievable without writing a report
+# serializer from scratch.
+#
+# The four report artifacts are therefore produced as follows:
+#   cucumber.json          pytest-bdd's native `--cucumberjson` writer
+#   cucumber-reports.html  pytest-html with `--self-contained-html`
+#   rerun.txt              derived deterministically from the JSON report
+#   cucumber/ directory    derived deterministically from the JSON report
+#
+# Deriving the last two from the JSON is more faithful than a terminal
+# reporter would be, because the Java plugin likewise rendered its report
+# directory from the JSON rather than writing terminal output.
+# =============================================================================
+
+
+# =============================================================================
+# TRANSITIVE DEPENDENCIES OF RECORD
+# -----------------------------------------------------------------------------
+# Installed AUTOMATICALLY by the nine pins above. Documented here, and
+# deliberately NOT pinned, because their behaviour is load-bearing for parity
+# rather than merely incidental.
+#
+# They are recorded as comments on purpose. Pinning them would push the number
+# of directly declared distributions past the intended 20 (11 runtime plus 9
+# harness) and would over-constrain resolution, turning a future compatible
+# transitive upgrade into an install failure. The versions noted are the ones
+# this stack resolves to on CPython 3.14.6.
+#
+#   gherkin-official   29.0.0   The actual Gherkin parser, and the single most
+#                               behaviourally load-bearing package in the whole
+#                               stack. It determines how the byte-exact feature
+#                               file is interpreted and therefore how the
+#                               preserved defects manifest: its grammar is what
+#                               makes the duplicate scenario name collapse, so
+#                               that one scenario silently vanishes from
+#                               collection, and what binds both Examples tables
+#                               to only the third Scenario Outline. Documented
+#                               rather than left invisible for exactly that
+#                               reason.
+#                               It also emits one benign DeprecationWarning
+#                               about a positionally-passed argument on CPython
+#                               3.14. pytest.ini names that warning EXPLICITLY
+#                               in its filterwarnings list instead of
+#                               suppressing warnings broadly, so a NEW warning
+#                               (an unregistered marker, for instance) still
+#                               surfaces rather than hiding behind a blanket
+#                               filter.
+#   parse              1.22.1   Backs pytest-bdd's step-argument parsing.
+#   parse_type         0.6.6    Type extension for the above.
+#   execnet            2.1.2    The worker transport pytest-xdist uses for the
+#                               `-n logical` parallelism that ports Surefire's
+#                               parallel = methods setting [pom.xml:L22].
+#   pluggy             1.6.0    The pytest plugin system.
+#   iniconfig          2.3.0    Parses pytest.ini, the single authoritative
+#                               source of test configuration.
+#   packaging          26.2     Version handling across the test stack.
+#   trio               0.33.0   Selenium 4 transport layer.
+#   trio-websocket     0.12.2   Selenium 4 transport layer.
+#   websocket-client   1.9.0    Selenium 4 transport layer.
+#   urllib3            2.7.0    Shared HTTP substrate.
+#   certifi            2026.7.22 Shared HTTP substrate, the CA bundle.
+#   attrs              26.1.0   Shared substrate.
+#   typing_extensions  4.16.0   Shared typing substrate.
+# =============================================================================
+
+
+# =============================================================================
+# DELIBERATELY NOT DECLARED HERE
+# -----------------------------------------------------------------------------
+# psutil        NOT required, and intentionally absent. pytest-xdist declares
+#               psutil only as an OPTIONAL extra, never as a hard dependency,
+#               so `pip check` is clean without it. The `-n logical` option
+#               degrades gracefully in pytest-xdist 3.8.0: it guards its
+#               `import psutil` with an ImportError handler and falls back to
+#               affinity-based CPU detection, which its own `-n` help text
+#               documents as "requires psutil, falls back to 'auto'". Verified
+#               empirically on this stack -- with psutil uninstalled,
+#               `-n logical` still brings up its workers and the run passes.
+#               Older pytest-xdist releases did abort in that situation; 3.8.0
+#               does not. Do not re-add it as a tenth pin.
+#
+# Runtime stack Flask, Werkzeug, Jinja2, MarkupSafe, itsdangerous, click,
+#               blinker, gunicorn, python-dotenv, flask-cors and pydantic are
+#               declared in requirements.txt and reached through the
+#               `-r requirements.txt` include above. Never re-declare them
+#               here: each distribution is declared in exactly one manifest.
+#
+# Quality tools ruff, black, mypy and pytest-cov belong to the optional
+#               dependency group in pyproject.toml, not to this manifest.
+#
+# Gherkin terminal reporter
+#               Not a separate distribution, and never enabled by default. It
+#               is mutually exclusive with xdist: pytest-bdd raises an
+#               exception during configuration and aborts the run when both are
+#               active. The serial `make test-pretty` target is the escape
+#               hatch, and pytest.ini's default option set omits the flag.
+#
+# Also excluded: any second BDD engine (behave, radish, pytest-splinter), any
+# second HTTP client, any second synthetic-data library, any cucumber-* or
+# other Java artifact, any Node.js package, and any tooling related to .java
+# sources. No Java toolchain is required to install this manifest or to run
+# this project's verification.
+# =============================================================================
+

@@ -1,38 +1,70 @@
 # =============================================================================
-# pyproject.toml - PEP 621 project metadata + lint/format/type-check settings.
+# pyproject.toml - PEP 621 project metadata plus the lint / format / type-check
+# configuration for the Python 3 + Flask port of this repository.
 #
-# Ports the Maven project coordinates declared in pom.xml (REFERENCE):
-#     <groupId>org.example</groupId>
-#     <artifactId>testinium-qa</artifactId>       -> name    = "testinium-qa"
-#     <version>1.0-SNAPSHOT</version>             -> version = "1.0.0.dev0"
-#                                                    (PEP 440 rendering of a
-#                                                     Maven SNAPSHOT)
-#     <maven.compiler.source>8</maven.compiler.source>
-#     <maven.compiler.target>8</maven.compiler.target>
-#                                                 -> requires-python = ">=3.14"
-#                                                    (+ .python-version = 3.14.6)
+# -----------------------------------------------------------------------------
+# COORDINATE MAPPING
+# Source of truth: pom.xml, which is REFERENCE-only - never compiled, never
+# edited. Every value below is carried over verbatim from it, with its line
+# citation, so the mapping stays auditable by inspection.
+# -----------------------------------------------------------------------------
+#   <groupId>org.example</groupId>                          [pom.xml:L7]
+#       A Maven group id has no PEP 621 counterpart (Python distributions are
+#       named by a single flat name). Recorded here so the coordinate mapping
+#       is not lost.
+#   <artifactId>testinium-qa</artifactId>                   [pom.xml:L8]
+#       -> name = "testinium-qa"        (verbatim: lowercase, hyphenated)
+#   <version>1.0-SNAPSHOT</version>                         [pom.xml:L9]
+#       -> version = "1.0.0.dev0"       (the PEP 440 rendering of a Maven
+#                                        SNAPSHOT; "1.0.0" would silently
+#                                        discard the not-yet-released
+#                                        semantics, and "1.0-SNAPSHOT" is not
+#                                        a valid PEP 440 version at all)
+#   <maven.compiler.source>8</maven.compiler.source>        [pom.xml:L12]
+#   <maven.compiler.target>8</maven.compiler.target>        [pom.xml:L13]
+#       -> requires-python = ">=3.14"   (the language-level pin; the exact
+#                                        interpreter is pinned alongside it in
+#                                        .python-version -> 3.14.6)
 #
-# IMPORTANT: this file deliberately contains NO [tool.pytest.ini_options] table.
-# pytest.ini is the single source of test configuration and must never be
-# silently superseded from here.
-#
-# Runtime and harness dependencies are pinned in requirements.txt and
-# requirements-test.txt (exact `==` pins). Only the optional quality-tooling
-# group is declared here.
+# -----------------------------------------------------------------------------
+# WHAT THIS FILE DELIBERATELY DOES **NOT** CONTAIN
+# -----------------------------------------------------------------------------
+#   1. NO [tool.pytest.ini_options] - and no [tool.pytest] table of any shape.
+#      pytest.ini is the single source of test configuration: it is the
+#      one-to-one port of the documented @CucumberOptions block and of the
+#      Maven Surefire configuration, and it carries the preserved default tag
+#      expression (-m "LogOut"), the registered Gherkin markers and the
+#      explicit warning filters. pytest resolves its configuration by
+#      precedence, so a pytest table here could shadow or partially supersede
+#      pytest.ini. None exists, and none may be added.
+#   2. NO [project] dependencies table. Runtime pins live in requirements.txt
+#      and harness pins in requirements-test.txt, each declared with an exact
+#      `==` pin. One source of truth per dependency set; duplicating them here
+#      would invite drift between the two.
+#   3. NO author, e-mail, licence or project-URL metadata. The source
+#      repository supplies none of those values, and nothing is invented here.
+#      (The two contradictory clone URLs the source project carries are runtime
+#      configuration, not packaging metadata: they live in app/config.py,
+#      .env.example and configuration.properties.example.)
 # =============================================================================
 
 [build-system]
-requires = ["setuptools==83.0.0", "wheel==0.47.0"]
+# The build backend is resolved in an isolated environment that pip creates
+# from scratch, so these two requirements are floor-pinned rather than
+# `==`-pinned - an exact pin here can make the isolated build unsatisfiable
+# without adding any determinism. The versions this project actually installs
+# are setuptools 83.0.0 and wheel 0.47.0; both are `==`-pinned where they are
+# installed (the Makefile `venv` target and the Dockerfile).
+requires = ["setuptools>=83.0.0", "wheel>=0.47.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "testinium-qa"
 version = "1.0.0.dev0"
-description = "Testinium-QA - Python 3 / Flask port of the Selenium-Cucumber BDD automation project"
+description = "Python 3 / Flask port of the Testinium-QA Selenium and Cucumber BDD test-automation project"
 readme = "README.md"
 requires-python = ">=3.14"
-license = "MIT"
-keywords = ["flask", "pytest-bdd", "selenium", "cucumber", "bdd", "qa-automation"]
+keywords = ["flask", "pytest-bdd", "selenium", "cucumber", "bdd", "test-automation"]
 classifiers = [
     "Framework :: Flask",
     "Framework :: Pytest",
@@ -41,8 +73,9 @@ classifiers = [
     "Topic :: Software Development :: Testing :: BDD",
 ]
 
-# The four quality tools. Install with:  pip install -e ".[dev]"
-# (or directly:  pip install ruff==0.16.0 black==26.5.1 mypy==2.3.0 pytest-cov==7.1.0)
+# The four quality tools, exact-pinned exactly like every other distribution
+# this project declares. Install them with:  pip install -e ".[dev]"
+# (the Makefile `install-dev` target installs the same four pins directly).
 [project.optional-dependencies]
 dev = [
     "ruff==0.16.0",
@@ -51,110 +84,206 @@ dev = [
     "pytest-cov==7.1.0",
 ]
 
-[project.urls]
-# Clone target used by the CI pipeline (Jenkins stage 'Clone code').
-Pipeline = "https://github.com/BalamiRR/Upgenix-QA.git"
-# Clone target documented in the README "Framework set up" section. The two URLs
-# disagree in the source project; both values are retained deliberately.
-Documentation = "https://github.com/BalamiRR/Testinium-QA.git"
-
-# Only the Flask application package is distributable; the BDD harness, scripts
-# and docs trees are not packaged.
+# =============================================================================
+# setuptools - packaging discovery
+# =============================================================================
+# Only the Flask application package is distributable. The BDD harness under
+# tests/ is a development asset: tests/ may import app/, but nothing under
+# app/ may import tests/, and excluding tests/ from the distribution keeps that
+# one-way dependency honest. The ported command scripts and the documentation
+# tree are likewise excluded, as is the ephemeral target/ artifact root.
 [tool.setuptools.packages.find]
+where = ["."]
 include = ["app*"]
 exclude = ["tests*", "scripts*", "docs*", "target*"]
 
-# -----------------------------------------------------------------------------
-# ruff - lint + import ordering (PEP 8 enforcement)
-# -----------------------------------------------------------------------------
+# The minimal report surface - the Jinja2 templates and the single hand-written
+# stylesheet - must travel with the package, or the web blueprint cannot render
+# the report index. Patterns are relative to the app/ package directory.
+[tool.setuptools.package-data]
+app = [
+    "templates/*.html",
+    "templates/**/*.html",
+    "static/css/*.css",
+    "static/**/*.css",
+]
+
+# =============================================================================
+# ruff - linter (PEP 8 layout enforcement) and, optionally, formatter
+# =============================================================================
 [tool.ruff]
 line-length = 100
 target-version = "py314"
+
+# First-party source roots, used to classify imports as first- or third-party.
 src = ["app", "tests", "scripts"]
-extend-exclude = [".venv", "target", "build", "dist"]
+
+# CRITICAL - the byte-parity guard.
+# tests/features/login.feature must stay byte-identical to the Gherkin block
+# documented in README.md (1864 bytes, 45 lines), and that block contains three
+# whitespace-only lines that any trailing-whitespace fixer would silently
+# delete. Ruff only ever processes Python files and no include/extend-include
+# glob widens that surface anywhere in this file, so the directory can never be
+# reached; it is excluded explicitly all the same, as a second line of defence.
+# target/ is the ephemeral artifact root (the retained Maven directory name) and
+# holds only generated output, so it is never linted either.
+#
+# `extend-exclude` ADDS to ruff's built-in exclusions rather than replacing
+# them, so .git/, .mypy_cache/, .pytest_cache/, __pycache__/ and friends stay
+# excluded as well. `force-exclude` makes the list apply even when a path is
+# passed on the command line (as a pre-commit or pre-push hook would).
+extend-exclude = [
+    "tests/features",
+    "target",
+    ".venv",
+    "build",
+    "dist",
+]
+force-exclude = true
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle errors
-    "W",   # pycodestyle warnings
-    "F",   # pyflakes
-    "I",   # isort (import ordering)
-    "B",   # flake8-bugbear
-    "C4",  # flake8-comprehensions
-    "UP",  # pyupgrade
-    "SIM", # flake8-simplify
-    "PL",  # pylint subset
-    "RUF", # ruff-specific rules
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # Pyflakes
+    "I",  # isort - import ordering (ruff is the ONLY import sorter configured)
+    "UP", # pyupgrade
+    "B",  # flake8-bugbear
+    "C4", # flake8-comprehensions
 ]
 ignore = [
-    "PLR0913", # too many arguments - service/report adapters legitimately take many
-    "PLR2004", # magic value comparison - parity constants are compared literally
+    # Column width is owned by the formatter, not the linter: `make lint` runs
+    # `black --check` at the very same 100 columns, while no formatter can split
+    # a long URL, string literal or citation comment - which is why ruff's own
+    # default rule selection omits E501 too. This is the only rule disabled
+    # here, and no rule family is disabled.
+    "E501", # line-too-long
 ]
 
+# Narrow, per-file escapes. Each one exists because the architecture requires
+# it, and each is limited to the specific rules involved.
 [tool.ruff.lint.per-file-ignores]
-# Step definitions and page objects intentionally use assert and long literals.
-"tests/**/*.py" = ["B011", "PLR0915", "E501"]
-# The BDD runner module exists only to call scenarios(); star-style re-exports
-# and unused imports of step modules are how pytest-bdd discovers steps.
-"tests/step_defs/test_cukes_runner.py" = ["F401", "F403"]
+# Package __init__ modules deliberately re-export what their package publishes
+# (the application factory, the two blueprint objects, the service entry
+# points), which Pyflakes reads as an unused import. Resolves to app/__init__.py
+# plus app/{api,web,services,reporting,utils}/__init__.py and the tests/
+# package initialisers.
+"app/__init__.py" = ["F401"]
+"app/*/__init__.py" = ["F401"]
+"tests/__init__.py" = ["F401"]
+"tests/*/__init__.py" = ["F401"]
+# The ported Cucumber runner replaces Cucumber's `glue` option with ordinary
+# Python imports: importing the step-definition module is exactly what registers
+# the steps with pytest-bdd, so that import is intentionally never referenced.
+"tests/step_defs/test_cukes_runner.py" = ["F401", "F403", "F405"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app", "tests"]
 
+# Kept byte-compatible with black so `ruff format` and `black` can never
+# disagree. Note that the verification gate never rewrites source: `make lint`
+# runs `ruff check --no-fix` and `black --check`; only the separate `make
+# format` target applies changes.
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
+line-ending = "lf"
 
-# -----------------------------------------------------------------------------
-# black - formatter (checked in --check mode by `make lint`, never auto-applied
-# by the verification gate)
-# -----------------------------------------------------------------------------
+# =============================================================================
+# black - formatter (invoked in check-only mode by the verification gate)
+# =============================================================================
 [tool.black]
 line-length = 100
 target-version = ["py314"]
+
+# The same byte-parity guard as ruff: never walk into tests/features/. black
+# formats only .py and .pyi files, so this is belt-and-braces; target/, .venv/,
+# build/ and dist/ are excluded because they hold generated or vendored output.
+# `extend-exclude` adds to black's defaults; `force-exclude` additionally
+# applies when paths are passed explicitly, e.g. by a hook.
 extend-exclude = '''
 /(
-    \.venv
+    tests/features
   | target
+  | \.venv
   | build
   | dist
 )/
 '''
+force-exclude = '''
+/(
+    tests/features
+  | target
+)/
+'''
 
-# -----------------------------------------------------------------------------
-# mypy - static type checking (PEP 484 hints throughout the application)
-# -----------------------------------------------------------------------------
+# =============================================================================
+# mypy - static type checking (PEP 484 hints throughout app/ and tests/)
+# =============================================================================
 [tool.mypy]
 python_version = "3.14"
-files = ["app", "tests", "scripts"]
-exclude = "(^|/)(\\.venv|target|build|dist)/"
-explicit_package_bases = true
-namespace_packages = true
-warn_unused_configs = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-no_implicit_optional = true
-check_untyped_defs = true
-ignore_missing_imports = true
-show_error_codes = true
-pretty = true
 
-[[tool.mypy.overrides]]
-# Application code carries full annotations.
-module = ["app.*"]
+# Everything the application and the harness own, including the root
+# entrypoints. `make typecheck` passes the subset of these paths that exists as
+# explicit arguments, which takes precedence over this list.
+files = ["app", "tests", "scripts", "run.py", "wsgi.py", "gunicorn.conf.py"]
+exclude = "(^|/)(\\.venv|target|build|dist)/"
+
+# Strictness. Annotations are required across the whole tree - the application
+# package and the test harness alike - so that the type-check gate is a real
+# gate rather than decoration.
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_return_any = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_unused_configs = true
+show_error_codes = true
 
+# Third-party distributions that ship NO py.typed marker at the versions this
+# project pins (verified against the installed environment). Without a
+# per-module escape, importing any of them raises `import-untyped` and the
+# "mypy reports no errors" gate becomes unachievable. A GLOBAL
+# ignore_missing_imports is deliberately NOT set: that would also silence
+# genuine typos and genuinely missing first-party modules.
 [[tool.mypy.overrides]]
-# pytest-bdd generates test functions dynamically; step definitions and page
-# objects are checked but not forced to annotate every fixture callback.
-module = ["tests.*"]
-disallow_untyped_defs = false
+module = [
+    "xdist.*",
+    "pytest_html.*",
+    "pytest_metadata.*",
+    "gherkin.*",
+    "parse.*",
+    "parse_type.*",
+    "psutil.*",
+    "gunicorn.*",
+]
+ignore_missing_imports = true
 
-# -----------------------------------------------------------------------------
-# coverage (pytest-cov) - artifacts stay under the ephemeral target/ tree so
-# `make clean` (the port of `mvn clean`) wipes them.
-# -----------------------------------------------------------------------------
+# Defensive escapes for the remaining third-party packages the migration
+# introduces. These four DO ship py.typed at the pinned versions (pytest-bdd
+# 8.1.0, webdriver-manager 4.1.2, Faker 40.36.0, flask-cors 6.0.5), so the
+# entries are no-ops today and `warn_unused_configs` may print a benign
+# `note: unused section(s)` for any pattern nothing imports yet - a note, never
+# an error. They are retained so that a future release dropping its type marker
+# cannot break the gate.
+[[tool.mypy.overrides]]
+module = [
+    "pytest_bdd.*",
+    "webdriver_manager.*",
+    "faker.*",
+    "flask_cors.*",
+]
+ignore_missing_imports = true
+
+# =============================================================================
+# coverage.py (pytest-cov) - minimal and deliberately non-conflicting.
+# Nothing here influences how pytest resolves its own configuration; pytest.ini
+# remains authoritative. Every artifact is written under target/ so that
+# `make clean` - the port of `mvn clean` - wipes it, preserving the
+# ephemeral-artifact contract of the source build.
+# =============================================================================
 [tool.coverage.run]
 branch = true
 source = ["app"]
