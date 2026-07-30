@@ -1,0 +1,44 @@
+# Build context exclusions - keep the image small and reproducible.
+
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Virtual environments
+.venv
+venv
+env
+
+# Python caches / build output
+__pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+
+# Ephemeral report artifacts (recreated inside the image)
+target
+logs
+*.log
+
+# Real runtime configuration must never be baked into an image
+.env
+configuration.properties
+
+# JVM reference material (pom.xml stays: it is the read-only parity contract)
+*.class
+*.jar
+
+# Container definitions themselves
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Agent/CI scratch space
+blitzy

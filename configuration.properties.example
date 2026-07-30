@@ -1,0 +1,78 @@
+# =============================================================================
+# configuration.properties.example
+#
+# Template for the OPTIONAL runtime configuration file `configuration.properties`
+# which is git-ignored by the repository (.gitignore) and therefore never present
+# in a fresh checkout. Copy it before use:
+#
+#     cp configuration.properties.example configuration.properties
+#
+# Format: Java `.properties` (key=value). It is read with the Python standard
+# library only (configparser given a synthetic default section) - no extra
+# dependency is required.
+#
+# Precedence: constructor argument > environment variable > .env >
+#             configuration.properties > hard-coded default.
+# Every value below is the default carried over from the source project.
+# The application MUST degrade gracefully when this file is absent.
+# =============================================================================
+
+# --- Browser automation ------------------------------------------------------
+browser=chrome
+headless=true
+implicit.wait.seconds=10
+explicit.wait.seconds=30
+page.load.timeout.seconds=60
+
+# Base URL of the external application under test (French-language UI).
+# Left empty on purpose: the AUT is external and unreachable from CI.
+base.url=
+
+# --- Repository clone (Jenkins stage 'Clone code') ---------------------------
+clone.url=https://github.com/BalamiRR/Upgenix-QA.git
+# The README documents a different repository; both values are retained.
+clone.url.documented=https://github.com/BalamiRR/Testinium-QA.git
+clone.branch=main
+clone.dir=workspace
+clone.timeout.seconds=300
+
+# --- Test execution (Jenkins stage 'Run tests' + Maven Surefire) -------------
+# Port of @CucumberOptions tags = "@LogOut" - selects zero scenarios by design.
+tag.expression=LogOut
+# Port of <testFailureIgnore>true</testFailureIgnore>.
+ignore.test.failures=true
+# Port of <parallel>methods</parallel> + <useUnlimitedThreads>true</useUnlimitedThreads>.
+pytest.workers=logical
+# Port of the commented-out <!-- <threadCount>4</threadCount> --> tuning value,
+# preserved DISABLED exactly as in pom.xml.
+#pytest.workers=4
+test.timeout.seconds=1800
+
+# --- Reporting (Jenkins stage 'Generate report' - cucumber publisher) --------
+report.failed.features.number=-1
+report.failed.scenarios.number=-1
+report.failed.steps.number=-1
+report.pending.steps.number=-1
+report.skipped.steps.number=-1
+report.undefined.steps.number=-1
+report.sorting.method=ALPHABETICAL
+# Preserved verbatim as DATA (publisher fileIncludePattern), never rewritten.
+report.file.include.pattern=**/*.json
+
+# --- Artifact layout (the `target/` name is retained deliberately) -----------
+target.dir=target
+cucumber.json.path=target/cucumber.json
+cucumber.html.path=target/cucumber-reports.html
+rerun.txt.path=target/rerun.txt
+pretty.reports.dir=target/cucumber
+screenshots.dir=target/screenshots
+error.shots.dir=target/error-shots
+surefire.reports.dir=target/surefire-reports
+
+# --- Screen shots / error shots ---------------------------------------------
+screenshots.enabled=false
+error.shots.enabled=true
+
+# --- Logging -----------------------------------------------------------------
+log.level=INFO
+log.file=logs/testinium-qa.log

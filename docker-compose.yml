@@ -1,0 +1,77 @@
+# =============================================================================
+# docker-compose.yml - ADDITIVE: standalone operation of the Flask deliverable.
+#
+# The project name and the published port are parameterised by CLONE_INDEX so
+# several clones of this repository can each bring up their OWN instance without
+# colliding (only needed when an agent actually requires its own service):
+#
+#     CLONE_INDEX=0 docker compose up -d               # host port 8000
+#     CLONE_INDEX=1 APP_PORT=8001 docker compose -p testinium-qa-1 up -d
+#
+# The optional `selenium` profile provides a browser for the WebDriver suites:
+#
+#     docker compose --profile selenium up -d
+# =============================================================================
+name: testinium-qa-${CLONE_INDEX:-0}
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: testinium-qa:1.0.0.dev0
+    container_name: testinium-qa-app-${CLONE_INDEX:-0}
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      # --- Flask ---------------------------------------------------------
+      APP_CONFIG: ${APP_CONFIG:-production}
+      APP_HOST: 0.0.0.0
+      APP_PORT: 8000
+      SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # --- Stage 'Clone code' (Jenkins pipeline default) -----------------
+      CLONE_URL: ${CLONE_URL:-https://github.com/BalamiRR/Upgenix-QA.git}
+      # --- Stage 'Run tests' (ported @CucumberOptions / Surefire) --------
+      TAG_EXPRESSION: ${TAG_EXPRESSION:-LogOut}
+      IGNORE_TEST_FAILURES: ${IGNORE_TEST_FAILURES:-true}
+      PYTEST_WORKERS: ${PYTEST_WORKERS:-logical}
+      # --- Stage 'Generate report' (six -1 thresholds, ALPHABETICAL) -----
+      REPORT_FAILED_FEATURES_NUMBER: "-1"
+      REPORT_FAILED_SCENARIOS_NUMBER: "-1"
+      REPORT_FAILED_STEPS_NUMBER: "-1"
+      REPORT_PENDING_STEPS_NUMBER: "-1"
+      REPORT_SKIPPED_STEPS_NUMBER: "-1"
+      REPORT_UNDEFINED_STEPS_NUMBER: "-1"
+      REPORT_SORTING_METHOD: ALPHABETICAL
+      REPORT_FILE_INCLUDE_PATTERN: "**/*.json"
+      # --- Browser automation --------------------------------------------
+      BROWSER: ${BROWSER:-chrome}
+      HEADLESS: ${HEADLESS:-true}
+      SELENIUM_REMOTE_URL: ${SELENIUM_REMOTE_URL:-}
+    volumes:
+      # Report artifacts stay inspectable from the host between runs.
+      - ./target:/app/target
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=4)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Optional browser back end for the Selenium suites. Not started by default.
+  selenium:
+    profiles: ["selenium"]
+    image: selenium/standalone-chromium:141.0
+    container_name: testinium-qa-selenium-${CLONE_INDEX:-0}
+    shm_size: "2gb"
+    ports:
+      - "${SELENIUM_PORT:-4444}:4444"
+    environment:
+      SE_NODE_MAX_SESSIONS: ${SE_NODE_MAX_SESSIONS:-4}
+      SE_NODE_OVERRIDE_MAX_SESSIONS: "true"
+    restart: unless-stopped
