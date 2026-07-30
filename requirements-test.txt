@@ -1,0 +1,94 @@
+# =============================================================================
+# testinium-qa - BDD / test HARNESS dependencies
+# -----------------------------------------------------------------------------
+# One-to-one port of the eight <dependency> declarations and the Surefire
+# plugin declared in pom.xml (REFERENCE, never compiled):
+#
+#   io.cucumber:cucumber-java:7.2.3              -> pytest-bdd
+#   io.cucumber:cucumber-junit:7.2.3 (test)      -> pytest-bdd + pytest
+#   io.cucumber:cucumber-junit:7.3.4 (duplicate) -> collapses into the single
+#                                                   pinned pytest-bdd (the one
+#                                                   forced correction: a Python
+#                                                   requirements file cannot
+#                                                   express two versions of one
+#                                                   distribution; Maven already
+#                                                   resolved to the last
+#                                                   declaration alone)
+#   junit:junit:4.13.2                           -> pytest
+#   me.jvt.cucumber:reporting-plugin:7.2.0       -> pytest-bdd native Cucumber
+#                                                   JSON writer + pytest-html
+#   org.seleniumhq.selenium:selenium-java:3.141.59 -> selenium (4.x uplift)
+#   io.github.bonigarcia:webdrivermanager:5.1.0  -> webdriver-manager
+#   com.github.javafaker:javafaker:1.0.2         -> Faker
+#   maven-surefire-plugin:3.0.0-M5
+#     parallel=methods + useUnlimitedThreads=true -> pytest-xdist
+#
+# This file is intentionally SELF-CONTAINED (no `-r requirements.txt` include):
+# every line is an exact `==` pin. Install both files together:
+#     pip install -r requirements.txt -r requirements-test.txt
+# =============================================================================
+
+# --- Test engine (replaces junit:junit:4.13.2) -------------------------------
+pytest==9.1.1
+
+# --- Gherkin/BDD engine (replaces Cucumber-JVM 7.x) --------------------------
+# Also supplies the native Cucumber JSON writer used for report parity, so the
+# third-party me.jvt.cucumber reporting-plugin needs no Python counterpart.
+pytest-bdd==8.1.0
+
+# --- Parallel execution (replaces Surefire parallel=methods/unlimited threads)-
+pytest-xdist==3.8.0
+
+# --- HTML report (replaces the html:target/cucumber-reports.html plugin) ------
+pytest-html==4.2.0
+pytest-metadata==3.1.1
+
+# --- Browser automation (replaces selenium-java 3.141.59) --------------------
+selenium==4.46.0
+
+# --- Driver provisioning (replaces io.github.bonigarcia:webdrivermanager) -----
+# Selenium 4's built-in Selenium Manager is the zero-dependency alternative and
+# is used automatically when no explicit driver path is supplied.
+webdriver-manager==4.1.2
+
+# --- Synthetic test data (replaces com.github.javafaker:javafaker) ------------
+Faker==40.36.0
+
+# --- HTTP client used by the integration suites against the running service ---
+requests==2.34.2
+
+# -----------------------------------------------------------------------------
+# Transitive dependencies of record. Pinned deliberately because their behaviour
+# is load-bearing for behavioural parity, not merely incidental.
+# -----------------------------------------------------------------------------
+# The actual Gherkin parser: it determines how the byte-exact feature file is
+# interpreted, and therefore how the preserved defects manifest.
+gherkin-official==29.0.0
+parse==1.22.1
+parse_type==0.6.6
+
+# pytest / xdist substrate
+execnet==2.1.2
+pluggy==1.6.0
+iniconfig==2.3.0
+packaging==26.2
+
+# Selenium 4 transport layer
+trio==0.33.0
+trio-websocket==0.12.2
+websocket-client==1.9.0
+
+# Shared HTTP and typing substrate
+urllib3==2.7.0
+certifi==2026.7.22
+attrs==26.1.0
+typing_extensions==4.16.0
+
+# -----------------------------------------------------------------------------
+# Technical requirement of the ported parallelism setting.
+# pytest-xdist resolves `-n logical` (the port of Surefire
+# useUnlimitedThreads=true) through psutil.cpu_count(logical=True); without
+# psutil installed, xdist aborts the run with
+# "-n logical requires psutil (see xdist docs)".
+# -----------------------------------------------------------------------------
+psutil==7.2.2
