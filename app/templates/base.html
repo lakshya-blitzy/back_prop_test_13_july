@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+{#-
+  base.html - the shared layout for the Flask port's minimal report surface.
+
+  ADDITIVE. There was no user interface to migrate. The source project is a
+  Java/Maven Selenium-Cucumber automation scaffold of exactly five files that
+  requires no user interface at all, and no HTML, stylesheet or image asset has
+  ever existed anywhere in this repository's history. This layout is therefore
+  authored from scratch against the Agent Action Plan (AAP 0.3.4) rather than
+  translated from an existing template.
+
+  SCOPE CEILING (AAP 0.3.4). The goal is narrow and explicit: make the four
+  report artifacts, the screen shots and the error shots retrievable and
+  browsable over HTTP, "and nothing more". This surface adds no product
+  capability and no domain concept - it is a delivery mechanism for artifacts
+  that already existed. It is an internal engineering utility page, so the
+  register is deliberately plain and unbranded.
+
+  DELIBERATE NON-GOALS, each a requirement rather than an omission:
+    - No CSS framework, component library or design system. The Design System
+      Alignment Protocol is not triggered: no library was named, no design
+      frames were supplied and no rules were provided that could mandate one
+      (AAP 0.3.4, AAP 0.10.1, AMB-9).
+    - No client-side code of any kind, and no inline event handler.
+    - No web font, no icon font and no content-delivery link. The rendered page
+      makes no external network request at all: the one stylesheet below is
+      served by the application itself.
+    - No image, inline vector or favicon. The only two images the source
+      documentation links were already broken (defect D8), and Rule T6 forbids
+      fabricating a replacement, a logo or a mark.
+    - No inline style rule. All presentation lives in the single hand-written
+      stylesheet at static/css/main.css, which styles semantic elements rather
+      than a class taxonomy - hence not one class attribute in this file.
+    - No heading of its own. The stylesheet treats h1 as "one per page" and
+      styles the paragraph after it as a summary line, so each child page owns
+      its own h1 inside the content block below.
+
+  TEMPLATE API. index.html, reports.html, errors/404.html and errors/500.html
+  extend this file and override exactly two blocks:
+    title    the document title; defaults to the project name.
+    content  the page body, rendered inside the main landmark.
+
+  WHY THE NAVIGATION USES LITERAL PATHS. Both error pages extend this layout, so
+  anything that can raise here would turn every 404 into a 500. Building a link
+  from a blueprint endpoint name raises BuildError the moment that endpoint is
+  renamed, so the two page links below are written as the literal root-mounted
+  paths fixed by AAP 0.3.1. The stylesheet is the single exception: Flask
+  registers the static endpoint itself, so that one link can never fail to
+  build. This layout also reads no context variable whatsoever, which is what
+  lets it render safely from an application-level error handler with whatever
+  context happens to be at hand.
+#}
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Testinium-QA{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+  </head>
+  <body>
+    <header>
+      <p>Testinium-QA</p>
+      <nav>
+        <ul>
+          <li><a href="/">Home</a></li>
+          <li><a href="/reports">Reports</a></li>
+        </ul>
+      </nav>
+    </header>
+    <main>
+      {% block content %}{% endblock %}
+    </main>
+    <footer>
+      <p>Serves the generated test reports, screen shots and error shots over HTTP.</p>
+    </footer>
+  </body>
+</html>

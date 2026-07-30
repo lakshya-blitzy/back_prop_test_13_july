@@ -1,78 +1,362 @@
 # =============================================================================
 # configuration.properties.example
 #
-# Template for the OPTIONAL runtime configuration file `configuration.properties`
-# which is git-ignored by the repository (.gitignore) and therefore never present
-# in a fresh checkout. Copy it before use:
+# Committed TEMPLATE for the OPTIONAL runtime configuration file
+# `configuration.properties`, which `[.gitignore:L3]` keeps untracked. That
+# single ignore line is the whole of the evidence that the pre-migration
+# Java/Maven project had a runtime configuration contract at all, which is why
+# preserving it is a named migration goal (AAP O9, "Configuration parity"): the
+# contract survives as a git-ignored runtime file PLUS this committed template,
+# complemented by the committed `.env.example`.
+#
+# HOW TO USE IT
 #
 #     cp configuration.properties.example configuration.properties
 #
-# Format: Java `.properties` (key=value). It is read with the Python standard
-# library only (configparser given a synthetic default section) - no extra
-# dependency is required.
+# Then edit the copy. The copy is never committed; this template always is.
 #
-# Precedence: constructor argument > environment variable > .env >
-#             configuration.properties > hard-coded default.
-# Every value below is the default carried over from the source project.
-# The application MUST degrade gracefully when this file is absent.
+# EVERY KEY IS OPTIONAL, AND SO IS THE WHOLE FILE
+#
+# Because `[.gitignore:L3]` untracks it, `configuration.properties` is NEVER
+# present in a fresh checkout, so its absence is the NORMAL case rather than an
+# error. Every key below has a working hard-coded default in `app/config.py`;
+# any single key may be deleted, and the whole file may be deleted outright -
+# the Flask application still starts and the test harness still runs.
+# `app/utils/properties.py` is the one and only reader of this file and it
+# degrades silently when the file is absent, unreadable or malformed.
+#
+# NEVER COMMIT A SECRET HERE
+#
+# This template is tracked by git, so it must never contain a real credential,
+# password, token, API key or private key - not even temporarily. Keep local
+# secrets in your untracked `configuration.properties` copy or in the process
+# environment. Secrets management and credential vaulting are out of scope for
+# this project: templates document KEYS, never real VALUES.
+#
+# FILE FORMAT - Java `.properties`, not INI
+#
+#   * `key=value`, one pair per line. Values are NOT quoted; a quote character
+#     would become part of the value.
+#   * No `[section]` header. `app/utils/properties.py` synthesizes one in memory
+#     before handing the text to the standard library's `configparser`, so a
+#     header written here would be a second, nested header and every key under
+#     it would become unreachable. Do not add one.
+#   * Comment markers are `#` (used throughout) and `!`. A leading `;` is not a
+#     Java comment marker and would be parsed as data.
+#   * Keys are case-sensitive, exactly as `java.util.Properties` treats them.
+#   * No trailing whitespace after a value: it is preserved verbatim and would
+#     silently break an exact comparison such as the French assertion literal in
+#     section 7.
+#   * UTF-8, LF line endings, pure ASCII, trailing newline.
+#
+# Parsing this format costs ZERO extra dependencies - `configparser` plus the
+# synthesized section header handles it - which is why no `javaproperties`-style
+# package appears in `requirements.txt`.
+#
+# WHERE THIS FILE SITS IN THE PRECEDENCE CHAIN (AAP 0.3.1)
+#
+#     explicit constructor argument
+#       -> environment variable
+#         -> .env file
+#           -> configuration.properties          <-- THIS FILE (fourth)
+#             -> hard-coded default in app/config.py
+#
+# Highest wins. This file is FOURTH of five: an environment variable or a `.env`
+# entry overrides anything set here, and anything set here in turn overrides the
+# hard-coded default. Only an explicit constructor argument outranks the
+# environment.
+#
+# SEE ALSO
+#
+#   .env.example              The same settings expressed as environment
+#                             overrides. Every key below has a counterpart
+#                             there and the default values agree, key for key.
+#   docs/configuration.md     The precedence chain and every setting's source.
+#   docs/migration-parity.md  The authoritative D1-D9 defect register.
+#
+# EVERY VALUE BELOW IS THE SOURCE PROJECT'S OWN VALUE, cited inline against the
+# file and line it came from. Values are data, not opportunities to modernise
+# (AAP Rule T1). Several of them look wrong and ARE wrong: they are preserved
+# deliberately (AAP Rule T4) and each one says so, because an uncommented
+# `LogOut` or `true` is exactly the kind of thing a future maintainer "fixes",
+# thereby breaking the parity criteria this port is accepted against.
 # =============================================================================
 
-# --- Browser automation ------------------------------------------------------
-browser=chrome
-headless=true
-implicit.wait.seconds=10
-explicit.wait.seconds=30
-page.load.timeout.seconds=60
 
-# Base URL of the external application under test (French-language UI).
-# Left empty on purpose: the AUT is external and unreachable from CI.
-base.url=
+# -----------------------------------------------------------------------------
+# 1. Repository clone - port of Jenkins stage 'Clone code' [Jenkins:L2-L4]
+# -----------------------------------------------------------------------------
 
-# --- Repository clone (Jenkins stage 'Clone code') ---------------------------
+# PRESERVED DEFECT D7 - two contradictory repository URLs.
+# The pipeline clones https://github.com/BalamiRR/Upgenix-QA.git [Jenkins:L3],
+# while the README instructs cloning
+# https://github.com/BalamiRR/Testinium-QA.git [README.md:L59].
+# Per AAP AMB-7 the PIPELINE value is the runtime default: executable
+# configuration outranks prose when the two disagree, and the Jira key prefix
+# `UPGN` [README.md:L115] agrees with the pipeline URL. Both strings are
+# retained rather than silently unified, so no information is lost.
 clone.url=https://github.com/BalamiRR/Upgenix-QA.git
-# The README documents a different repository; both values are retained.
+
+# The README's URL, offered here as a commented-out ALTERNATIVE. Uncomment this
+# line and comment the one above to clone the repository the README documents.
+#clone.url=https://github.com/BalamiRR/Testinium-QA.git
+
+# The README's URL also kept as a value in its own right, so the discrepancy
+# stays machine-readable and the configuration endpoint can report both.
+# Source: [README.md:L59]. Mirrors CLONE_URL_DOCUMENTED in `.env.example`.
 clone.url.documented=https://github.com/BalamiRR/Testinium-QA.git
+
+# The pipeline's `git '<url>'` step [Jenkins:L3] passes no explicit ref, so it
+# checks out the repository's default branch.
 clone.branch=main
+
+# Working-copy destination, relative to the repository root. ADDITIVE: the
+# Groovy `git` step wrote into the Jenkins workspace, which has no analogue in
+# a plain Python process.
 clone.dir=workspace
+
+# ADDITIVE but REQUIRED. The Groovy `git` step is not a bare clone - it also
+# handles workspace cleanup and polling - so `app/services/clone_service.py`
+# replaces it with an explicit argument-list subprocess call that must never
+# block for ever. Seconds.
 clone.timeout.seconds=300
 
-# --- Test execution (Jenkins stage 'Run tests' + Maven Surefire) -------------
-# Port of @CucumberOptions tags = "@LogOut" - selects zero scenarios by design.
+
+# -----------------------------------------------------------------------------
+# 2. Test execution - port of Jenkins stage 'Run tests' [Jenkins:L6-L11] and of
+#    the Maven Surefire configuration [pom.xml:L21-L29]
+# -----------------------------------------------------------------------------
+
+# PRESERVED DEFECT D2 - the default tag expression selects ZERO scenarios.
+# Faithful port of the documented runner's tags = "@LogOut" [README.md:L87];
+# pytest-bdd turns each Gherkin tag into a pytest mark and strips the leading
+# `@`, so the value carries no `@`.
+# No scenario carries that tag. The feature file's only tags are @Login,
+# @UPGN-286, @UPGN-287, @UPGN-288, @SalesManager and @PosManager, so a default
+# run deselects every scenario and pytest exits with code 5, "no tests ran".
+# Exit code 5 MUST be reported as a SUCCESSFUL zero-scenario run: the source
+# pipeline went green in exactly this situation, and mapping 5 to failure would
+# make the port fail where the original succeeded.
+# Set this key to an empty value (`tag.expression=`) to run the whole suite.
 tag.expression=LogOut
-# Port of <testFailureIgnore>true</testFailureIgnore>.
+
+# PRESERVED DEFECT D3 - the build can never fail.
+# Direct port of <testFailureIgnore>true</testFailureIgnore> [pom.xml:L25].
+# While this is true, pytest exit code 1 (tests collected, some failed) and
+# exit code 5 (nothing selected) are BOTH non-gating; only 2 (interrupted),
+# 3 (internal error) and 4 (usage error) are hard failures. The six report
+# thresholds in section 3 are all -1, which the publisher treats as "no
+# threshold", so they gate nothing either, and report generation runs even
+# after a FAILED test stage because the report stage sits in a
+# finally-equivalent path.
+# Set to false to make test failures gate the pipeline - a deliberate
+# deviation from source behaviour; see docs/migration-parity.md.
 ignore.test.failures=true
-# Port of <parallel>methods</parallel> + <useUnlimitedThreads>true</useUnlimitedThreads>.
+
+# Port of <parallel>methods</parallel> plus
+# <useUnlimitedThreads>true</useUnlimitedThreads> [pom.xml:L22-L23] onto
+# pytest-xdist worker allocation. `logical` lets xdist size the pool from the
+# machine, which is the closest available analogue of "unlimited threads".
 pytest.workers=logical
-# Port of the commented-out <!-- <threadCount>4</threadCount> --> tuning value,
-# preserved DISABLED exactly as in pom.xml.
+
+# PRESERVED-BUT-DISABLED tuning default. pom.xml keeps its thread count
+# commented out - `<!-- <threadCount>4</threadCount> -->` [pom.xml:L24] - and so
+# does this template, exactly (AAP O7). Uncomment to pin four workers.
 #pytest.workers=4
+
+# ADDITIVE guard rail so a hung browser session cannot stall a run for ever.
+# Seconds; applies to the whole pytest invocation.
 test.timeout.seconds=1800
 
-# --- Reporting (Jenkins stage 'Generate report' - cucumber publisher) --------
+
+# -----------------------------------------------------------------------------
+# 3. Report publication - port of Jenkins stage 'Generate report'
+#    [Jenkins:L13-L15]
+#
+# Every value in this section is read straight off the `cucumber` publisher
+# invocation [Jenkins:L15], which the updated pipeline preserves
+# byte-identically. `app/reporting/thresholds.py` freezes the same constants in
+# Python, and parity criterion V4 asserts that they still match.
+# -----------------------------------------------------------------------------
+
+# PRESERVED DEFECT D3, continued - all six thresholds are -1, which the
+# publisher treats as "no threshold". Nothing here can ever fail a build.
 report.failed.features.number=-1
 report.failed.scenarios.number=-1
 report.failed.steps.number=-1
 report.pending.steps.number=-1
 report.skipped.steps.number=-1
 report.undefined.steps.number=-1
+
+# sortingMethod: 'ALPHABETICAL' [Jenkins:L15]. A no-op while there is exactly
+# one feature, but implemented anyway so the behaviour survives the addition of
+# further features instead of becoming a latent divergence.
 report.sorting.method=ALPHABETICAL
-# Preserved verbatim as DATA (publisher fileIncludePattern), never rewritten.
+
+# fileIncludePattern: '**/*.json' [Jenkins:L15], preserved VERBATIM AS DATA.
+# This is the publisher's own glob, not a transformation pattern: never rewrite
+# it. It is also the reason the artifact root in section 4 keeps its
+# Java-flavoured name - leaving the reports under `target/` means this contract
+# needs no edit at all.
 report.file.include.pattern=**/*.json
 
-# --- Artifact layout (the `target/` name is retained deliberately) -----------
+
+# -----------------------------------------------------------------------------
+# 4. Artifact layout - the four report artifacts declared by the documented
+#    runner's plugin list [README.md:L78-L81], plus the shots directories
+#    [README.md:L42-L43] and the retained Surefire report directory
+# -----------------------------------------------------------------------------
+
+# Artifact root. AAP 0.3.1 writes it as `target/` in directory notation; the
+# value here is the bare directory NAME so that it compares equal, byte for
+# byte, to the committed constants app/utils/paths.py::TARGET_DIR_NAME and
+# TARGET_DIR in `.env.example`. Every derived path below is rooted at `target/`
+# verbatim. Do NOT rename this directory: the publisher glob '**/*.json' in
+# section 3 depends on it, and renaming it is precisely the change that would
+# break the CI contract the migration went out of its way to keep.
 target.dir=target
+
+# json:target/cucumber.json - the one artifact the publisher glob matches.
+# Its writer does NOT create this parent directory, so the `target/` tree must
+# already exist before a run; app/utils/paths.py, the Makefile `test` target and
+# tests/conftest.py each guarantee that independently.
 cucumber.json.path=target/cucumber.json
+
+# html:target/cucumber-reports.html - served as a static artifact, never
+# re-rendered, so it cannot diverge from what the source toolchain produced.
 cucumber.html.path=target/cucumber-reports.html
+
+# rerun:target/rerun.txt - one `<feature-uri>:<scenario-line>` entry per failing
+# scenario, derived deterministically from the JSON report so the manifest can
+# never drift away from it.
 rerun.txt.path=target/rerun.txt
+
+# me.jvt.cucumber.report.PrettyReports:target/cucumber - produced by
+# post-processing target/cucumber.json, exactly as the Java reporting plugin
+# [pom.xml:L66-L70] rendered its directory from the JSON rather than from
+# terminal output.
 pretty.reports.dir=target/cucumber
+
+# Screen shots and error shots [README.md:L42-L43]. Both sit under the artifact
+# root so `make clean`, the port of `mvn clean`, wipes them with everything else.
 screenshots.dir=target/screenshots
 error.shots.dir=target/error-shots
+
+# Surefire's report directory name is retained for report-consumer parity, so
+# any downstream consumer keyed on this path keeps finding content. It is
+# populated by the JUnit-XML output the runner requests.
 surefire.reports.dir=target/surefire-reports
 
-# --- Screen shots / error shots ---------------------------------------------
+
+# -----------------------------------------------------------------------------
+# 5. Screen shots and error shots [README.md:L42-L43]
+#
+# The README states the project generates screen shots for your tests "if you
+# enable it", and generates error shots for failed test cases as well. The two
+# defaults below follow that wording literally.
+# -----------------------------------------------------------------------------
+
+# Opt-in, exactly as "if you enable it" describes: shots of passing steps are
+# off by default.
 screenshots.enabled=false
+
+# Error shots for failed test cases are described unconditionally, so they are
+# on by default. Captured by the screenshot-on-failure hook in
+# tests/step_defs/conftest.py.
 error.shots.enabled=true
 
-# --- Logging -----------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+# 6. Browser automation - Selenium WebDriver
+#
+# The source project's prerequisite list asked for a browser driver with its
+# class path already set [README.md:L53]; the keys below replace that manual
+# step with configuration.
+# -----------------------------------------------------------------------------
+
+# The browser to drive. Deliberately single-valued: a cross-browser and cross-OS
+# test matrix is out of scope, so this is one browser and not a browser LIST.
+browser=chrome
+
+# ADDITIVE. Headless by default because the build environment has no display.
+headless=true
+
+# Driver provisioning strategy. Selenium 4 resolves drivers itself through
+# Selenium Manager; the `webdriver-manager` distribution is retained as the
+# one-to-one counterpart of io.github.bonigarcia:webdrivermanager
+# [pom.xml:L42-L46]. Accepted values: selenium-manager | webdriver-manager
+driver.manager=selenium-manager
+
+# ADDITIVE wait budgets, in seconds. tests/pages/base_page.py uses EXPLICIT
+# waits; the implicit wait is kept only as a backstop, and mixing the two
+# aggressively is why the explicit budget is the larger of the pair.
+implicit.wait.seconds=10
+explicit.wait.seconds=30
+page.load.timeout.seconds=60
+
+# Base URL of the EXTERNAL application under test - the French-language site the
+# login scenarios drive. Deliberately left UNSET and commented out: no address
+# for it exists anywhere in the source project, and inventing one is forbidden
+# (AAP Rule T6). The only two URLs in evidence are the two git remotes in
+# section 1, and neither is the application under test. That application is
+# external, unmodifiable and unreachable from CI, so the browser-driven
+# scenarios cannot run end to end here; the limitation is recorded as risk R6
+# rather than papered over.
+# Uncomment and supply your own environment's address to run them locally.
+# Mirrors BASE_URL in `.env.example`, which documents it with an empty value.
+#base.url=
+
+
+# -----------------------------------------------------------------------------
+# 7. Behaviour-parity literals
+# -----------------------------------------------------------------------------
+
+# PRESERVED DEFECT D5 - the localisation and the comment disagree.
+# The feature file's explanatory comment says the expected text is
+# "Please fill out this field" [README.md:L130], while the ASSERTION five lines
+# later expects the French "Veuillez renseigner ce champ." [README.md:L135].
+# The assertion is the executable truth, so the French string is the value here.
+# It is 29 bytes and pure ASCII: French-language, but not multi-byte. Compare it
+# EXACTLY - do not translate it to match the English comment, do not drop the
+# trailing period, and do not normalise it in any way.
+expected.empty.field.message=Veuillez renseigner ce champ.
+
+
+# -----------------------------------------------------------------------------
+# 8. Logging
+# -----------------------------------------------------------------------------
+
+# Standard-library level name: DEBUG | INFO | WARNING | ERROR | CRITICAL.
+# Structured logging only - the application never prints.
 log.level=INFO
+
+# Destination for the structured log. The `.log` suffix is deliberate: the
+# repository has ignored `*.log` since before the migration [.gitignore:L6], so
+# this path stays untracked without any new ignore rule being needed.
 log.file=logs/testinium-qa.log
+
+
+# =============================================================================
+# DELIBERATELY NOT IN THIS FILE
+#
+#   SECRET_KEY, APP_CONFIG, APP_HOST, APP_PORT, FLASK_APP, FLASK_DEBUG
+#       Process- and deployment-level settings that belong in the environment or
+#       in `.env`. SECRET_KEY in particular must never be committed anywhere.
+#   CONFIGURATION_PROPERTIES_PATH
+#       It LOCATES this file, so setting it inside this file cannot work. It is
+#       an environment-only override; see `.env.example`.
+#   CLONE_INDEX
+#       Shifts host-global resources - listen port, compose project name - so
+#       that parallel clones do not collide. Environment-only by design.
+#   Test account credentials
+#       The only account data in evidence lives in the feature file's Examples
+#       tables and stays there. It is test data for the ported scenarios, not
+#       configuration, and it is deliberately not duplicated here.
+#   Cross-browser / cross-OS matrix keys
+#       Out of scope. app/utils/platform_exec.py preserves the pipeline's
+#       isUnix() branch [Jenkins:L7-L11] and nothing more.
+#   Keys for the three unexercised user roles
+#       Out of scope. Only PosManager and SalesManager appear in the
+#       specification [README.md:L106-L109]; the remaining three of five roles
+#       are named nowhere and are not invented here.
+# =============================================================================
