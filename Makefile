@@ -87,9 +87,18 @@ test: clean dirs ## Port of `mvn clean test` (parallel, non-gating)
 	  *) echo "[make test] pytest exit $$code - hard failure"; exit $$code;; \
 	esac
 
+# Serial execution is requested with `-n 0`, NOT with `-p no:xdist`. Deactivating
+# the plugin outright would leave the `-n logical` carried by the `addopts` line
+# of pytest.ini unclaimed, and pytest then aborts with "unrecognized arguments:
+# -n" (usage error, exit 4) before a single scenario is collected. `-n 0` keeps
+# xdist loaded but switches distribution off, which is also what satisfies
+# pytest-bdd's own guard: its Gherkin reporter refuses to install only when the
+# xdist `dsession` plugin is registered, and `dsession` appears exclusively when
+# the worker count is greater than zero. The preserved `-n logical` default in
+# pytest.ini therefore stays untouched.
 test-pretty: clean dirs ## Serial run with the Gherkin terminal reporter (no xdist)
 	@echo "[make test-pretty] serial only: --gherkin-terminal-reporter is incompatible with xdist"
-	@set +e; $(PYTEST) -p no:xdist --gherkin-terminal-reporter; code=$$?; set -e; \
+	@set +e; $(PYTEST) -n 0 --gherkin-terminal-reporter; code=$$?; set -e; \
 	case $$code in 0|1|5) exit 0;; *) exit $$code;; esac
 
 test-unit: dirs ## Run the unit suite (tag filter overridden)
