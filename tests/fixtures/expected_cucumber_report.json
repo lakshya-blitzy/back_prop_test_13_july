@@ -1,0 +1,327 @@
+[
+  {
+    "description": "  User Story:\n  As a user, I should be able to login with correct credentials to different accounts.\n\n  Accounts are: PosManager, SalesManager",
+    "elements": [
+      {
+        "description": "",
+        "id": "testinium-app-login-feature;users-log-in-with-valid-credentials",
+        "keyword": "Scenario Outline",
+        "line": 13,
+        "name": "Users log in with valid credentials",
+        "steps": [
+          {
+            "keyword": "When",
+            "line": 14,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User enters \"<username>\" username",
+            "result": {
+              "duration": 41237118,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "And",
+            "line": 15,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User enters \"<password>\" password",
+            "result": {
+              "duration": 38904552,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "And",
+            "line": 16,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User clicks the login button",
+            "result": {
+              "duration": 27615803,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "Then",
+            "line": 17,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User should see the dashboard",
+            "result": {
+              "duration": 52483970,
+              "status": "passed"
+            }
+          }
+        ],
+        "tags": [
+          "UPGN-286"
+        ],
+        "type": "scenario"
+      },
+      {
+        "description": "",
+        "id": "testinium-app-login-feature;users-log-in-with-invalid-email-or-invalid-password-credentials;salesmanagers-username-and-password;2",
+        "keyword": "Scenario Outline",
+        "line": 37,
+        "name": "Users log in with invalid email or invalid password credentials",
+        "steps": [
+          {
+            "keyword": "When",
+            "line": 30,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User enters \"salesmanager\" username",
+            "result": {
+              "duration": 44162397,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "And",
+            "line": 31,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User clicks the login button",
+            "result": {
+              "duration": 26058741,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "Then",
+            "line": 32,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User sees \"Veuillez renseigner ce champ.\" message",
+            "result": {
+              "duration": 49730264,
+              "status": "passed"
+            }
+          }
+        ],
+        "tags": [
+          "UPGN-288",
+          "SalesManager"
+        ],
+        "type": "scenario"
+      },
+      {
+        "description": "",
+        "id": "testinium-app-login-feature;users-log-in-with-invalid-email-or-invalid-password-credentials;salesmanagers-username-and-password;3",
+        "keyword": "Scenario Outline",
+        "line": 38,
+        "name": "Users log in with invalid email or invalid password credentials",
+        "steps": [
+          {
+            "keyword": "When",
+            "line": 30,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User enters \"salesmanager\" username",
+            "result": {
+              "duration": 43871509,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "And",
+            "line": 31,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User clicks the login button",
+            "result": {
+              "duration": 25694038,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "Then",
+            "line": 32,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User sees \"Veuillez renseigner ce champ.\" message",
+            "result": {
+              "duration": 48215776,
+              "status": "passed"
+            }
+          }
+        ],
+        "tags": [
+          "UPGN-288",
+          "SalesManager"
+        ],
+        "type": "scenario"
+      },
+      {
+        "description": "",
+        "id": "testinium-app-login-feature;users-log-in-with-invalid-email-or-invalid-password-credentials;salesmanagers-username-and-password;4",
+        "keyword": "Scenario Outline",
+        "line": 39,
+        "name": "Users log in with invalid email or invalid password credentials",
+        "steps": [
+          {
+            "keyword": "When",
+            "line": 30,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User enters \"salesmanager\" username",
+            "result": {
+              "duration": 45306182,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "And",
+            "line": 31,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User clicks the login button",
+            "result": {
+              "duration": 27419655,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "Then",
+            "line": 32,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User sees \"Veuillez renseigner ce champ.\" message",
+            "result": {
+              "duration": 50884301,
+              "status": "passed"
+            }
+          }
+        ],
+        "tags": [
+          "UPGN-288",
+          "SalesManager"
+        ],
+        "type": "scenario"
+      },
+      {
+        "description": "",
+        "id": "testinium-app-login-feature;users-log-in-with-invalid-email-or-invalid-password-credentials;posmanagers-username-and-password;2",
+        "keyword": "Scenario Outline",
+        "line": 44,
+        "name": "Users log in with invalid email or invalid password credentials",
+        "steps": [
+          {
+            "keyword": "When",
+            "line": 30,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User enters \"posmanager\" username",
+            "result": {
+              "duration": 42598734,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "And",
+            "line": 31,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User clicks the login button",
+            "result": {
+              "duration": 26733120,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "Then",
+            "line": 32,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User sees \"Veuillez renseigner ce champ.\" message",
+            "result": {
+              "duration": 47961548,
+              "status": "passed"
+            }
+          }
+        ],
+        "tags": [
+          "UPGN-288",
+          "PosManager"
+        ],
+        "type": "scenario"
+      },
+      {
+        "description": "",
+        "id": "testinium-app-login-feature;users-log-in-with-invalid-email-or-invalid-password-credentials;posmanagers-username-and-password;3",
+        "keyword": "Scenario Outline",
+        "line": 45,
+        "name": "Users log in with invalid email or invalid password credentials",
+        "steps": [
+          {
+            "keyword": "When",
+            "line": 30,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User enters \"posmanager\" username",
+            "result": {
+              "duration": 44017269,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "And",
+            "line": 31,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User clicks the login button",
+            "result": {
+              "duration": 25182493,
+              "status": "passed"
+            }
+          },
+          {
+            "keyword": "Then",
+            "line": 32,
+            "match": {
+              "location": "tests/step_defs/login_sd.py"
+            },
+            "name": "User sees \"Veuillez renseigner ce champ.\" message",
+            "result": {
+              "duration": 51346857,
+              "status": "passed"
+            }
+          }
+        ],
+        "tags": [
+          "UPGN-288",
+          "PosManager"
+        ],
+        "type": "scenario"
+      }
+    ],
+    "id": "testinium-app-login-feature",
+    "keyword": "Feature",
+    "language": "en",
+    "line": 2,
+    "name": "Testinium app login feature",
+    "tags": [
+      "Login"
+    ],
+    "uri": "tests/features/login.feature"
+  }
+]
