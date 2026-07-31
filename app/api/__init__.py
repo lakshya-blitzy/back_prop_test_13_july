@@ -225,4 +225,13 @@ api_bp: Blueprint = Blueprint("api", __name__, url_prefix="/api/v1")
 # ``sys.modules``, so the name must already be bound when routes.py runs. A
 # module-level import placed below other statements is exactly what E402 reports,
 # hence the narrowly scoped suppression below - the only suppression in this file.
-from app.api import routes as routes  # noqa: E402,F401
+#
+# Spelled as a SUBMODULE import rather than ``from app.api import routes as routes``, and
+# that matters: this module declares ``__all__``, so the strict type checker treats every
+# name absent from it as not exported and rejects reading ``routes`` back off ``app.api``
+# ("Module \"app.api\" does not explicitly export attribute \"routes\""). Importing the
+# submodule directly asks nothing of ``__all__``, keeps ``make typecheck`` clean, and has
+# identical runtime effect - Python binds ``routes`` onto this package as a side effect of
+# importing it, so ``app.api.routes`` still resolves for anyone who needs it. Do not "tidy"
+# it back into the ``from`` form.
+import app.api.routes  # noqa: E402,F401
