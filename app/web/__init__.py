@@ -54,4 +54,15 @@ web_bp: Blueprint = Blueprint("web", __name__)
 # reads that name back off this partially initialised module via ``sys.modules``.
 # Moving it to the top of the file, or deleting it as an "unused" import, would
 # register a blueprint carrying zero rules and silently remove both routes.
-from app.web import routes as routes  # noqa: E402,F401
+#
+# Spelled RELATIVELY -- ``from . import routes`` -- rather than
+# ``from app.web import routes``, and that difference is load bearing for the
+# type-check gate rather than cosmetic. This module declares ``__all__``, so the
+# strict checker treats every name absent from it as not exported and rejects
+# reading ``routes`` back off ``app.web`` ("Module \"app.web\" does not
+# explicitly export attribute \"routes\""). A relative submodule import asks
+# nothing of ``__all__``, keeps ``make typecheck`` clean, and has identical
+# runtime effect: Python binds ``routes`` onto this package as a side effect of
+# importing it, so ``app.web.routes`` still resolves for anyone who needs it.
+# Do not "tidy" it back into the absolute ``from app.web import ...`` form.
+from . import routes as routes  # noqa: E402,F401
