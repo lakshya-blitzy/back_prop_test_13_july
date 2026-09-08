@@ -1,3 +1,15 @@
+# Python build manifest for Testinium-QA.
+#
+# Translated from pom.xml, which stays in the tree as historical reference only
+# and is no longer a supported build configuration:
+#   pom.xml:8  <artifactId>testinium-qa</artifactId>  -> [project] name
+#   pom.xml:9  <version>1.0-SNAPSHOT</version>        -> [project] version
+# Fields the POM does not declare (licence, authors, urls, keywords) are
+# deliberately absent rather than guessed.
+#
+# This manifest plus requirements.txt / requirements-test.txt are the only
+# supported build inputs after the port.
+
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -7,12 +19,18 @@ name = "testinium-qa"
 # PEP 440 mapping of the source build's 1.0-SNAPSHOT, preserving pre-release
 # semantics (pom.xml <version>1.0-SNAPSHOT</version>).
 version = "1.0.0.dev0"
-description = "Testinium-QA browser test-automation framework - Python 3 / Flask port"
+description = "Behave-driven Selenium browser test-automation suite for the Testinium/Odoo web application, with a read-only Flask viewer over the generated report artifacts"
 readme = "README.md"
 # Pinned narrowly on purpose: the verified interpreter is 3.14.6 and CI and
 # development must not drift apart (see .python-version).
 requires-python = "==3.14.*"
 
+# Direct runtime dependencies, exact-pinned. These are the same seven
+# distributions at the same seven versions as requirements.txt, which is the
+# list every installer in the port consumes (both runner scripts run
+# `pip install -r requirements.txt -r requirements-test.txt`); the two must be
+# kept identical. The resolved transitive closure is intentionally left
+# unpinned, matching the source POM, which pins direct artifacts only.
 dependencies = [
     "Flask==3.1.3",
     "Jinja2==3.1.6",
@@ -23,11 +41,9 @@ dependencies = [
     "webdriver-manager==4.1.2",
 ]
 
-[project.optional-dependencies]
-test = [
-    "pytest==9.1.1",
-    "pytest-cov==7.0.0",
-]
+# No extras table is declared. The test-only pins (pytest, pytest-cov) live in
+# requirements-test.txt and are not restated here, so each dependency set has
+# exactly one hand-maintained source and the two cannot drift apart.
 
 # The single command surface: the Gherkin suite runner. Invoked from
 # scripts/run_tests.sh, scripts/run_tests.ps1, the Makefile and the README via
@@ -35,14 +51,33 @@ test = [
 [project.scripts]
 run-tests = "app.cli:run_tests"
 
+# Flat layout: `app` and its sub-packages are the only installable code.
+# features/, tests/ and scripts/ sit alongside app/ at the repository root and
+# are not distributions - behave loads features/environment.py and
+# features/steps/*.py by path relative to the features directory, pytest
+# discovers tests/ from the repository root, and scripts/ holds shell entry
+# points. `namespaces = false` keeps the resource directories under app/
+# (templates/, static/ and their sub-directories, none of which carry an
+# __init__.py) from being picked up as implicit namespace packages; they ship
+# as package data instead, declared below.
 [tool.setuptools.packages.find]
 include = ["app*"]
+exclude = ["features*", "tests*", "scripts*"]
+namespaces = false
 
+# Non-Python resources that must travel with the installed package. The report
+# writers render the artifact and PrettyReports templates and copy the vendored
+# asset set into the generated report tree so those pages render offline from a
+# CI workspace; a wheel missing them produces unstyled reports with broken
+# href/src references. Patterns are relative to the app/ package directory and
+# are deliberately not restricted to text extensions, because the vendored set
+# includes binary fonts (.otf, .eot, .ttf, .woff, .woff2) and a PNG favicon.
 [tool.setuptools.package-data]
 app = [
     "templates/*.html",
     "templates/**/*.html",
-    "static/css/*",
-    "static/js/*",
+    "static/css/*.css",
+    "static/js/*.js",
+    "static/vendor/*",
     "static/vendor/**/*",
 ]

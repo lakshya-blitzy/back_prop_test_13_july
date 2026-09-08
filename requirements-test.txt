@@ -1,7 +1,8 @@
 # Test-only dependencies - Testinium-QA (Python 3.14 port)
 # Exact pins per technical specification 0.5.1.
-# Install alongside requirements.txt:
-#   pip install -r requirements.txt -r requirements-test.txt
+# This manifest chains no other manifest; it stands alone. Its consumers
+# (scripts/run_tests.sh, scripts/run_tests.ps1 and the Makefile) install it
+# together with requirements.txt in a single pip invocation.
 
 # Unit-test runner for the port's own suite under tests/ - replaces junit:junit.
 pytest==9.1.1
