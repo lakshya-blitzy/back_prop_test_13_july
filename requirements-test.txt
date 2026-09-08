@@ -1,0 +1,12 @@
+# Test-only dependencies - Testinium-QA (Python 3.14 port)
+# Exact pins per technical specification 0.5.1.
+# Install alongside requirements.txt:
+#   pip install -r requirements.txt -r requirements-test.txt
+
+# Unit-test runner for the port's own suite under tests/ - replaces junit:junit.
+pytest==9.1.1
+
+# Coverage measurement for the per-package coverage gates enforced by the
+# Makefile `coverage` target (app/utils 90, app/pages 85,
+# app/automation 80, app/reporting 80).
+pytest-cov==7.0.0
