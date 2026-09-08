@@ -1,0 +1,68 @@
+# ---------------------------------------------------------------------------
+# configuration.properties.example - template for the runtime configuration
+# ---------------------------------------------------------------------------
+#
+# Usage
+#   Copy this file to "configuration.properties" (drop the .example suffix)
+#   and fill in a value for each key. No values are supplied here: the correct
+#   ones depend on the instance being tested and are not part of this project.
+#
+# Where the file must live
+#   The reader opens the bare relative filename "configuration.properties", so
+#   it resolves against the process working directory - the repository root
+#   when the test and report commands are run from there.
+#
+# Never commit the real file
+#   "configuration.properties" is deliberately git-ignored. It holds sign-in
+#   credentials for the system under test; keep it out of version control.
+#
+# Nothing is required at startup
+#   A missing file is logged once and the run continues; a missing key is
+#   reported at the point of use rather than at startup. That tolerance is
+#   intended behaviour, carried over unchanged, so unit tests, the report
+#   viewer, the artifact writers and dry runs all work without this file.
+#   Only scenarios that drive a real browser need it filled in.
+#
+# Read once per worker process
+#   The file is read and cached on first access in each worker process and is
+#   never re-read. A change made while a run is in progress therefore has no
+#   effect on a reader that has already initialised.
+#
+# Format
+#   java.util.Properties, not INI. There are no section headers; a line
+#   beginning with "#" (or "!") is a comment; "=" separates a key from its
+#   value. Keys are case-sensitive and are read by these exact names.
+#
+# Keys
+#   Six keys, and only six. Nothing reads any other name, so adding a key here
+#   has no effect - it would simply be ignored.
+# ---------------------------------------------------------------------------
+
+# Selects the browser the driver constructs. Exactly two values are
+# recognised: chrome or firefox. There is no default and no fallback, so any
+# other value - or none at all - leaves the driver unset and the scenario
+# fails when it first tries to use it.
+browser=
+
+# Address of the sign-in page. Used by the login steps, by the shared
+# precondition step that other features' backgrounds invoke, and by the
+# opening step of the Employee flow.
+web.table.url=
+
+# Address of the Employee module. Read only by the Employee flow, which
+# navigates here three times. This is a separate key from web.table.url
+# above; the two point at different pages and are not interchangeable.
+url=
+
+# Sign-in name used by the shared precondition step that other features'
+# backgrounds invoke.
+username=
+
+# Password for that same shared precondition step. Treat it as a secret: it
+# belongs only in the git-ignored copy of this file.
+password=
+
+# Page title the Employee flow waits for and asserts after navigating to the
+# Employee module. Must match that page's title exactly, or the wait expires
+# and the scenario fails.
+EmplTitle=

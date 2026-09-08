@@ -1,0 +1,893 @@
+/* ==========================================================================
+   Testinium-QA report stylesheet.
+
+   Consumed twice, which fixes two invariants:
+     1. Inlined into the single self-contained report page, where nothing
+        outside this text is reachable - hence no imports, no asset
+        references, no webfonts, and glyphs as character escapes.
+     2. Emitted beside the generated report tree, next to three vendored
+        stylesheets loaded in an order this file cannot rely on - hence every
+        selector starts with the "tqa-" class prefix or a "data-tqa-"
+        attribute, with element parts only as descendants or qualifiers.
+
+   State comes from one status attribute and three boolean attributes whose
+   absence is the default, so with no scripting at all the page stays
+   complete: detail expanded, rows visible, overlay closed, thumbnail shown.
+   ========================================================================== */
+
+/* ---- tokens and page shell -------------------------------------------------
+   Tokens live on the wrapper class, not on the document root, and every var()
+   repeats its value as a literal fallback so a fragment rendered without the
+   wrapper still resolves. Lengths are absolute rather than root-relative: one
+   of the vendored stylesheets sets the document root to 10px, which no
+   namespaced selector can override, and root-relative units would shrink the
+   whole report by 37.5% in that tree. Browser zoom still scales everything.
+   -------------------------------------------------------------------------- */
+
+.tqa-root {
+    --tqa-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --tqa-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+    --tqa-text: #1f2328;
+    --tqa-muted: #5a6169;
+    --tqa-link-fg: #0b5fa5;
+    --tqa-link-hover: #083f6e;
+    --tqa-surface: #ffffff;
+    --tqa-surface-alt: #f6f8fa;
+    --tqa-header-bg: #f3f5f8;
+    --tqa-line: #d5d9df;
+    --tqa-line-strong: #b6bcc5;
+
+    /* status palette: green pass, red fail, yellow pending, orange skipped
+       and undefined, amber warning, neutral grey untested and ambiguous.
+       Every foreground clears 4.5:1 against its own tint. */
+    --tqa-pass: #12652b;
+    --tqa-pass-bg: #e7f6ea;
+    --tqa-fail: #a01508;
+    --tqa-fail-bg: #fdeceb;
+    --tqa-pending: #6a5000;
+    --tqa-pending-bg: #fdf7d9;
+    --tqa-skipped: #8a4a00;
+    --tqa-skipped-bg: #fdefe0;
+    --tqa-undefined: #8f3d00;
+    --tqa-undefined-bg: #fce9db;
+    --tqa-warn: #7a4b00;
+    --tqa-warn-bg: #fdf1de;
+    --tqa-neutral: #494f58;
+    --tqa-neutral-bg: #eef0f3;
+    --tqa-ambiguous: #4c4557;
+    --tqa-ambiguous-bg: #f2eff7;
+
+    --tqa-gap: 8px;
+    --tqa-gap-lg: 16px;
+    --tqa-radius: 4px;
+    --tqa-page-max: 1248px;
+
+    background-color: var(--tqa-surface, #ffffff);
+    color: var(--tqa-text, #1f2328);
+    font-family: var(--tqa-font, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
+    font-size: 16px;
+    line-height: 1.5;
+}
+
+/* Border-box is declared per class: a universal reset would reach vendored
+   and generator markup. */
+.tqa-page,
+.tqa-header,
+.tqa-footer,
+.tqa-meta,
+.tqa-meta-item,
+.tqa-table-wrap,
+.tqa-feature,
+.tqa-scenario,
+.tqa-background,
+.tqa-step,
+.tqa-step-detail,
+.tqa-error,
+.tqa-badge,
+.tqa-tag,
+.tqa-count,
+.tqa-artifact,
+.tqa-empty,
+.tqa-toggle,
+.tqa-filter-btn,
+.tqa-shot,
+.tqa-shot-thumb,
+.tqa-lightbox,
+.tqa-lightbox-img,
+.tqa-lightbox-close {
+    box-sizing: border-box;
+}
+
+.tqa-page {
+    width: 100%;
+    max-width: var(--tqa-page-max, 1248px);
+    margin: 0 auto;
+    padding: var(--tqa-gap-lg, 16px) 12px 32px;
+}
+
+.tqa-header {
+    margin: 0 0 var(--tqa-gap-lg, 16px);
+    padding: 12px;
+    border: 1px solid var(--tqa-line, #d5d9df);
+    border-radius: var(--tqa-radius, 4px);
+    background-color: var(--tqa-header-bg, #f3f5f8);
+}
+
+.tqa-header h1,
+.tqa-header h2 {
+    margin: 0 0 4px;
+    font-family: var(--tqa-font, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.25;
+}
+
+.tqa-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--tqa-gap, 8px) var(--tqa-gap-lg, 16px);
+    margin: 6px 0 0;
+    padding: 0;
+    font-size: 14px;
+    list-style: none;
+}
+
+.tqa-link {
+    color: var(--tqa-link-fg, #0b5fa5);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    overflow-wrap: anywhere;
+}
+
+.tqa-link:hover {
+    color: var(--tqa-link-hover, #083f6e);
+}
+
+.tqa-link:focus-visible {
+    outline: 2px solid var(--tqa-link-fg, #0b5fa5);
+    outline-offset: 2px;
+}
+
+.tqa-footer {
+    margin: 24px 0 0;
+    padding: 12px 0 0;
+    border-top: 1px solid var(--tqa-line, #d5d9df);
+    color: var(--tqa-muted, #5a6169);
+    font-size: 13px;
+}
+
+/* ---- metadata block ------------------------------------------------------ */
+
+.tqa-meta {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--tqa-gap, 8px) var(--tqa-gap-lg, 16px);
+    margin: 0 0 var(--tqa-gap-lg, 16px);
+    padding: 12px;
+    border: 1px solid var(--tqa-line, #d5d9df);
+    border-radius: var(--tqa-radius, 4px);
+    background-color: var(--tqa-surface-alt, #f6f8fa);
+}
+
+.tqa-meta-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.tqa-meta-label {
+    color: var(--tqa-muted, #5a6169);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.tqa-meta-value {
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+/* ---- summary counters ---------------------------------------------------- */
+
+.tqa-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--tqa-gap, 8px);
+    margin: 0 0 var(--tqa-gap-lg, 16px);
+    padding: 0;
+    list-style: none;
+}
+
+.tqa-count {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 4px 10px;
+    border: 1px var(--tqa-status-border-style, solid) var(--tqa-status-accent, #b6bcc5);
+    border-radius: var(--tqa-radius, 4px);
+    background-color: var(--tqa-status-bg, #eef0f3);
+    color: var(--tqa-status-fg, #494f58);
+    font-size: 13px;
+    font-weight: var(--tqa-status-weight, 600);
+    white-space: nowrap;
+}
+
+.tqa-count b,
+.tqa-count strong {
+    font-size: 16px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---- tables -------------------------------------------------------------- */
+
+.tqa-table-wrap {
+    max-width: 100%;
+    margin: 0 0 var(--tqa-gap-lg, 16px);
+    overflow-x: auto;
+    border: 1px solid var(--tqa-line, #d5d9df);
+    border-radius: var(--tqa-radius, 4px);
+}
+
+.tqa-table {
+    width: 100%;
+    border-collapse: collapse;
+    background-color: var(--tqa-surface, #ffffff);
+    font-family: var(--tqa-font, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
+    font-size: 14px;
+}
+
+.tqa-table caption {
+    padding: 8px 10px;
+    caption-side: top;
+    color: var(--tqa-muted, #5a6169);
+    font-weight: 600;
+    text-align: left;
+}
+
+.tqa-table th,
+.tqa-table td {
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--tqa-line, #d5d9df);
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+
+.tqa-table th {
+    background-color: var(--tqa-header-bg, #f3f5f8);
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.tqa-table tbody tr:last-child th,
+.tqa-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+/* ---- feature, scenario and step hierarchy -------------------------------- */
+
+.tqa-feature {
+    margin: 0 0 var(--tqa-gap-lg, 16px);
+    padding: 12px;
+    border: 1px solid var(--tqa-line, #d5d9df);
+    border-radius: var(--tqa-radius, 4px);
+    background-color: var(--tqa-surface, #ffffff);
+}
+
+.tqa-feature-name {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--tqa-gap, 8px);
+    margin: 0 0 6px;
+    font-family: var(--tqa-font, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.3;
+}
+
+/* Feature and scenario descriptions keep the leading indentation the result
+   model carries, so they are laid out as preformatted wrapped text. */
+.tqa-feature-desc {
+    margin: 0 0 8px;
+    color: var(--tqa-muted, #5a6169);
+    font-family: var(--tqa-font, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
+    font-size: 14px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    tab-size: 4;
+}
+
+.tqa-scenario,
+.tqa-background {
+    margin: 10px 0 0;
+    padding: 8px 10px;
+    border: 1px solid var(--tqa-line, #d5d9df);
+    border-left: 4px var(--tqa-status-border-style, solid) var(--tqa-status-accent, #b6bcc5);
+    border-radius: var(--tqa-radius, 4px);
+    background-color: var(--tqa-surface, #ffffff);
+}
+
+/* A background is a distinct element keyword in the result model, so it is
+   distinguishable from a scenario without relying on colour. */
+.tqa-background {
+    border-left-style: dashed;
+    border-left-color: var(--tqa-line-strong, #b6bcc5);
+    background-color: var(--tqa-surface-alt, #f6f8fa);
+}
+
+.tqa-scenario-name {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--tqa-gap, 8px);
+    margin: 0;
+    font-family: var(--tqa-font, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.35;
+}
+
+.tqa-steps {
+    margin: 8px 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.tqa-step {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 2px 6px;
+    margin: 0;
+    padding: 4px 6px;
+    border-left: 3px var(--tqa-status-border-style, solid) var(--tqa-status-accent, #d5d9df);
+    background-color: var(--tqa-status-bg, transparent);
+    font-size: 14px;
+}
+
+.tqa-step + .tqa-step {
+    margin-top: 2px;
+}
+
+.tqa-step-keyword {
+    font-weight: 700;
+}
+
+.tqa-step-name {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.tqa-step-detail {
+    flex: 1 1 100%;
+    width: 100%;
+    margin: 4px 0 2px;
+    padding: 0 0 0 12px;
+}
+
+.tqa-step-args {
+    width: auto;
+    max-width: 100%;
+    margin: 4px 0;
+    border-collapse: collapse;
+    font-family: var(--tqa-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+    font-size: 13px;
+}
+
+.tqa-step-args th,
+.tqa-step-args td {
+    padding: 3px 6px;
+    border: 1px solid var(--tqa-line, #d5d9df);
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+
+.tqa-step-args th {
+    background-color: var(--tqa-surface-alt, #f6f8fa);
+    font-weight: 700;
+}
+
+/* ---- status ----------------------------------------------------------------
+   Each status maps once onto local custom properties the rules above consume,
+   pairing colour with a border style and a weight so status survives
+   greyscale printing and colour-vision deficiency; the status word itself
+   comes from the badge markup. Matched case-insensitively.
+   -------------------------------------------------------------------------- */
+
+[data-tqa-status="passed" i] {
+    --tqa-status-fg: var(--tqa-pass, #12652b);
+    --tqa-status-bg: var(--tqa-pass-bg, #e7f6ea);
+    --tqa-status-accent: var(--tqa-pass, #12652b);
+    --tqa-status-border-style: solid;
+    --tqa-status-weight: 600;
+}
+
+[data-tqa-status="failed" i] {
+    --tqa-status-fg: var(--tqa-fail, #a01508);
+    --tqa-status-bg: var(--tqa-fail-bg, #fdeceb);
+    --tqa-status-accent: var(--tqa-fail, #a01508);
+    --tqa-status-border-style: solid;
+    --tqa-status-weight: 700;
+}
+
+[data-tqa-status="pending" i] {
+    --tqa-status-fg: var(--tqa-pending, #6a5000);
+    --tqa-status-bg: var(--tqa-pending-bg, #fdf7d9);
+    --tqa-status-accent: var(--tqa-pending, #6a5000);
+    --tqa-status-border-style: dashed;
+    --tqa-status-weight: 600;
+}
+
+[data-tqa-status="skipped" i] {
+    --tqa-status-fg: var(--tqa-skipped, #8a4a00);
+    --tqa-status-bg: var(--tqa-skipped-bg, #fdefe0);
+    --tqa-status-accent: var(--tqa-skipped, #8a4a00);
+    --tqa-status-border-style: dashed;
+    --tqa-status-weight: 600;
+}
+
+[data-tqa-status="undefined" i] {
+    --tqa-status-fg: var(--tqa-undefined, #8f3d00);
+    --tqa-status-bg: var(--tqa-undefined-bg, #fce9db);
+    --tqa-status-accent: var(--tqa-undefined, #8f3d00);
+    --tqa-status-border-style: dotted;
+    --tqa-status-weight: 700;
+}
+
+[data-tqa-status="untested" i] {
+    --tqa-status-fg: var(--tqa-neutral, #494f58);
+    --tqa-status-bg: var(--tqa-neutral-bg, #eef0f3);
+    --tqa-status-accent: var(--tqa-line-strong, #b6bcc5);
+    --tqa-status-border-style: dotted;
+    --tqa-status-weight: 500;
+}
+
+[data-tqa-status="ambiguous" i] {
+    --tqa-status-fg: var(--tqa-ambiguous, #4c4557);
+    --tqa-status-bg: var(--tqa-ambiguous-bg, #f2eff7);
+    --tqa-status-accent: var(--tqa-ambiguous, #4c4557);
+    --tqa-status-border-style: dotted;
+    --tqa-status-weight: 600;
+}
+
+.tqa-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 8px;
+    border: 1px var(--tqa-status-border-style, solid) var(--tqa-status-accent, #494f58);
+    border-radius: 999px;
+    background-color: var(--tqa-status-bg, #eef0f3);
+    color: var(--tqa-status-fg, #494f58);
+    font-family: var(--tqa-font, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif);
+    font-size: 12px;
+    font-weight: var(--tqa-status-weight, 600);
+    letter-spacing: 0.02em;
+    line-height: 1.5;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+/* ---- timings and tags ---------------------------------------------------- */
+
+.tqa-timestamp,
+.tqa-duration {
+    color: var(--tqa-muted, #5a6169);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.tqa-duration {
+    font-family: var(--tqa-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+}
+
+.tqa-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.tqa-tag {
+    display: inline-block;
+    padding: 0 6px;
+    border: 1px solid var(--tqa-line, #d5d9df);
+    border-radius: var(--tqa-radius, 4px);
+    background-color: var(--tqa-surface-alt, #f6f8fa);
+    color: var(--tqa-text, #1f2328);
+    font-family: var(--tqa-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+    font-size: 12px;
+    line-height: 1.6;
+    white-space: nowrap;
+}
+
+/* ---- failure text ----------------------------------------------------------
+   An assertion message followed by a traceback: newlines are honoured, long
+   lines wrap, an over-long line scrolls inside the element rather than the
+   page, and the height is never capped - truncating this loses content.
+   -------------------------------------------------------------------------- */
+
+.tqa-error {
+    max-width: 100%;
+    margin: 6px 0;
+    padding: 8px 10px;
+    border: 1px solid var(--tqa-fail, #a01508);
+    border-left-width: 4px;
+    border-radius: var(--tqa-radius, 4px);
+    background-color: var(--tqa-surface-alt, #f6f8fa);
+    color: #24292f;
+    font-family: var(--tqa-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
+    font-size: 13px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    overflow-x: auto;
+    tab-size: 4;
+}
+
+/* ---- screenshot and lightbox ----------------------------------------------
+   Capture is failure-only and a failed capture is suppressed, so the
+   container draws nothing when it holds no image: all framing and spacing
+   lives on the thumbnail, which is never hidden.
+   -------------------------------------------------------------------------- */
+
+.tqa-shot {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+}
+
+.tqa-shot-thumb {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    margin: 6px 0;
+    border: 1px solid var(--tqa-line-strong, #b6bcc5);
+    border-radius: var(--tqa-radius, 4px);
+    background-color: var(--tqa-surface, #ffffff);
+    cursor: zoom-in;
+}
+
+.tqa-lightbox {
+    display: none;
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 1000;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    background-color: rgba(31, 35, 40, 0.85);
+}
+
+.tqa-lightbox[data-tqa-open] {
+    display: flex;
+}
+
+.tqa-lightbox-img {
+    max-width: 94vw;
+    max-height: 86vh;
+    width: auto;
+    height: auto;
+    border: 2px solid #ffffff;
+    background-color: #ffffff;
+}
+
+.tqa-lightbox-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    min-width: 36px;
+    min-height: 36px;
+    padding: 4px 10px;
+    border: 1px solid #ffffff;
+    border-radius: var(--tqa-radius, 4px);
+    background-color: rgba(31, 35, 40, 0.6);
+    color: #ffffff;
+    font: inherit;
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.tqa-lightbox-close:hover {
+    background-color: rgba(31, 35, 40, 0.9);
+}
+
+.tqa-lightbox-close:focus-visible {
+    outline: 3px solid #ffffff;
+    outline-offset: 2px;
+}
+
+/* ---- controls -------------------------------------------------------------
+   The expander glyph is a character escape (U+25BE expanded, U+25B8
+   collapsed) because no webfont is reachable when this text is inlined. It is
+   decorative; the accessible state lives on the control's own markup.
+   -------------------------------------------------------------------------- */
+
+.tqa-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 28px;
+    min-height: 28px;
+    padding: 0 4px;
+    border: 1px solid transparent;
+    border-radius: var(--tqa-radius, 4px);
+    background-color: transparent;
+    color: inherit;
+    font: inherit;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.tqa-toggle::before {
+    content: "\25BE";
+    font-size: 0.875em;
+}
+
+.tqa-toggle:hover {
+    border-color: var(--tqa-line, #d5d9df);
+    background-color: var(--tqa-surface-alt, #f6f8fa);
+}
+
+.tqa-toggle:focus-visible {
+    outline: 2px solid var(--tqa-link-fg, #0b5fa5);
+    outline-offset: 2px;
+}
+
+.tqa-filter {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--tqa-gap, 8px);
+    margin: 0 0 var(--tqa-gap-lg, 16px);
+}
+
+.tqa-filter-btn {
+    padding: 4px 10px;
+    border: 1px solid var(--tqa-line-strong, #b6bcc5);
+    border-radius: 999px;
+    background-color: var(--tqa-surface, #ffffff);
+    color: var(--tqa-text, #1f2328);
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.5;
+    cursor: pointer;
+}
+
+.tqa-filter-btn:hover {
+    border-color: var(--tqa-muted, #5a6169);
+    background-color: var(--tqa-header-bg, #f3f5f8);
+}
+
+.tqa-filter-btn:active {
+    background-color: #e6eaf0;
+}
+
+.tqa-filter-btn:focus-visible {
+    outline: 2px solid var(--tqa-link-fg, #0b5fa5);
+    outline-offset: 2px;
+}
+
+/* ---- state ----------------------------------------------------------------
+   Every hide here is gated on a state attribute, so removing the attributes -
+   or never adding them - leaves the page expanded and fully visible.
+   -------------------------------------------------------------------------- */
+
+.tqa-step[data-tqa-collapsed] .tqa-step-detail {
+    display: none;
+}
+
+.tqa-scenario[data-tqa-collapsed] .tqa-steps {
+    display: none;
+}
+
+.tqa-feature[data-tqa-collapsed] .tqa-scenario,
+.tqa-feature[data-tqa-collapsed] .tqa-background {
+    display: none;
+}
+
+.tqa-step[data-tqa-collapsed] .tqa-toggle::before,
+.tqa-scenario[data-tqa-collapsed] .tqa-toggle::before,
+.tqa-feature[data-tqa-collapsed] .tqa-toggle::before {
+    content: "\25B8";
+}
+
+[data-tqa-filtered] {
+    display: none;
+}
+
+/* ---- artifact index and empty state -------------------------------------- */
+
+.tqa-artifacts {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--tqa-gap, 8px);
+    margin: 0 0 var(--tqa-gap-lg, 16px);
+    padding: 0;
+    list-style: none;
+}
+
+.tqa-artifact {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px var(--tqa-gap, 8px);
+    min-width: 0;
+    padding: 8px 10px;
+    border: 1px solid var(--tqa-line, #d5d9df);
+    border-left: 4px solid var(--tqa-pass, #12652b);
+    border-radius: var(--tqa-radius, 4px);
+    background-color: var(--tqa-surface, #ffffff);
+}
+
+/* An artifact a run has not produced is a warning, not a failure: amber, and
+   dashed so the distinction survives greyscale. */
+.tqa-artifact-missing {
+    border-left-style: dashed;
+    border-left-color: var(--tqa-warn, #7a4b00);
+    background-color: var(--tqa-warn-bg, #fdf1de);
+    color: var(--tqa-warn, #7a4b00);
+}
+
+.tqa-empty {
+    margin: var(--tqa-gap-lg, 16px) 0;
+    padding: 16px;
+    border: 1px dashed var(--tqa-line-strong, #b6bcc5);
+    border-radius: var(--tqa-radius, 4px);
+    background-color: var(--tqa-surface-alt, #f6f8fa);
+    color: var(--tqa-muted, #5a6169);
+    text-align: center;
+}
+
+/* ---- wider viewports ----------------------------------------------------- */
+
+@media only screen and (min-width: 600px) {
+    .tqa-page {
+        padding: var(--tqa-gap-lg, 16px) 20px 40px;
+    }
+
+    .tqa-header {
+        padding: 16px;
+    }
+
+    .tqa-header h1,
+    .tqa-header h2 {
+        font-size: 22px;
+    }
+
+    .tqa-meta,
+    .tqa-artifacts {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .tqa-feature {
+        padding: 16px;
+    }
+
+    .tqa-feature-name {
+        font-size: 19px;
+    }
+
+    .tqa-scenario,
+    .tqa-background {
+        padding: 10px 14px;
+    }
+}
+
+@media only screen and (min-width: 992px) {
+    .tqa-page {
+        padding: 20px 24px 48px;
+    }
+
+    .tqa-meta,
+    .tqa-artifacts {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .tqa-scenario-name {
+        font-size: 16px;
+    }
+
+    .tqa-step {
+        padding: 5px 8px;
+    }
+
+    .tqa-step-detail {
+        padding-left: 20px;
+    }
+}
+
+/* ---- print ----------------------------------------------------------------
+   Collapse is an affordance, so collapsed regions expand on paper. Filtering
+   is a deliberate choice, so filtered records stay hidden - which is why the
+   expansion rule excludes them. Tints are dropped to save ink; status stays
+   legible through its border style and weight.
+   -------------------------------------------------------------------------- */
+
+@media print {
+    .tqa-root {
+        background-color: #ffffff;
+        color: #000000;
+        font-size: 10pt;
+    }
+
+    .tqa-page {
+        max-width: none;
+        padding: 0;
+    }
+
+    .tqa-nav,
+    .tqa-toggle,
+    .tqa-filter,
+    .tqa-filter-btn,
+    .tqa-lightbox,
+    .tqa-lightbox-close {
+        display: none;
+    }
+
+    .tqa-step[data-tqa-collapsed] .tqa-step-detail,
+    .tqa-scenario[data-tqa-collapsed] .tqa-steps,
+    .tqa-feature[data-tqa-collapsed] .tqa-scenario:not([data-tqa-filtered]),
+    .tqa-feature[data-tqa-collapsed] .tqa-background {
+        display: block !important;
+    }
+
+    [data-tqa-status] {
+        --tqa-status-bg: transparent;
+    }
+
+    .tqa-header,
+    .tqa-meta,
+    .tqa-feature,
+    .tqa-scenario,
+    .tqa-background,
+    .tqa-step,
+    .tqa-badge,
+    .tqa-count,
+    .tqa-tag,
+    .tqa-empty,
+    .tqa-artifact,
+    .tqa-shot-thumb,
+    .tqa-table,
+    .tqa-table th,
+    .tqa-error {
+        background-color: transparent;
+    }
+
+    .tqa-badge,
+    .tqa-count {
+        font-weight: 700;
+    }
+
+    .tqa-error {
+        overflow: visible;
+        border: 1px solid #000000;
+        color: #000000;
+    }
+
+    .tqa-feature,
+    .tqa-scenario,
+    .tqa-background,
+    .tqa-step,
+    .tqa-shot-thumb {
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }
+
+    .tqa-link {
+        color: #000000;
+    }
+}
