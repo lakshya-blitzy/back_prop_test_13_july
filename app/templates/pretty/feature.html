@@ -1,0 +1,657 @@
+{#-
+  ===========================================================================
+  pretty/feature.html - the feature detail page of the generated report tree.
+  ===========================================================================
+
+  One of the six page templates app/reporting/pretty_reports.py renders, and
+  the only one of them rendered MORE THAN ONCE: it is rendered once per
+  feature, emitting cucumber-html-reports/report-feature_<hash>.html for each.
+  That is contract 2 of the port's two HTML artifacts - the tree the Java
+  build produced with me.jvt.cucumber:reporting-plugin 7.2.0 (pom.xml:66-70),
+  which pulls net.masterthought:cucumber-reporting 5.6.1 over
+  org.apache.velocity:velocity-engine-core 2.3. Contract 1, the single
+  self-contained page from io.cucumber:html-formatter 17.0.0, is a different
+  generator with its own template set under app/templates/artifact/, and the
+  two sets share only the three partials in app/templates/partials/.
+
+  THE TEMPLATE NAME AND THE ARTIFACT NAME DIFFER ON PURPOSE, as they do for
+  every page in this folder: the file on disk is feature.html and the pages it
+  writes are report-feature_<hash>.html. Neither name follows the other, and
+  this file is not renamed after its output.
+
+  ---------------------------------------------------------------------------
+  WHY THIS PAGE'S REFERENCES ARE THE BEST IN THE TREE
+  ---------------------------------------------------------------------------
+  report-feature_1735223818.html (the CRM feature, with failures) and
+  report-feature_3146354636.html (the Inventory feature, all passing) each
+  carry ZERO merge-conflict markers - verified by counting - unlike the four
+  overview pages, which splice two different runs. Between them they cover the
+  failure rendering and the all-passing rendering of every structure on this
+  page, so every "measured" note below cites one or both of them directly
+  rather than inferring from a spliced file.
+
+  ---------------------------------------------------------------------------
+  THE RENDER CONTEXT - the contract app/reporting/pretty_reports.py renders
+  against and the contract tests/test_pretty_reports.py asserts. Neither
+  exists yet, so this declaration is the specification for both.
+  ---------------------------------------------------------------------------
+      feature        PRIMARY, and the only input this page needs. One feature
+                     mapping from the normalised result model - the shape
+                     tests/fixtures/sample_results.json carries and
+                     app/templates/view/feature.html consumes:
+
+                         uri           string, e.g. "file:features/Crm.feature"
+                         id            string. NOT unique across the run; see
+                                       the collision note below
+                         keyword       string, "Feature"
+                         line          integer
+                         name          string
+                         description   string, indentation VERBATIM, "" when
+                                       there is none rather than absent
+                         tags          list of tag mappings, possibly empty
+                         elements       list of scenario and Background
+                                        occurrences, in source order
+
+                     Every statistic on the page is derived from it here, so a
+                     writer that hands over nothing else still gets a complete
+                     page.
+
+      tag_hrefs      OPTIONAL mapping, tag name -> the tag page's filename, as
+                     a plain relative name. Reaches the tags row, where a tag
+                     with no entry renders as a plain chip rather than as a
+                     dead link. NO FILENAME IS COMPUTED HERE; see the note on
+                     hashes below.
+
+      feature_stats  OPTIONAL OVERRIDE, for a writer that would rather compute
+                     the statistics row in Python. A mapping in the row shape
+                     app/templates/pretty/_stats_table.html documents -
+                     steps_passed, steps_failed, steps_skipped, steps_pending,
+                     steps_undefined, steps_total, scenarios_passed,
+                     scenarios_failed, scenarios_total, duration_ns and
+                     status. When it is present and non-empty it is used and
+                     the derivation below is skipped. Its name key is ignored
+                     in favour of the feature's own, and any href it carries
+                     is dropped, because this page's key cell is plain text
+                     for the structural reason recorded under THE ONE ROW.
+
+      project_name         )  the layout's own context, documented there. This
+      build_date_display   )  page neither reads nor forwards them.
+
+  title_suffix and active_page are the layout's too, and are handled at the
+  top of the template body rather than passed in: the title becomes
+  "Cucumber Reports  - Feature: <name>" - the double space is the layout's and
+  is deliberate - and NO active_page is set, because all four navigation items
+  on a reference detail page are plain, with no active class anywhere on the
+  page.
+
+  Every input above is reached through the guarded-default form, which answers
+  for a name without ever reading it, so the page renders under a strict
+  undefined policy even with no context at all. That is not tidiness: the
+  run's exit contract requires all four artifacts to be written even when the
+  tag expression selects nothing, so a degenerate input is reachable and must
+  produce a page rather than take the report writer down.
+
+  ---------------------------------------------------------------------------
+  THE MEASURED PAGE ORDER, top to bottom
+  ---------------------------------------------------------------------------
+  Identical on both reference feature pages:
+
+      the layout's chrome            head, navigation, build-info table
+      the lead                       <h2>Feature Report</h2>, AND NOTHING ELSE
+      the statistics table           one row, inside the Bootstrap grid
+      the collapse-all control       the chevron pair
+      the element tree               div.feature and everything under it
+      the collapse-all control       AGAIN - measured, see below
+      <br/>                          page-owned, per the layout's own note
+      the layout's footer
+
+  THE LEAD HAS NO PARAGRAPH. Measured: each of the four overview pages carries
+  one under its heading and neither detail page does. The absence is the
+  contract, not an omission to fill.
+
+  THE COLLAPSE-ALL CONTROL IS EMITTED TWICE, and that is measured rather than
+  chosen: both feature pages carry two chevron-down and two chevron-up icons -
+  one block between the statistics table and the element tree, one below the
+  tree - and the two blocks are byte-identical; report-tag_2208711665.html
+  carries two as well, while overview-failures.html carries one. A feature
+  page runs to hundreds of lines, so the lower control is what lets a reader
+  collapse the tree again without scrolling back up. They are rendered from
+  ONE macro below so the pair cannot drift apart, and neither consumes a
+  collapse id.
+
+  TWO id="report" CONTAINERS BECOME ONE. The reference wraps BOTH the
+  statistics table and the element tree in id="report", which is invalid - one
+  document, one id - and it leaves the collapse-all control's own
+  '#report .collapsable-details' selector ambiguous about which subtree it
+  scopes. The id is emitted here EXACTLY ONCE, on the element-tree container,
+  and the statistics table sits in a plain container-fluid. Acceptance of both
+  HTML artifacts is structural and never a byte comparison, so the correction
+  costs no parity, and it is what makes that selector well defined.
+
+  ---------------------------------------------------------------------------
+  THE ONE ROW, AND WHERE ITS NUMBERS COME FROM
+  ---------------------------------------------------------------------------
+  The table is _stats_table.html's, called with first_column_label='Feature',
+  sortable=false and NO totals, which is what produces the measured detail
+  form: <table class="stats-table"> with no id and no table-hover, exactly one
+  body row, and no tfoot. The id is what the layout's tablesorter
+  initialisation binds to, so passing sortable=true here would put a second
+  element with that id on a page whose reference carries none, and would
+  advertise sorting on a table with one row.
+
+  THE KEY CELL IS PLAIN TEXT: <td class="tagname">Testinium app CRM Module</td>
+  with no anchor. That is the measured difference from overview_features.html,
+  where the same cell wraps a link to this very page - and the reason is
+  structural rather than cosmetic, because the reader is already on it.
+  Passing no href is what produces it, so no href is passed and any href an
+  override carries is dropped.
+
+  THE ARITHMETIC WAS RE-DERIVED FROM THE REFERENCE DATA, not guessed.
+  Aggregating the reference cucumber.json reproduces the whole of
+  report-feature_1735223818.html's row: 14 passed, 2 failed and 3 skipped
+  steps over a total of 19; 2 passed and 2 failed scenarios over a total of 4;
+  data-value="100186000000" rendering 1:40.186; and status Failed. Four rules
+  follow from it and each one is load-bearing:
+
+    1. BACKGROUND STEPS ARE COUNTED in the six step columns. The CRM feature's
+       four Background occurrences contribute one passed step each, and only
+       counting them reaches 19.
+    2. BACKGROUND OCCURRENCES ARE NOT COUNTED AS SCENARIOS. The same feature
+       has four scenarios and four Background occurrences, and the Scenarios
+       total is 4.
+    3. A SCENARIO IS PASSED WHEN ITS STATUS IS passed AND FAILED WHEN IT IS
+       failed, AND COUNTS IN NEITHER COLUMN OTHERWISE. The reference has only
+       the two, so passed plus failed happens to equal the total there; the
+       table has no third scenario column, so a scenario that ends undefined,
+       pending or skipped is in the total alone. That is the generator's own
+       shape and it is reproduced rather than corrected.
+    4. THE DURATION IS THE SUM OF EVERY STEP DURATION, Background steps
+       included, in raw nanoseconds - which is the number the sort attribute
+       carries and the only reason 1:40.186 sorts above 24.654 rather than
+       below it lexically.
+
+  The status cell is the feature's own status: the worst across the steps of
+  all of its elements, which is what the element tree's feature brief shows a
+  few lines further down the same page. Both readings come from the SAME macro
+  in _element_tree.html, so the row and the brief cannot disagree.
+
+  A NON-SELECTED SCENARIO IS NEITHER RENDERED NOR COUNTED. The port's model
+  carries every scenario with a selected flag, where the Java runner simply
+  never started the ones its tag expression excluded and they were therefore
+  absent from the JSON this tree was generated from. Dropping them here is
+  what keeps the two in agreement, and it is the same rule
+  overview_steps.html applies to its own counts. The test is definedness
+  rather than truth - only an explicit false drops an element - because an
+  absent flag is not a decision. The filtered list feeds BOTH the statistics
+  row and the element tree, so the two are two readings of one list rather
+  than two calculations; and if pretty_reports.py has already filtered, doing
+  it again changes nothing.
+
+  ---------------------------------------------------------------------------
+  THE COLLAPSE-ALL CONTROL'S DRIVER: ONE OWNER, DECIDED ON EVIDENCE
+  ---------------------------------------------------------------------------
+  Two independent state mechanisms coexist in this tree, and attaching both to
+  one control would give it two state machines that desynchronise the moment a
+  reader touches either:
+
+    - the VENDORED collapse widget owns the element, steps and message
+      containers, driven by their own data-toggle and data-target attributes
+      and its own "in" class, which _element_tree.html applies to
+      failure-bearing containers as measured. That class is generator
+      vocabulary, not one of this port's state hooks.
+    - app/static/js/report.js owns filtering, step-detail expansion and the
+      screenshot overlay, through its data-report-* selection attributes.
+
+  app/static/js/report.js WAS READ AS GENERATED, and it does not manipulate
+  the vendored widget's class at all: its three state classes are
+  report-is-collapsed, report-is-filtered-out and report-lightbox-is-open, and
+  its toggle-all handler resolves [data-report-detail] regions and toggles
+  report-is-collapsed on them. The element and steps containers on this page
+  carry no data-report-detail - they are the vendored widget's - so a
+  data-report-toggle-all control here would address a different region set
+  altogether, and on this page usually an empty one, since _element_tree.html
+  withholds the failure text and splices arguments inline and step_row then
+  emits no detail region at all.
+
+  THE DECISION, therefore: the reference's own onClick is RETAINED, invoking
+  the vendored plugin as the reference does - $('#report .collapsable-details')
+  .collapse('show') and .collapse('hide'). That is reference-carried
+  INVOCATION of a vendored plugin, not new inline behaviour, and this folder
+  is forbidden from reimplementing the widget's collapse logic. NO
+  data-report-toggle-all is emitted anywhere on this page, so exactly one
+  driver is attached to each control and the containers stay purely
+  vendor-driven. tests/test_pretty_reports.py mirrors this choice: the pair
+  renders with the measured classes, and no page carries both an onClick and a
+  data-report-toggle-all.
+
+  No report.js state hook is attached to the element or steps containers
+  either. step_row's own toggle and detail region live INSIDE a step, which is
+  a leaf here, so they never compete with the widget - that nesting is
+  expected and correct.
+
+  NO data-report-root IS EMITTED. The script falls back to the whole document
+  when no such ancestor exists, this page has no filter control and no
+  toggle-all of the script's own, and a scope containing nothing the script
+  scopes is a hook with no purpose - which is the reasoning
+  overview_steps.html records for the same omission.
+
+  ---------------------------------------------------------------------------
+  WHAT THIS PAGE DELEGATES, AND KEEPS DELEGATED
+  ---------------------------------------------------------------------------
+  Every structure below the statistics table belongs to _element_tree.html,
+  which is also what makes a scenario look the same here, on the tag page and
+  on the failures page. This page chooses only the two variations that
+  distinguish a feature page, and both are parameters rather than branches on
+  a page name:
+
+      inner_level=true      div.elements.inner-level, the form measured
+                            inside a feature wrapper. The tag and failures
+                            pages pass false and get div.elements.
+      no feature link       feature_block never opens an element with a
+                            <b>Feature:</b> row, because the page already is
+                            that feature's page. That row is the tag and
+                            failures pages' addition.
+
+  Everything else that page holds to is that file's, is documented there and
+  is not restated here: the tags row emitted even when a feature has no tags -
+  five of this suite's ten features are untagged, so that is the common case -
+  the description rendered with its leading indentation verbatim and emitted
+  even when empty, the Background occurrence repeated before every scenario
+  and carrying no id, tags or start timestamp, the per-scenario start
+  timestamp, the "in" rule on failure-bearing containers only, the step rows
+  with their arguments spliced into the name and a duration fallback for a
+  skipped step that carries no duration key, the failure text in an escaped
+  monospace block, and the screenshot macro called unguarded because its own
+  emptiness is the test and a scenario with no embedding is the normal state.
+  The single per-page screenshot overlay is the layout's.
+
+  COLLAPSE IDS ARE UNIQUE BECAUSE THIS PAGE THREADS ONE COUNTER, which is the
+  counter contract _element_tree.html sets out: one namespace, allocated here,
+  handed to the single feature_block call and shared by every element, steps
+  group and message region below it. Nothing here is random, time-based or
+  render-order dependent, so identical input yields byte-identical ids - which
+  is what the plan requires when it asks for the page set to be identical for
+  identical inputs.
+
+  ---------------------------------------------------------------------------
+  NO FILENAME AND NO LINK TARGET IS COMPUTED HERE
+  ---------------------------------------------------------------------------
+  This page's own output name is a numeric hash - report-feature_1735223818.html
+  and report-feature_3146354636.html in the reference: a fixed prefix, an
+  unsigned decimal hash and the extension, with feature pages hashing the
+  feature URI and tag pages the tag name. That algorithm belongs to
+  app/reporting/pretty_reports.py, which derives it from cucumber-reporting
+  5.6.1 and confirms it against a regenerated baseline, after which
+  tests/test_pretty_reports.py asserts exact filenames for a known input
+  rather than merely numeric-looking ones. Because the feature URI moves into
+  features/, the feature-page filenames necessarily change - expected, not a
+  defect. Every filename and href this page renders, its own included, is a
+  value it was handed.
+
+  ---------------------------------------------------------------------------
+  THE SOURCE'S INCONSISTENCIES ARE RENDERED, NOT TIDIED
+  ---------------------------------------------------------------------------
+  Two features of this suite are titled "Testinium app Inventory feature" and
+  two "Testinium app login feature", so TWO PAIRS SHARE A JSON id. The
+  collision is source behaviour and is preserved here, which is also why the
+  Flask routes key a feature on its index instead of its id - and why this
+  page never uses the id for anything. Contact.feature's header is mis-titled
+  "Inventory feature" and Notes.feature's "login feature", and both render as
+  they stand. The feature titles say Testinium, the assertions target Odoo and
+  the pipeline's original checkout named Upgenix: there is no renaming, and
+  the report metadata, the page title and the key cell all use whatever the
+  data itself carries. The Examples tables carry plaintext credentials for an
+  external test instance; they are pre-existing fixture data for a system this
+  port does not own, and where they surface in a step's arguments they are
+  neither redacted, masked, parameterised nor flagged.
+
+  ---------------------------------------------------------------------------
+  CONSTRAINTS THIS FILE HOLDS TO
+  ---------------------------------------------------------------------------
+    - IT EXTENDS pretty/_layout.html AND NOTHING ELSE. app/templates/base.html
+      builds its asset links with the framework's static-URL builder, which
+      resolves only while an application is serving; these pages are written
+      to disk and opened over the file protocol or straight from a Jenkins
+      workspace. base.html says the same thing from its own side.
+    - NO framework URL building, no application endpoint, no absolute or
+      protocol-relative address, and no asset reference of its own. Every
+      reference the emitted page carries is the layout's or a caller-supplied
+      relative filename, so the whole page resolves inside the tree, offline,
+      with no origin and no server.
+    - NO value is declared pre-escaped or trusted markup. The engine's
+      automatic escaping is relied on throughout, and it matters here: feature
+      names in this suite contain quotation marks and periods, descriptions
+      carry punctuation, and assertion text carries angle brackets and
+      characters outside ASCII. The reference generator escapes its own output
+      too - &quot;, &lt;, &gt; and a symbol entity all appear in
+      report-feature_1735223818.html.
+    - NO merge-conflict marker, ever. This page's two references happen to be
+      clean, but the rule is absolute for output: the reference's markers stay
+      in the read-only reference checkout and every writer of this port emits
+      clean pages.
+    - NO PRESENTATION STATE OF THE PORT'S OWN: none of main.css's three
+      boolean hooks - data-tqa-collapsed, data-tqa-filtered, data-tqa-open -
+      and none of report.js's three runtime state classes. The stylesheet
+      reads their absence as expanded, visible and closed, so server output
+      always describes a fully expanded, fully visible page and stays correct
+      with scripting off and on paper. Selection attributes are a different
+      thing and are allowed; the vendored widget's "in" is separate again and
+      is kept, applied by _element_tree.html.
+    - NO INLINE JAVASCRIPT beyond the collapse-all control's onClick, which is
+      the reference's own and is the decision recorded above. No chart belongs
+      on this page and the tablesorter initialisation is the layout's, emitted
+      exactly once from there.
+    - CLASS VOCABULARY: the bare generator classes this page itself emits -
+      container-fluid, row, col-md-10, col-md-offset-1, col-md-1,
+      col-md-offset-10, fa, fa-chevron-circle-down, fa-chevron-circle-up,
+      fa-2x and collapsable-control, the last of which
+      app/static/vendor/css/cucumber.css styles at line 206 while the icons
+      resolve from the vendored Font Awesome - and alongside them the port's
+      own data-tqa-status hook on the report container. main.css is entirely
+      tqa- prefixed with no bare element, class or id selector, so the two
+      sets are declared over disjoint selectors and no collision is possible.
+      Every tqa- class inside the tree and inside the table is emitted by the
+      macros this page calls.
+
+      TWO tqa- CLASSES ARE DELIBERATELY WITHHELD from this page's own markup,
+      on the measurement overview_steps.html records rather than on taste:
+      tqa-page and tqa-table-wrap impose their own box - a max-width, padding
+      and an overflow container - on markup the Bootstrap grid already lays
+      out, and the grid is what carries this page's responsive and print
+      behaviour. tqa-toggle is likewise not put on the chevron icons: it
+      styles a real button and main.css hides it in print, so it would change
+      both the rendered control and the printed page. The status hook is safe
+      where the classes are not, because every rule main.css declares for
+      data-tqa-status sets custom properties only and so paints nothing by
+      itself.
+    - NO COLOUR, dimension or presentation attribute in the markup and no
+      embedded stylesheet block. Status colour comes from the vendored
+      stylesheet's status classes and from main.css's data-tqa-status tokens,
+      which between them cover all seven statuses; the error text's monospace
+      rendering, the expandable step detail, the per-scenario timestamps and
+      the metadata block are the partials' and the layout's.
+
+  ACCESSIBILITY
+  -------------
+  The invisible kind is applied here because it changes nothing rendered: the
+  page's one heading is a real h2 inside the layout's landmarks, the two
+  chevron icons are decorative glyphs with no text of their own and are hidden
+  from assistive technology while carrying a real accessible name for the
+  action they perform, and every status on the page is spelt out in words by
+  the badge and label macros rather than carried by colour alone. Two visible
+  defaults are left as measured, because the reference is authoritative over a
+  generic recommendation and silently changing the rendered output would hide
+  what the source does:
+
+    BLITZY [A11Y]: the collapse-all controls are <i> elements with an onClick
+      and no role or tabindex, exactly as measured. They are therefore
+      mouse-operable and absent from the tab order. Neither correction is
+      free: adding tabindex alone yields a focusable control that Enter and
+      Space do nothing to, since the handler is a click; adding key handling
+      would put this page in the business of the widget's own behaviour; and
+      turning them into buttons or anchors changes the emitted element type
+      and so departs from the artifact this page is accepted against,
+      structure for structure. Implemented as measured, with an accessible
+      name added - which is invisible - and flagged for a designer decision
+      rather than half-fixed. What survives regardless: the containers a
+      reader opens a report for, the failure-bearing ones, ship expanded.
+    BLITZY [A11Y]: the icons are 2x-scaled glyphs roughly 30px square, below
+      the 44px touch-target recommendation. The size is the vendored fa-2x
+      class the reference applies and is not overridden here. Flagged for
+      review rather than silently enlarged.
+-#}
+{#- ---------------------------------------------------------------------------
+  TWO IMPORTS, AND THE TWO THIS FILE DELIBERATELY DOES NOT MAKE
+  ---------------------------------------------------------------------------
+  pretty/_stats_table.html and pretty/_element_tree.html are imported, and
+  every name taken from them is used below. The plain import form is this
+  folder's own: no macro in either file reads an ambient template variable, so
+  the same call renders identically from a page and from a test harness.
+
+  pretty/_macros.html IS NOT IMPORTED HERE, and that is a decision rather than
+  an oversight. The requirements for this file call for it, but this page emits
+  no cell, span, percentage or label of its own: the statistics row's counts,
+  its nanosecond sort attribute, its rendered duration and its capitalised
+  status label are all built inside _stats_table.html, and the element tree's
+  inline durations and timestamps inside _element_tree.html - both of which
+  import that file directly, as its correct owners. Importing it here as well
+  would leave a name this template never uses, which this folder's own
+  convention forbids for the good reason that an unused alias is how the next
+  reader comes to believe a page formats something it does not. The one thing
+  that would justify the import - a feature-level duration - is measured
+  ABSENT from the feature brief, so inventing markup to justify an import
+  would be the worse error. Nothing about the emitted page changes either way.
+
+  partials/status_badge.html is likewise not imported, for a different reason:
+  it is not among this page's declared dependencies. Its status_token is the
+  project's single normalisation point and _element_tree.html does not
+  re-export a name it merely imported, so where this page needs one step's
+  normalised status it asks that file's own steps_status over a one-step list -
+  which is exactly that fold applied to one step, with the empty answer set to
+  'unknown' so an unrecognised status cannot be silently counted as a pass.
+  Normalisation therefore still happens in exactly one place.
+  --------------------------------------------------------------------------- -#}
+{% extends "pretty/_layout.html" %}
+{% import 'pretty/_stats_table.html' as stats %}
+{% import 'pretty/_element_tree.html' as tree %}
+
+{#- ---------------------------------------------------------------------
+    THE SUBJECT, resolved once and read everywhere below.
+
+    The guarded-default form answers for an undefined name without reading
+    it, so a page rendered with no context at all still renders. Every
+    access afterwards goes through .get on a value already known to be a
+    mapping, so a malformed feature degrades into an empty page rather than
+    raising inside the report writer.
+    --------------------------------------------------------------------- -#}
+{%- set subject_input = feature|default(none) -%}
+{%- set subject_map = subject_input if subject_input is mapping else {} -%}
+{%- set feature_name = subject_map.get('name') if subject_map.get('name') is string else '' -%}
+{%- set tag_targets = tag_hrefs|default(none) -%}
+{%- set tag_map = tag_targets if tag_targets is mapping else {} -%}
+
+{#- The layout's own context, set here rather than passed, which is the form
+    it documents. The title becomes "Cucumber Reports  - Feature: <name>",
+    the layout's double space included.
+
+    active_page IS DELIBERATELY NOT SET. All four navigation items on a
+    reference detail page are plain, and the layout tests definedness before
+    truth so an absent value marks none of them and raises nothing under a
+    strict undefined policy. Setting it would put an active class on this
+    page that the reference does not have. -#}
+{% set title_suffix = 'Feature: ' ~ feature_name %}
+
+{#- ---------------------------------------------------------------------
+    THE ELEMENTS THIS PAGE RENDERS AND COUNTS - one list, read twice.
+
+    Only an explicit selected=false drops an element, per the note above:
+    an absent flag is not a decision. Background occurrences carry the flag
+    too and are filtered on their own value, so nothing pairs a Background
+    with the scenario that follows it and nothing is deduplicated or
+    hoisted.
+    --------------------------------------------------------------------- -#}
+{%- set raw_elements = subject_map.get('elements') -%}
+{%- set element_input = raw_elements if (raw_elements is sequence and raw_elements is not string and raw_elements is not mapping) else [] -%}
+{%- set shown_elements = [] -%}
+{%- for element in element_input -%}
+    {%- if element is mapping and element.get('selected') is not false -%}
+        {%- set _ = shown_elements.append(element) -%}
+    {%- endif -%}
+{%- endfor -%}
+{#- The feature the tree renders: the model's own mapping with its element
+    list replaced by the filtered one, so the tree and the statistics row
+    are two readings of one list. Every other key - name, keyword,
+    description, tags - is carried through untouched. -#}
+{%- set subject = dict(subject_map, elements=shown_elements) -%}
+
+{#- ---------------------------------------------------------------------
+    THE STATISTICS ROW.
+
+    Derived in one pass over the filtered elements, by the four rules
+    re-derived from the reference data above. The status comes from
+    _element_tree.html's own macro, which is what the feature brief in the
+    tree below uses, so the two cannot disagree.
+
+    Every duration is added through element_duration_ns, the same macro the
+    tree's inline durations use, which ignores a malformed value rather than
+    reading it as zero - so one bad step cannot poison the sum and the row
+    cannot disagree with the spans beneath it.
+    --------------------------------------------------------------------- -#}
+{%- set tally = namespace(passed=0, failed=0, skipped=0, pending=0, undefined=0, steps=0,
+                          scenarios_passed=0, scenarios_failed=0, scenarios=0, duration=0) -%}
+{%- for element in shown_elements -%}
+    {%- set raw_steps = element.get('steps') -%}
+    {%- set step_items = raw_steps if (raw_steps is sequence and raw_steps is not string and raw_steps is not mapping) else [] -%}
+    {#- The six step columns. Background steps take part, which is rule 1.
+
+        The status is normalised by _element_tree.html's own fold over a
+        one-step list, for the reason recorded with the imports: it is the
+        project's single normalisation point reached through the one file this
+        page may import. empty='unknown' matters - the fold's own default for
+        an empty answer is 'passed', and a step whose status this port's
+        vocabulary does not recognise must land in the total alone rather than
+        in the passed column. -#}
+    {%- for step in step_items -%}
+        {%- if step is mapping -%}
+            {%- set step_token = tree.steps_status([step], empty='unknown')|string|trim -%}
+            {%- set tally.steps = tally.steps + 1 -%}
+            {%- if step_token == 'passed' -%}{%- set tally.passed = tally.passed + 1 -%}
+            {%- elif step_token == 'failed' -%}{%- set tally.failed = tally.failed + 1 -%}
+            {%- elif step_token == 'skipped' -%}{%- set tally.skipped = tally.skipped + 1 -%}
+            {%- elif step_token == 'pending' -%}{%- set tally.pending = tally.pending + 1 -%}
+            {%- elif step_token == 'undefined' -%}{%- set tally.undefined = tally.undefined + 1 -%}
+            {%- endif -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {#- Rule 4: every step duration, Background steps included. -#}
+    {%- set tally.duration = tally.duration + (tree.element_duration_ns(element)|int) -%}
+    {#- Rules 2 and 3: a Background occurrence is not a scenario, and only
+        passed and failed have a column of their own. -#}
+    {%- set kind = (element.get('type') if element.get('type') is string else '')|trim|lower -%}
+    {%- if kind != 'background' -%}
+        {%- set tally.scenarios = tally.scenarios + 1 -%}
+        {%- set element_token = tree.element_status(element)|string|trim -%}
+        {%- if element_token == 'passed' -%}{%- set tally.scenarios_passed = tally.scenarios_passed + 1 -%}
+        {%- elif element_token == 'failed' -%}{%- set tally.scenarios_failed = tally.scenarios_failed + 1 -%}
+        {%- endif -%}
+    {%- endif -%}
+{%- endfor -%}
+{%- set feature_token = tree.feature_status(subject)|string|trim -%}
+{%- set derived_row = {
+      'name': feature_name,
+      'steps_passed': tally.passed,
+      'steps_failed': tally.failed,
+      'steps_skipped': tally.skipped,
+      'steps_pending': tally.pending,
+      'steps_undefined': tally.undefined,
+      'steps_total': tally.steps,
+      'scenarios_passed': tally.scenarios_passed,
+      'scenarios_failed': tally.scenarios_failed,
+      'scenarios_total': tally.scenarios,
+      'duration_ns': tally.duration,
+      'status': feature_token
+    } -%}
+{#- The override, when a writer supplied one: its own counts, this page's
+    name, and NO href - the key cell is plain text on this page, and that is
+    not a caller's choice to make. Presence and content both decide, so an
+    empty mapping falls back to the derivation rather than emitting a row of
+    zeros beside a populated tree. -#}
+{%- set supplied_stats = feature_stats|default(none) -%}
+{%- set stats_row = dict(supplied_stats, name=feature_name, href=none) if (supplied_stats is mapping and supplied_stats) else derived_row -%}
+
+{#- One counter for the whole page, threaded into the single feature_block
+    call, which is the counter contract _element_tree.html sets out. The two
+    collapse-all controls consume nothing from it. -#}
+{%- set collapse_ids = namespace(next=0) -%}
+
+
+{#- ---------------------------------------------------------------------
+    THE COLLAPSE-ALL CONTROL, defined once and rendered in both measured
+    positions so the two blocks cannot drift apart.
+
+    THE DRIVER IS THE VENDORED COLLAPSE PLUGIN, invoked exactly as the
+    reference invokes it, and it is the only driver attached: no
+    data-report-toggle-all is emitted anywhere on this page. The full
+    decision, and the reading of app/static/js/report.js it rests on, is
+    recorded in the header above.
+
+    The selector is well defined precisely because this page emits
+    id="report" once, on the element-tree container: it reaches the element,
+    steps and message containers of the tree and nothing else.
+
+    The icons are decorative glyphs, so each is hidden from assistive
+    technology and carries a real accessible name for the action it
+    performs - both invisible additions to the measured markup.
+    --------------------------------------------------------------------- -#}
+{%- macro collapse_all_control() -%}
+<div class="container-fluid">
+  <div class="row">
+    <div class="col-md-1 col-md-offset-10">
+      <i class="fa fa-chevron-circle-down fa-2x collapsable-control"
+        role="button" aria-label="Expand all scenarios and steps"
+        onClick="javascript:$('#report .collapsable-details').collapse('show')"></i>
+      <i class="fa fa-chevron-circle-up fa-2x collapsable-control"
+        role="button" aria-label="Collapse all scenarios and steps"
+        onClick="javascript:$('#report .collapsable-details').collapse('hide')"></i>
+    </div>
+  </div>
+</div>
+{%- endmacro -%}
+
+
+{#- The lead: the heading and nothing else, measured. It opens on the block
+    tag's own line so the layout's surrounding indentation is reproduced
+    exactly; a newline there would insert a blank line the reference does
+    not have. -#}
+{% block lead %}    <h2>Feature Report</h2>
+{%- endblock %}
+
+{#- head_extra is deliberately NOT overridden: the two chart-bearing
+    overviews inject their chart initialisation through it, and this page has
+    no chart, so leaving the block untouched keeps every canvas element and
+    every chart constructor out of the emitted page. -#}
+
+{% block content %}
+{# The statistics table. A PLAIN container-fluid: the reference wraps this
+    in a second id="report", and the id is emitted once, further down, on the
+    element tree - see the header. #}
+<div class="container-fluid">
+  <div class="row">
+    <div class="col-md-10 col-md-offset-1">
+      {{ stats.stats_table([stats_row], 'Feature', sortable=false) }}
+    </div>
+  </div>
+</div>
+
+{{ collapse_all_control() }}
+
+{# The element tree, and THE ONE id="report" ON THIS PAGE. The status hook
+    alongside it is the port's own vocabulary; every main.css rule for that
+    attribute sets custom properties only, so it paints nothing here and
+    cannot mask the generator's own status colours inside the tree.
+
+    inner_level=true selects the div.elements.inner-level form measured
+    inside a feature wrapper, and feature_block opens no element with a
+    <b>Feature:</b> row - both variations are recorded in the header.
+
+    The comment openers in this block carry no whitespace-stripping dash on
+    purpose: the blank lines between the four emitted regions are what keeps
+    the written page as readable as the reference's own. #}
+<div class="container-fluid" id="report" data-tqa-status="{{ feature_token }}">
+  <div class="row">
+    <div class="col-md-10 col-md-offset-1">
+      {{ tree.feature_block(subject,
+                            tag_hrefs=tag_map,
+                            counter=collapse_ids,
+                            inner_level=true) }}
+    </div>
+  </div>
+</div>
+
+{{ collapse_all_control() }}
+
+{# The page-owned break before the layout's footer, measured on this page.
+    The layout does not emit it, because three of the eight reference pages
+    do not carry one. #}
+<br/>
+{% endblock %}

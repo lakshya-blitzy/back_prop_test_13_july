@@ -564,7 +564,22 @@
     right: 0;
     bottom: 0;
     left: 0;
-    z-index: 1000;
+    /* ABOVE THE VENDORED FIXED NAVBAR, and every number here is read out of
+       app/static/vendor/css/bootstrap.min.css rather than chosen: that file
+       declares .navbar-fixed-top at 1030, .modal-backdrop at 1040 and .modal
+       at 1050, and every page of the generated report tree carries that
+       navbar. At the previous 1000 the overlay painted UNDER it. Measured in
+       Chrome two ways, on a tag detail page and on an emitted report page: the
+       navbar stayed bright and undimmed over the scrim's top 51px, and
+       document.elementFromPoint at the centre of the overlay's own close
+       control returned the navbar's "Failures" link instead of the control, so
+       a real pointer click reached navigation rather than dismissing the
+       overlay. 1060 is the lowest value that clears all three vendored layers
+       - the fixed navbar at 1030, its backdrop at 1040 and the modal layer at
+       1050 - so the overlay cannot be painted over by any of them. Harmless on
+       the self-contained artifact, which has no fixed navbar and no other
+       stacking context at all. */
+    z-index: 1060;
     /* Column, so the caption sits BELOW the enlarged image rather than beside
        it. Measured in Chrome with the row default: the caption became a second
        flex item on the image's right and pushed the image 249px off centre. */

@@ -1,0 +1,784 @@
+{#-
+  ===========================================================================
+  pretty/overview_features.html - the features statistics landing page of the
+  generated report tree.
+  ===========================================================================
+
+  One of the six page templates app/reporting/pretty_reports.py renders. It
+  produces cucumber-html-reports/overview-features.html inside the generated
+  report tree - contract 2 of the port's two HTML artifacts, whose reference
+  output came from me.jvt.cucumber:reporting-plugin 7.2.0 (pom.xml:66-70) over
+  net.masterthought:cucumber-reporting 5.6.1 and velocity-engine-core 2.3.
+  Contract 1, the single self-contained page from io.cucumber:html-formatter
+  17.0.0, is a different generator with its own template set under
+  app/templates/artifact/; the only markup the two share is the three partials
+  in app/templates/partials/.
+
+  The template is underscore-named and the artifact it writes is hyphen-named:
+  the file is overview_features.html and it produces overview-features.html.
+  The two names differ on purpose and neither follows the other.
+
+  This is the tree's landing page - app/utils/paths.py names
+  overview-features.html as the overview index, and a request for the
+  cucumber/ directory is served this file.
+
+  ---------------------------------------------------------------------------
+  PROVENANCE: MEASURED, THEN CONFIRMED AGAINST THE GENERATOR ITSELF
+  ---------------------------------------------------------------------------
+  Two sources, and where they disagree the second wins because it is the
+  program rather than one of its outputs:
+
+    1. The committed reference page. It carries NINE unresolved merge-conflict
+       marker blocks and splices two different runs, so its STRUCTURE is
+       readable and its ARITHMETIC is not - the same page pairs
+       data-value="9533750000" with body text 30.202 on one side and 9.533 on
+       the other. Nothing here is derived from those numbers. It was read
+       marker-stripped, keeping the HEAD side, and only for shape.
+
+    2. The generator's own Velocity templates and compiled classes, read from
+       the resolved artifact: templates/generators/overviewFeatures.vm, the
+       three templates/js/*-chart.js.vm files, templates/macros/report/
+       statsTable.vm and templates/macros/page/{title,lead}.vm, plus the
+       bytecode of Feature, Element, StatusCounter and StatusDeserializer.
+       Every "measured" note below cites one of those, so no part of this page
+       rests on inference from a corrupted output.
+
+  Acceptance of both HTML artifacts is STRUCTURAL: the plan maps no HTML
+  golden fixture, and no byte comparison against the committed page is
+  possible or attempted.
+
+  ---------------------------------------------------------------------------
+  WHAT THE GENERATOR PUTS ON THIS PAGE, AND WHAT IT LEAVES OUT
+  ---------------------------------------------------------------------------
+  overviewFeatures.vm, top to bottom: the shared head, the title suffix
+  "Features Overview", ONE script element holding THREE chart initialisations,
+  the navigation with the features item current, the build-info block, the
+  lead, the chart carousel, the grouped statistics table and the footer. All
+  of the chrome is _layout.html's; this page owns the three chart
+  initialisations, the lead, the carousel and the table.
+
+  THE CAROUSEL IS CONDITIONAL IN THE GENERATOR. overviewFeatures.vm wraps the
+  carousel and its trailing <br/> in #if(!$all_features.isEmpty()), so a run
+  with no features emits neither. That condition is reproduced, and it is
+  extended to the three chart initialisations for a reason the generator never
+  had to face - see the empty-run note below.
+
+  ---------------------------------------------------------------------------
+  THE RENDER CONTEXT - the contract app/reporting/pretty_reports.py renders
+  against, and the contract tests/test_pretty_reports.py asserts. Neither
+  exists yet, so this declaration is the specification for both.
+  ---------------------------------------------------------------------------
+  project_name, build_date_display, title_suffix and active_page are the
+  layout's own and are documented there; the last two are set below rather
+  than passed.
+
+  THE ROWS. Two shapes are accepted, so the writer's choice of contract cannot
+  silently empty the table:
+
+      features        PRIMARY. The normalized result model's feature list -
+                      the same value app/templates/view/overview.html and
+                      pretty/overview_steps.html consume, and the shape
+                      tests/fixtures/sample_results.json carries. Every count
+                      on this page is derived from it here, by the rules in
+                      the arithmetic section below.
+
+      feature_stats   OPTIONAL OVERRIDE, for a writer that would rather
+                      aggregate in Python. A sequence of mappings, each
+                      carrying the keys _stats_table.html reads - name, href,
+                      the six step counts, the three scenario counts,
+                      duration_ns and status. Every field is still coerced and
+                      floored at zero here, because a report is what a reader
+                      turns to when a run has gone wrong and malformed input
+                      has to render. When it is present and non-empty it is
+                      used and features is not read.
+
+  THE DETAIL-PAGE LINKS. A row's href is ALWAYS a passed-in value. Three
+  places are consulted, in order, and the first non-blank one wins:
+
+      feature.feature_href     the key _element_tree.html already established
+                               for exactly this value
+      feature_hrefs[uri]       an optional mapping keyed by the feature's uri
+      feature_hrefs[path]      or by its path, whichever the writer holds
+
+  With none of them the name renders as plain text and no anchor at all, which
+  is what _stats_table.html does with an absent href. NO FILENAME IS EVER
+  COMPUTED HERE. Detail-page names are numeric hashes - report-feature_<hash>.
+  html, a fixed prefix, an unsigned decimal hash and .html, hashing the
+  feature URI - and that algorithm belongs to pretty_reports.py, which derives
+  it from cucumber-reporting 5.6.1 and confirms it against a regenerated
+  baseline. Because the URI moves into features/, those filenames necessarily
+  change, which is expected and not a defect.
+
+      feature_totals  OPTIONAL. Run-level sums, merged OVER the sums computed
+                      from the rendered rows, so a partial mapping overrides
+                      only the keys it carries. It exists because the
+                      generator's own signature takes the run summary as an
+                      input separate from the feature list -
+                      #includeStatsTable("Feature", $all_features,
+                      $report_summary) - and the same keys feed both the
+                      footer and the three charts, so there is exactly one
+                      source for both. Omitted, which is the normal case, the
+                      rendered rows are summed.
+
+  Every one of those is reached through the guarded-default form, so an absent
+  input renders the empty page rather than raising under a strict undefined
+  policy. That matters beyond tidiness: the run's exit contract requires all
+  four artifacts to be written even when the tag expression selects nothing,
+  so "no features at all" is a real, reachable, must-not-fail input.
+
+  ---------------------------------------------------------------------------
+  THE ARITHMETIC, TAKEN FROM THE GENERATOR'S BYTECODE RATHER THAN ITS OUTPUT
+  ---------------------------------------------------------------------------
+  Feature.calculateSteps and Element.setMetaData settle every rule:
+
+    STEP COUNTS COVER ALL ELEMENTS, BACKGROUNDS INCLUDED. stepsCounter is
+      incremented for every step of every element, so a background's steps
+      count towards the six step columns and towards the duration.
+
+    SCENARIO COUNTS COVER ONLY SCENARIOS. elementsCounter is incremented only
+      where isScenario() holds, which is "scenario".equalsIgnoreCase(type), so
+      a background is never a scenario however many times it occurs.
+
+    DURATION IS THE SUM OF STEP DURATIONS ONLY. Hook durations are never
+      added, so the after-hook that carries a failure screenshot does not
+      lengthen its feature.
+
+    STATUS IS BINARY, at both levels. StatusCounter starts at PASSED and flips
+      to FAILED on the first non-PASSED increment, so getFinalStatus() answers
+      one of two values and nothing else. An element is passed when all of its
+      steps AND its before and after hooks passed - hooks affect status
+      although they affect no count - and a feature is passed when all of its
+      elements passed, backgrounds among them. An element with no steps and no
+      hooks is passed, because a counter with no increments never flips.
+      Consequently passed + failed = total for both scenarios and features,
+      and getFailedFeatures() is simply "not passed".
+
+    AMBIGUOUS IS UNDEFINED. StatusDeserializer holds UNKNOWN_STATUSES =
+      ["ambiguous"] and maps it to Status.UNDEFINED before any counting
+      happens, so an ambiguous step is counted in the Undefined column. That
+      is the generator's own fold, not a choice made here.
+
+    UNTESTED HAS NO COLUMN. It is a port-only token - cucumber_json.py names
+      it the honest token for a step with no outcome - and the generator's
+      deserializer cannot represent it at all: Status.valueOf("UNTESTED")
+      throws. Such a step is therefore counted in Total, where it honestly
+      belongs, and in none of the five status columns, because assigning it
+      one would fabricate a number the source cannot produce. It still costs
+      its element a pass, since it is not PASSED.
+
+  A SCENARIO THE TAG EXPRESSION DID NOT SELECT NEVER RAN, so it never reached
+  the reference generator either and it is excluded from every count here.
+  Absent means selected, since a model without the key predates the flag. A
+  FEATURE WHOSE EVERY ELEMENT WAS UNSELECTED IS OMITTED ALTOGETHER, which is
+  not tidiness but the measured shape of the artifact set: the JVM never
+  started such a feature, so it is absent from cucumber.json, and the @Smoke
+  baseline - the default run - holds exactly ONE feature where the suite has
+  ten. Rendering nine rows of zeros beside it would contradict the artifact
+  this tree is generated alongside.
+
+  Feature order is the model's own, which is source order, and no row is
+  sorted on the way out. The publisher's ALPHABETICAL setting is a display
+  option of its own and imposes nothing on this page; the reader sorts any
+  column at run time through the tablesorter the layout initialises.
+
+  ---------------------------------------------------------------------------
+  THE THREE CHARTS
+  ---------------------------------------------------------------------------
+  Measured from the three js/*-chart.js.vm templates, which is also where the
+  two things a reader would otherwise guess come from:
+
+    DOM ORDER OF THE SCRIPTS IS steps, scenarios, features - the REVERSE of
+      the canvas order in the carousel, which runs features, scenarios, steps.
+      overviewFeatures.vm parses the three in that order inside ONE script
+      element, and each is its own document-ready block assigning the same
+      window.myBar. All three are reproduced exactly so, one local macro
+      rendering all three, because the reference blocks are structurally
+      identical and writing them out three times is how they drift apart.
+
+    THE TOOLTIP DENOMINATOR IS DIFFERENT ON EACH CHART, and only one of the
+      three is the sum of its own segments:
+          steps       $report_summary.getSteps()      the total step count
+          scenarios   $report_summary.getScenarios()  the total scenario count
+          features    $all_features.size()            THE ROW COUNT, not the
+                                                      run's feature count
+      The last one is the generator's own reading and is preserved. It also
+      explains why the features chart can show segments that do not sum to its
+      denominator in a spliced report, and why this page must not "fix" that
+      by dividing by something tidier.
+
+  THE PALETTES ARE EXACT AND ARE NOT THE TABLE'S. Steps carries five segments
+  - #00B000, #FF3030, #88AAFF, #F5F28F, #F5B975 - and scenarios and features
+  two, #00B000 and #FF3030. These are the chart configuration's own brighter
+  set, deliberately not cucumber.css's table palette (.passed is #92DD96) and
+  not main.css's custom properties. Labels are the capitalised status names in
+  segment order.
+
+  ONLY INTEGERS CROSS INTO THE SCRIPT. Every value interpolated into the chart
+  configuration is a count or a denominator, coerced to an integer before it
+  is written; no feature name, tag, status word or any other model text is
+  ever interpolated into JavaScript. The labels are literals held here.
+
+  THE EMPTY RUN, AND THE ONE PLACE THIS PAGE GOES BEYOND THE GENERATOR. The
+  generator gates the carousel on a non-empty feature list but NOT the three
+  chart initialisations, so an empty run would emit three constructors against
+  three canvases that do not exist. The vendored Chart.js 2.7.3 answers that
+  with "Failed to create chart: can't acquire context from the given item" on
+  the console, three times. The gate is therefore applied to both, so the two
+  always agree: canvases and constructors are emitted together or not at all.
+  Every non-empty run - the only case the reference measures - is unchanged by
+  this, and the empty run gets a page that is coherent rather than one that
+  logs three errors before a reader has read anything.
+
+  ---------------------------------------------------------------------------
+  CONSTRAINTS THIS FILE HOLDS TO
+  ---------------------------------------------------------------------------
+    - It extends pretty/_layout.html and NOT app/templates/base.html. That
+      template builds every asset link with the framework's static-URL
+      builder, which resolves only while an application is serving; this page
+      is written to disk and opened over the file protocol or straight from a
+      Jenkins workspace.
+
+    - NO framework URL building anywhere. The four navigation targets are the
+      layout's fixed relative filenames, every detail-page href is a value the
+      writer passes in, and the two carousel controls address an in-page
+      fragment. Every href and src in the emitted page therefore resolves
+      inside the tree, offline, with no origin and no server.
+
+    - It declares no value pre-trusted and marks no output as ready-made
+      markup, leaning on the engine's automatic escaping instead. It matters
+      here: feature names in this suite contain quotation marks, periods and
+      apostrophes, one of them opens with "....", and the reference generator
+      escapes its own output too.
+
+    - It emits none of the three boolean state attributes main.css reads and
+      none of the three run-time state classes app/static/js/report.js sets.
+      The stylesheet takes their absence to mean expanded, visible and closed,
+      so the emitted page is complete and correct with scripting disabled and
+      on paper. The status hook below is a status hook, not a state hook.
+
+    - NO INLINE SCRIPT beyond the chart initialisation. The tablesorter
+      initialisation belongs to the layout, exactly once per page, and is not
+      repeated here; the carousel is the vendored Bootstrap 3.4.1 widget,
+      driven by data-ride, data-slide and data-slide-to and styled by
+      cucumber.css's own carousel override block, and its behaviour is neither
+      reimplemented nor given report.js hooks of any kind.
+
+    - It introduces no component library. The Bootstrap, jQuery, chart,
+      table-sorting, date and icon-font files inside the emitted tree are the
+      reference generator's own output, not a design system this port adopts.
+
+  THE CLASS VOCABULARY IS THE GENERATOR'S, kept in full: container-fluid, row
+  and the grid offsets, carousel and its parts, and the table's own classes,
+  which _stats_table.html owns. The port's own vocabulary is added in the two
+  places where it cannot mask a measured value:
+
+      data-tqa-status   on the charts container, carrying the run's own binary
+                        status. Every rule main.css declares for this
+                        attribute sets custom properties only, so the hook
+                        paints nothing by itself, and nothing inside the
+                        container consumes those properties - the canvases and
+                        the carousel controls carry no tqa- class. The rows
+                        and their status cells get their own hook from
+                        _stats_table.html.
+      tqa-empty         on the empty-run note, as pretty/overview_steps.html
+                        does with the same input.
+
+  TWO tqa- CLASSES ARE DELIBERATELY WITHHELD, both on a measurement rather
+  than on taste. tqa-table is not applied to the statistics table:
+  _stats_table.html records that main.css's .tqa-table th wins over the five
+  status backgrounds, collapsing the twelve header colours into one grey.
+  tqa-summary is not applied to the charts container: it is display:flex,
+  which would take the carousel's slides out of the layout the grid offsets
+  produce.
+
+  ACCESSIBILITY. The invisible part is applied because it costs nothing
+  visually: the chevrons are decorative and carry aria-hidden, each control
+  states its purpose through an sr-only label, the navigation's current item
+  is announced by the layout's aria-current, and the table's headers carry
+  scope from _stats_table.html. Colour is never the only carrier of meaning -
+  every chart segment is named in its tooltip and every status cell states its
+  status in words. The layout records the three visible defaults this contract
+  leaves as measured; none of them is this page's to change.
+-#}
+{% extends "pretty/_layout.html" %}
+{#- The statistics table, imported rather than included: no macro there reads
+    an ambient variable, so the same call renders identically from all four of
+    its consuming pages. -#}
+{% import 'pretty/_stats_table.html' as stats %}
+{#- The formatting owner. Only duration_value is called here - the shared
+    duration coercion - so that the nanosecond counts summed into the footer
+    and the charts pass through exactly the same rule as the cells that
+    display them. A duration this file rejected but the cell accepted, or the
+    reverse, is how a total comes to disagree with the column above it. -#}
+{% import 'pretty/_macros.html' as fmt %}
+
+{#- The layout's own context, set here rather than passed, which is the form
+    it documents. The title becomes "Cucumber Reports  - Features Overview",
+    the double space included; the navigation key marks the Features item
+    current and leaves the other three plain. -#}
+{% set title_suffix = 'Features Overview' %}
+{% set active_page = 'features' %}
+
+{#- ---------------------------------------------------------------------------
+    DERIVATION. It happens ONCE, here at the top level rather than inside a
+    block, because two different blocks read it: the chart initialisation in
+    head_extra and the table in content. A top-level assignment in a template
+    that extends another is visible inside every one of its blocks, including
+    the ones the parent renders, so the counts behind the charts and the
+    counts in the table are provably the same numbers rather than two
+    calculations that agree today.
+
+    Every lookup is guarded with the default filter's plain or boolean form,
+    which answers for a name without ever reading it and so raises nothing
+    under a strict undefined policy. Each candidate container is also tested
+    for being a real sequence before it is walked: a string is iterable one
+    character at a time and a mapping one key at a time, and neither is a list
+    of features, so both are excluded rather than spelled out one row per
+    character. Malformed input renders; it does not take the page down.
+    --------------------------------------------------------------------------- -#}
+{%- set supplied_rows = feature_stats|default(none) -%}
+{%- set supplied_totals = feature_totals|default(none) -%}
+{%- set href_candidate = feature_hrefs|default(none) -%}
+{%- set href_map = href_candidate if href_candidate is mapping else {} -%}
+{%- set rows = [] -%}
+
+{%- if supplied_rows is not none and supplied_rows -%}
+    {#- THE OVERRIDE PATH: rows already aggregated in Python. Each field is
+        still coerced and floored at zero, and the duration still passes
+        through the shared coercion, so a writer's arithmetic mistake cannot
+        put a negative count or a malformed duration into the page.
+
+        The status is normalised in case only - never folded to a binary - so
+        a writer that reports a scenario-level token keeps it and sees it
+        coloured. It is the features_passed count below that applies the
+        generator's own test, isPassed(), which is exactly "the token is
+        passed"; anything else is a failed feature there, which reproduces
+        getFailedFeatures() without discarding what the writer said. -#}
+    {%- set given = supplied_rows|list if (supplied_rows is iterable and supplied_rows is not string and supplied_rows is not mapping) else [] -%}
+    {%- for candidate in given -%}
+        {%- set entry = candidate if candidate is mapping else {} -%}
+        {%- set _ = rows.append({
+                'name': entry.name|default('', true)|string|trim,
+                'href': entry.href|default('', true)|string|trim,
+                'steps_passed': [entry.steps_passed|default(0, true)|int(0), 0]|max,
+                'steps_failed': [entry.steps_failed|default(0, true)|int(0), 0]|max,
+                'steps_skipped': [entry.steps_skipped|default(0, true)|int(0), 0]|max,
+                'steps_pending': [entry.steps_pending|default(0, true)|int(0), 0]|max,
+                'steps_undefined': [entry.steps_undefined|default(0, true)|int(0), 0]|max,
+                'steps_total': [entry.steps_total|default(0, true)|int(0), 0]|max,
+                'scenarios_passed': [entry.scenarios_passed|default(0, true)|int(0), 0]|max,
+                'scenarios_failed': [entry.scenarios_failed|default(0, true)|int(0), 0]|max,
+                'scenarios_total': [entry.scenarios_total|default(0, true)|int(0), 0]|max,
+                'duration_ns': fmt.duration_value(entry.duration_ns)|trim|int(0),
+                'status': entry.status|default('', true)|string|trim|lower
+            }) -%}
+    {%- endfor -%}
+{%- else -%}
+    {#- THE PRIMARY PATH: aggregate the normalized model, by the rules the
+        arithmetic section above takes from the generator's bytecode. One
+        namespace per feature accumulates it, because a plain assignment
+        inside a loop would not survive the iteration. -#}
+    {%- set feature_candidate = features|default(none) -%}
+    {%- set feature_list = feature_candidate|list if (feature_candidate is iterable and feature_candidate is not string and feature_candidate is not mapping) else [] -%}
+    {%- for raw_feature in feature_list -%}
+        {%- set feature = raw_feature if raw_feature is mapping else {} -%}
+        {%- set element_candidate = feature.elements|default(none) -%}
+        {%- set element_list = element_candidate|list if (element_candidate is iterable and element_candidate is not string and element_candidate is not mapping) else [] -%}
+        {%- set acc = namespace(
+                steps_passed=0, steps_failed=0, steps_skipped=0,
+                steps_pending=0, steps_undefined=0, steps_total=0,
+                scenarios_total=0, scenarios_passed=0,
+                duration_ns=0, selected=0, passed=true) -%}
+        {%- for raw_element in element_list -%}
+            {%- set element = raw_element if raw_element is mapping else {} -%}
+            {#- Absent means selected: a model without the key predates the
+                flag. A scenario the tag expression did not select never ran
+                and never reached the reference generator, so it contributes
+                nothing at all - not a step, not a scenario, not a
+                nanosecond. -#}
+            {%- if element.selected|default(true) -%}
+                {%- set acc.selected = acc.selected + 1 -%}
+                {#- The element's own verdict, folded exactly as StatusCounter
+                    folds it: it starts passed and the first constituent that
+                    is not passed settles it. A blank or unrecognised status is
+                    not passed, which is the counter's own reading of a null
+                    status and the conservative one - a report must not claim
+                    green over data it could not read. -#}
+                {%- set verdict = namespace(passed=true) -%}
+                {%- set step_candidate = element.steps|default(none) -%}
+                {%- set step_list = step_candidate|list if (step_candidate is iterable and step_candidate is not string and step_candidate is not mapping) else [] -%}
+                {%- for raw_step in step_list -%}
+                    {%- set step = raw_step if raw_step is mapping else {} -%}
+                    {%- set result = step.result if step.result is mapping else {} -%}
+                    {%- set raw_status = result.status|default('', true)|string|trim|lower -%}
+                    {#- The generator's deserializer maps ambiguous onto
+                        undefined before any counting happens, so the fold
+                        belongs here rather than in a column test below. -#}
+                    {%- set token = 'undefined' if raw_status == 'ambiguous' else raw_status -%}
+                    {#- Every step counts towards Total, including one whose
+                        status has no column of its own - see the untested
+                        note above. -#}
+                    {%- set acc.steps_total = acc.steps_total + 1 -%}
+                    {#- Steps only, and through the display path's own
+                        coercion. Hook durations are never added. -#}
+                    {%- set acc.duration_ns = acc.duration_ns + (fmt.duration_value(result.duration)|trim|int(0)) -%}
+                    {%- if token == 'passed' -%}
+                        {%- set acc.steps_passed = acc.steps_passed + 1 -%}
+                    {%- elif token == 'failed' -%}
+                        {%- set acc.steps_failed = acc.steps_failed + 1 -%}
+                    {%- elif token == 'skipped' -%}
+                        {%- set acc.steps_skipped = acc.steps_skipped + 1 -%}
+                    {%- elif token == 'pending' -%}
+                        {%- set acc.steps_pending = acc.steps_pending + 1 -%}
+                    {%- elif token == 'undefined' -%}
+                        {%- set acc.steps_undefined = acc.steps_undefined + 1 -%}
+                    {%- endif -%}
+                    {%- if token != 'passed' -%}
+                        {%- set verdict.passed = false -%}
+                    {%- endif -%}
+                {%- endfor -%}
+                {#- The hooks affect the verdict and nothing else: Element's
+                    status folds stepsStatus with beforeStatus and afterStatus,
+                    while neither the step columns nor the duration ever sees a
+                    hook. An empty hook list leaves the verdict untouched,
+                    which is a counter with no increments. -#}
+                {%- for hook_key in ['before', 'after'] -%}
+                    {%- set hook_candidate = element[hook_key]|default(none) -%}
+                    {%- set hook_list = hook_candidate|list if (hook_candidate is iterable and hook_candidate is not string and hook_candidate is not mapping) else [] -%}
+                    {%- for raw_hook in hook_list -%}
+                        {%- set hook = raw_hook if raw_hook is mapping else {} -%}
+                        {%- set hook_result = hook.result if hook.result is mapping else {} -%}
+                        {%- if (hook_result.status|default('', true)|string|trim|lower) != 'passed' -%}
+                            {%- set verdict.passed = false -%}
+                        {%- endif -%}
+                    {%- endfor -%}
+                {%- endfor -%}
+                {#- Only an element whose type is scenario is a scenario, so a
+                    background is never counted however many times it occurs -
+                    and it occurs once per scenario in this model. -#}
+                {%- if (element.type|default('', true)|string|trim|lower) == 'scenario' -%}
+                    {%- set acc.scenarios_total = acc.scenarios_total + 1 -%}
+                    {%- if verdict.passed -%}
+                        {%- set acc.scenarios_passed = acc.scenarios_passed + 1 -%}
+                    {%- endif -%}
+                {%- endif -%}
+                {#- The feature's verdict folds every element's, backgrounds
+                    among them. -#}
+                {%- if not verdict.passed -%}
+                    {%- set acc.passed = false -%}
+                {%- endif -%}
+            {%- endif -%}
+        {%- endfor -%}
+        {#- A feature with nothing selected never ran, so it is absent from
+            the run's JSON and it is absent here too. See the note above for
+            why that is the measured shape rather than a tidy-up. -#}
+        {%- if acc.selected > 0 -%}
+            {#- The detail-page link, resolved from the three passed-in places
+                in order. Nothing is computed: a hash this template invented
+                would name a file the writer never wrote. -#}
+            {%- set own_href = feature.feature_href|default('', true)|string|trim -%}
+            {%- set uri_key = feature.uri|default('', true)|string|trim -%}
+            {%- set path_key = feature.path|default('', true)|string|trim -%}
+            {%- set uri_href = (href_map.get(uri_key)|default('', true)|string|trim) if uri_key else '' -%}
+            {%- set path_href = (href_map.get(path_key)|default('', true)|string|trim) if path_key else '' -%}
+            {%- set link = own_href if own_href else (uri_href if uri_href else path_href) -%}
+            {%- set _ = rows.append({
+                    'name': feature.name|default('', true)|string|trim,
+                    'href': link,
+                    'steps_passed': acc.steps_passed,
+                    'steps_failed': acc.steps_failed,
+                    'steps_skipped': acc.steps_skipped,
+                    'steps_pending': acc.steps_pending,
+                    'steps_undefined': acc.steps_undefined,
+                    'steps_total': acc.steps_total,
+                    'scenarios_passed': acc.scenarios_passed,
+                    'scenarios_failed': acc.scenarios_total - acc.scenarios_passed,
+                    'scenarios_total': acc.scenarios_total,
+                    'duration_ns': acc.duration_ns,
+                    'status': 'passed' if acc.passed else 'failed'
+                }) -%}
+        {%- endif -%}
+    {%- endfor -%}
+{%- endif -%}
+
+{#- ---------------------------------------------------------------------------
+    THE RUN-LEVEL TOTALS, read off the rows this page is about to render, so
+    the footer is a second reading of one calculation rather than a second
+    calculation. features is the row count and features_passed applies the
+    generator's own isPassed() test to each row's status.
+
+    A supplied mapping is merged OVER the computed one, key by key, so a
+    partial override overrides only what it carries and the rest still adds
+    up. The same mapping feeds the footer and all three charts.
+    --------------------------------------------------------------------------- -#}
+{%- set totals = {} -%}
+{%- set _ = totals.update({
+        'steps_passed': rows|sum(attribute='steps_passed'),
+        'steps_failed': rows|sum(attribute='steps_failed'),
+        'steps_skipped': rows|sum(attribute='steps_skipped'),
+        'steps_pending': rows|sum(attribute='steps_pending'),
+        'steps_undefined': rows|sum(attribute='steps_undefined'),
+        'steps_total': rows|sum(attribute='steps_total'),
+        'scenarios_passed': rows|sum(attribute='scenarios_passed'),
+        'scenarios_failed': rows|sum(attribute='scenarios_failed'),
+        'scenarios_total': rows|sum(attribute='scenarios_total'),
+        'duration_ns': rows|sum(attribute='duration_ns'),
+        'features': rows|length,
+        'features_passed': rows|selectattr('status', 'equalto', 'passed')|list|length
+    }) -%}
+{%- if supplied_totals is mapping -%}
+    {%- set _ = totals.update(supplied_totals) -%}
+{%- endif -%}
+
+{#- ---------------------------------------------------------------------------
+    THE CHART NUMBERS. Integers only, each coerced and floored here so that
+    nothing but a number can reach the script, and each denominator floored at
+    ONE so that no page ever ships a division by zero. The floor is
+    unreachable in practice - a doughnut whose every segment is zero draws no
+    arc, so no tooltip can open to divide - but "unreachable" is not a reason
+    to emit `/ 0` into a file a reader may open for years.
+
+    The three denominators are deliberately different values; see the tooltip
+    note above. The features one is the ROW COUNT, which is the generator's
+    $all_features.size() and not the run's feature count.
+    --------------------------------------------------------------------------- -#}
+{%- set steps_passed = [totals.steps_passed|default(0, true)|int(0), 0]|max -%}
+{%- set steps_failed = [totals.steps_failed|default(0, true)|int(0), 0]|max -%}
+{%- set steps_skipped = [totals.steps_skipped|default(0, true)|int(0), 0]|max -%}
+{%- set steps_pending = [totals.steps_pending|default(0, true)|int(0), 0]|max -%}
+{%- set steps_undefined = [totals.steps_undefined|default(0, true)|int(0), 0]|max -%}
+{%- set scenarios_passed = [totals.scenarios_passed|default(0, true)|int(0), 0]|max -%}
+{%- set scenarios_failed = [totals.scenarios_failed|default(0, true)|int(0), 0]|max -%}
+{%- set features_count = [totals.features|default(0, true)|int(0), 0]|max -%}
+{%- set features_passed = [totals.features_passed|default(0, true)|int(0), 0]|max -%}
+{%- set features_failed = [features_count - features_passed, 0]|max -%}
+{%- set steps_denominator = [totals.steps_total|default(0, true)|int(0), 1]|max -%}
+{%- set scenarios_denominator = [totals.scenarios_total|default(0, true)|int(0), 1]|max -%}
+{%- set features_denominator = [rows|length, 1]|max -%}
+
+{#- The three segment sets, in the generator's own segment order. Every label
+    and every colour is a literal held here; only the counts come from the
+    model, and they are the integers floored above. -#}
+{%- set steps_segments = [
+      {'label': 'Passed', 'color': '#00B000', 'count': steps_passed},
+      {'label': 'Failed', 'color': '#FF3030', 'count': steps_failed},
+      {'label': 'Skipped', 'color': '#88AAFF', 'count': steps_skipped},
+      {'label': 'Pending', 'color': '#F5F28F', 'count': steps_pending},
+      {'label': 'Undefined', 'color': '#F5B975', 'count': steps_undefined}
+    ] -%}
+{%- set scenarios_segments = [
+      {'label': 'Passed', 'color': '#00B000', 'count': scenarios_passed},
+      {'label': 'Failed', 'color': '#FF3030', 'count': scenarios_failed}
+    ] -%}
+{%- set features_segments = [
+      {'label': 'Passed', 'color': '#00B000', 'count': features_passed},
+      {'label': 'Failed', 'color': '#FF3030', 'count': features_failed}
+    ] -%}
+
+{#- The run's own binary status, for the status hook on the charts container.
+    Nothing failed is a passed run, which is also the answer for a run that
+    selected nothing - and that case emits no container to carry it. -#}
+{%- set run_status = 'passed' if features_failed == 0 else 'failed' -%}
+
+
+{#- ---------------------------------------------------------------------------
+    ONE CHART INITIALISATION. The three reference blocks are structurally
+    identical - same doughnut type, same title size, same legend setting, same
+    tooltip callback, differing only in canvas id, title, segments and
+    denominator - so they are written once and called three times. Writing
+    them out three times is how three blocks that must agree come to differ in
+    one of them.
+
+    canvas_id, chart_title and every label and colour inside segments are
+    LITERALS THIS TEMPLATE HOLDS. No model text is ever passed here: automatic
+    escaping protects HTML, not JavaScript string literals, so a name carrying
+    a quotation mark - and this suite has several - would break the script
+    rather than being escaped into it. The only model-derived values are the
+    segment counts and the denominator, both integers floored above.
+
+    The callback is the reference's own, including the allData variable it
+    declares and reads only through the indexed lookup on the next line but
+    one.
+    --------------------------------------------------------------------------- -#}
+{%- macro chart_init(canvas_id, chart_title, segments, denominator) -%}
+$(document).ready(function() {
+
+    var chartData = {
+        datasets: [{
+            data: [
+{%- for segment in segments %}
+                {{ segment.count }}{% if not loop.last %},{% endif %}
+{%- endfor %}
+            ],
+            backgroundColor: [
+{%- for segment in segments %}
+                "{{ segment.color }}"{% if not loop.last %},{% endif %}
+{%- endfor %}
+            ]
+        }],
+        labels: [
+{%- for segment in segments %}
+            "{{ segment.label }}"{% if not loop.last %},{% endif %}
+{%- endfor %}
+        ]
+    };
+
+    var context = document.getElementById("{{ canvas_id }}");
+    window.myBar = new Chart(context, {
+        type: "doughnut",
+        data: chartData,
+        options: {
+            title: {
+                display: true,
+                fontSize: 20,
+                text: "{{ chart_title }}"
+            },
+            responsive: true,
+            legend: {
+                display: false
+            },
+            tooltips: {
+                callbacks: {
+                    label: function(tooltipItem, data) {
+                        var allData = data.datasets[tooltipItem.datasetIndex].data;
+                        var tooltipLabel = data.labels[tooltipItem.index];
+                        var tooltipData = allData[tooltipItem.index];
+                        var tooltipPercentage = Math.round(10000 * tooltipData / {{ denominator }}) / 100;
+                        return tooltipLabel + ": " + tooltipData + " (" + tooltipPercentage + "%)";
+                    }
+                }
+            }
+        }
+    });
+
+});
+{%- endmacro -%}
+
+{#- The chart initialisation, injected into the head after the title, which is
+    where the reference places it: ONE script element holding the three blocks
+    in the order steps, scenarios, features - the reverse of the canvas order,
+    and measured.
+
+    Gated on the row set for the reason the empty-run note above gives: the
+    canvases live in the carousel, the generator gates the carousel, and a
+    constructor without its canvas is three console errors rather than a
+    chart. Emitted together or not at all. -#}
+{% block head_extra %}
+{%- if rows %}
+  <script>
+{{ chart_init('steps-chart', 'Steps', steps_segments, steps_denominator) }}
+{{ chart_init('scenarios-chart', 'Scenarios', scenarios_segments, scenarios_denominator) }}
+{{ chart_init('features-chart', 'Features', features_segments, features_denominator) }}
+  </script>
+{%- endif %}
+{%- endblock %}
+
+{#- The lead. Heading and paragraph are the generator's own text, reproduced
+    byte for byte from includeLead("Features Statistics", "The following
+    graphs show passing and failing statistics for features"). GRAPHS IS
+    PLURAL HERE and singular on the tags page: both are measured and neither
+    is normalised to the other.
+
+    The heading opens on the block tag's own line so the layout's surrounding
+    indentation is reproduced exactly; a newline there would insert a blank
+    line the reference does not have. -#}
+{% block lead %}    <h2>Features Statistics</h2>
+      <p>The following graphs show passing and failing statistics for features</p>
+{%- endblock %}
+
+{% block content %}
+{#- ---------------------------------------------------------------------
+    The chart carousel, measured element by element and gated exactly as
+    overviewFeatures.vm gates it with #if(!$all_features.isEmpty()).
+
+    CANVAS ORDER IS features, scenarios, steps, with the first slide and the
+    first indicator carrying active - the reverse of the script order above.
+
+    The behaviour is the vendored Bootstrap 3.4.1 widget's, driven entirely
+    by data-ride, data-slide and data-slide-to and styled by the carousel
+    override block in app/static/vendor/css/cucumber.css. Nothing here
+    reimplements it and it carries no report.js hook: the script owns
+    filtering, step detail and the screenshot overlay, none of which this
+    page has.
+
+    Both controls address an in-page fragment, so they resolve inside the
+    tree trivially. The chevrons are decorative and carry aria-hidden, and
+    each control states its purpose in an sr-only label - the reference's
+    own invisible accessibility, kept.
+
+    The status hook on the container carries the run's binary verdict. Every
+    rule main.css declares for it sets custom properties only, and nothing
+    inside the container consumes them, so it paints nothing; tqa-summary is
+    withheld here because it is display:flex and would take the slides out
+    of the grid layout. The HTML comments are the reference's own.
+    --------------------------------------------------------------------- -#}
+{%- if rows %}
+  <div class="container-fluid" id="charts" data-tqa-status="{{ run_status }}">
+    <div class="row">
+      <div class="col-md-6 col-md-offset-3">
+        <div id="featureChartCarousel" class="carousel slide" data-ride="carousel">
+          <!-- Indicators -->
+          <ol class="carousel-indicators">
+            <li data-target="#featureChartCarousel" data-slide-to="0" class="active"></li>
+            <li data-target="#featureChartCarousel" data-slide-to="1"></li>
+            <li data-target="#featureChartCarousel" data-slide-to="2"></li>
+          </ol>
+
+          <!-- Wrapper for slides -->
+          <div class="carousel-inner" role="listbox">
+            <div class="item active">
+              <canvas id="features-chart" height="120"></canvas>
+            </div>
+
+            <div class="item">
+              <canvas id="scenarios-chart" height="120"></canvas>
+            </div>
+
+            <div class="item">
+              <canvas id="steps-chart" height="120"></canvas>
+            </div>
+          </div>
+
+          <!-- Left and right controls -->
+          <a class="left carousel-control" href="#featureChartCarousel" role="button" data-slide="prev">
+            <i class="fa fa-chevron-left" aria-hidden="true"></i>
+            <span class="sr-only">Previous</span>
+          </a>
+          <a class="right carousel-control" href="#featureChartCarousel" role="button" data-slide="next">
+            <i class="fa fa-chevron-right" aria-hidden="true"></i>
+            <span class="sr-only">Next</span>
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+  <br/>
+{%- endif %}
+
+{#- The statistics table, in the report container the layout leaves to the
+    page - once, and only here. Sortable, so it carries the id the layout's
+    tablesorter initialisation binds to; first column Feature; totals
+    supplied, so the two-row footer is emitted, including for a run that
+    selected nothing. Row order is the model's own and nothing sorts it on
+    the way out.
+
+    This comment strips only to its left: the newline on its right is what
+    separates the carousel's trailing break from the container below, on the
+    pages that carry a carousel. #}
+<div class="container-fluid" id="report">
+  <div class="row">
+    <div class="col-md-10 col-md-offset-1">
+      {{ stats.stats_table(rows, 'Feature', totals=totals, sortable=true) }}{% if not rows %}{#- The
+          table above still renders its header and its footer, so the page's
+          shape never depends on the data; this says in words what an empty
+          body cannot. Anchored to the tag so that a page WITH rows is left
+          byte-identical to the reference here. #}
+      <p class="tqa-empty">No feature ran in this build, so there is nothing to report here. Every artifact is still written when a run selects no scenario.</p>{% endif %}
+    </div>
+  </div>
+</div>
+{#- The block closes without a trailing newline: the layout already supplies
+    the separation between the page body and the footer, and the reference
+    page carries exactly that much. -#}
+{%- endblock %}
+

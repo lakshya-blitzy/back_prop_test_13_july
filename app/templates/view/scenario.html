@@ -1,0 +1,891 @@
+{#-
+  ===========================================================================
+  view/scenario.html - one scenario, served read-only at the scenario
+  endpoint. The deepest of the three report views.
+  ===========================================================================
+
+  This is the page a reader reaches for when something failed. It renders one
+  scenario in full - its own values, its aggregate status and duration, every
+  step with the resolved step function's location, the matched arguments
+  spliced into the step text, the complete untruncated failure text, and the
+  failure screenshot when a run captured one - together with the background
+  that ran before it and links on to the sibling scenarios either side.
+
+  It reads what a run has already written and nothing else: no form, no
+  control that starts or re-runs anything, no endpoint of its own invention,
+  and no write of any kind. Runs start from the command line.
+
+  ---------------------------------------------------------------------------
+  RENDER CONTEXT - the contract for app/web/routes.py
+  ---------------------------------------------------------------------------
+  REQUIRED
+
+      feature    ONE raw feature mapping from the parsed results file, exactly
+                 as the JSON writer produced it - the feature this scenario
+                 belongs to. It supplies the breadcrumb, the naming context in
+                 the header, and the scenario count the previous and next
+                 links are derived from. Nothing is pre-processed and no
+                 aggregate is pre-computed: every count, status and total below
+                 is derived here, so this page, its sibling views and the
+                 artifact they all describe cannot drift apart.
+
+      findex     The FEATURE's zero-based position in the results file's
+                 top-level list.
+
+      scenario   The raw scenario element mapping - the element whose type is
+                 "scenario" standing at position sindex among this feature's
+                 scenario elements. Handed in whole and unprocessed, for the
+                 same reason as the feature.
+
+      sindex     THAT SCENARIO'S ZERO-BASED POSITION AMONG THE FEATURE'S
+                 SCENARIO ELEMENTS, which is not its position among the
+                 elements. In the reference feature the four scenarios stand at
+                 element positions 1, 3, 5 and 7, so their keys are 0, 1, 2 and
+                 3: the interleaved backgrounds never consume an index. A route
+                 that keys on the element position instead would serve a
+                 background where a scenario was asked for, and every link
+                 view/feature.html emits would land one element early. That
+                 template derives the same value by walking the elements in
+                 order and advancing a counter only on a scenario, and this
+                 page and that one MUST agree, because those links are how a
+                 reader arrives here.
+
+  Both keys are POSITIONAL, and deliberately not the identifier slugs the data
+  carries. Two pairs of features in this suite share a feature identifier
+  because they share a title, and an outline row's scenario identifier names
+  its Examples block and row position; that collision is source behaviour this
+  port preserves rather than disambiguates. An identifier rendered as
+  displayed data is correct - both are, below - and an identifier used as a
+  link key is a defect that would serve one member of a colliding pair in
+  place of the other. Every URL on this page is built with the framework's own
+  URL builder against the two integer keys, so no route shape is written by
+  hand in markup.
+
+  OPTIONAL
+
+      background The background element that IMMEDIATELY PRECEDES this
+                 scenario in the feature's element list, or nothing. When
+                 supplied it is rendered in full; when absent no background
+                 section appears at all. The route must NOT substitute another
+                 scenario's copy: the background repeats before each scenario
+                 and each copy belongs to the scenario it preceded, so
+                 reconstructing one would assert something the results file
+                 does not say. Deduplicating, reordering or omitting a supplied
+                 background is equally wrong - the background repeated in the
+                 same position is part of the structure this port has to
+                 reproduce deterministically, and it is also true to the run,
+                 since a background genuinely executes once per scenario.
+
+      artifact_modified
+                 Modification time of the results file this page was built
+                 from, as millisecond-precision UTC ISO-8601 with a literal Z -
+                 the same shape the scenario start timestamps carry, so both
+                 render through the same machine-readable time element. Absent
+                 renders an em dash.
+
+  WHAT THE ROUTE MUST NOT DO - it must not hand this template a missing or
+  unusable scenario as a 200. A results file that is absent, unreadable or
+  unparseable is a 404 for all three causes alike, because a run has not
+  produced usable results and telling those causes apart is not the viewer's
+  business; EITHER index out of range is a 404 for the same reason. So there is
+  deliberately no "no report yet" state here, no "scenario not found" page, no
+  differentiation of causes and no diagnostic hint: this template is only ever
+  rendered with a real scenario. The ONE empty state that is genuinely
+  reachable is a scenario carrying no step, which renders its header in full
+  and a short factual note where its steps would be - never as a stand-in for
+  data that is missing.
+
+  ---------------------------------------------------------------------------
+  THE MODEL, AS MEASURED
+  ---------------------------------------------------------------------------
+  Every shape below was read off the reference results file, not assumed, and
+  each one is guarded for because each one occurs:
+
+    - A scenario carries keyword ("Scenario" or "Scenario Outline"), line,
+      name, description, type, id, start_timestamp, tags and steps.
+    - A BACKGROUND CARRIES NEITHER id, start_timestamp NOR tags. Those three
+      keys are the difference between the two element kinds, which is why the
+      background section below renders a step count where the scenario renders
+      a start time, rather than an em dash for a key that cannot exist.
+    - Scenario tags and feature tags have DIFFERENT shapes: a scenario tag
+      carries name alone, a feature tag adds a type and a location. Only name
+      is read from either, and the leading @ is kept.
+    - A scenario with no tags of its own and no feature tag OMITS the tags key
+      entirely rather than carrying an empty list, and five of the ten features
+      in this suite declare no feature-level tag, so that is the common case
+      and not an edge one.
+    - An outline row keeps the PLAIN OUTLINE NAME and the DATA ROW's line
+      number, with no suffix naming the Examples row. Both are rendered
+      verbatim, and the row's identifier - which does name the Examples block
+      and the row's one-based position - is displayed data only.
+    - start_timestamp is fixed-width UTC ISO-8601 to millisecond precision with
+      a literal Z. It is rendered as both the machine-readable value and the
+      displayed text of one time element, because reformatting it would only
+      invite the two forms to disagree.
+    - A step carries keyword (with its trailing space), line, name, match and
+      result. Trimming that keyword for display belongs to the step partial and
+      happens nowhere else.
+    - match carries location always and arguments only when the step took
+      parameters. arguments is a list of val and offset, where val INCLUDES its
+      surrounding quotation marks. Rendering both is the step partial's job,
+      through the two options this page turns on; nothing is asserted here
+      about the shape of a location, which is a dotted path in this port where
+      the original carried a method signature.
+    - result OMITS fields rather than emitting zeros: one skipped step in the
+      reference carries no duration key at all while another carries one, so
+      the presence of a duration is never inferred from a status. Durations are
+      NANOSECOND INTEGERS, which is why no raw nanosecond count is rendered as
+      text on this page.
+    - error_message spans many lines and carries assertion text and a
+      traceback, with angle brackets, quotation marks, apostrophes, braces and
+      characters outside ASCII. The step partial renders it verbatim in a
+      preformatted monospace block, escaped by the engine's own default; it is
+      never truncated, because the full text is the evidence.
+    - description preserves its own leading indentation and is the empty string
+      rather than absent when there is none. The stylesheet's description class
+      keeps that indentation with a pre-wrap rule, so nothing here bypasses the
+      automatic escaping to achieve it.
+    - A failed scenario may carry an after-hook list whose entries hold
+      screenshot embeddings, and A FAILED SCENARIO WITH NONE IS A WHOLLY
+      NORMAL STATE: capture happens only on failure and a capture that fails is
+      logged and suppressed. Nothing is rendered for it - no placeholder, no
+      "unavailable" note and no broken image - and no affordance to switch
+      capture on or off is offered, because no such setting was ever
+      implemented and the configuration surface stays at its six keys.
+
+  ---------------------------------------------------------------------------
+  AGGREGATION RULES - the same definitions the other two views apply
+  ---------------------------------------------------------------------------
+  This page, view/feature.html and view/overview.html are three presentations
+  of one calculation, so a reader comparing them can never be shown two
+  different answers. The precedence order, the counting rules and the duration
+  and timestamp formatting below are theirs, name for name:
+
+    1. Status      The worst status among a set of steps, by the precedence
+                   declared below, highest first: failed, undefined,
+                   ambiguous, pending, skipped, untested, passed. A set with no
+                   step at all is unknown. Each step's status is normalised
+                   through the status partial, the project's single
+                   normalisation point.
+    2. Duration    The sum of the duration values that are PRESENT, in
+                   nanoseconds, rendered as seconds to three decimals. With no
+                   duration key present at all the total is unknown rather than
+                   zero, and renders an em dash.
+    3. Separately  THE BACKGROUND'S STATUS AND DURATION ARE ITS OWN. They are
+                   derived from its steps alone and rendered in its own
+                   section, and the scenario's are derived from the scenario's
+                   steps alone, because the two are separate elements in the
+                   model. Folding the background's steps into the scenario's
+                   status would let a background failure be reported as this
+                   scenario's, and would disagree with view/feature.html, which
+                   gives each element its own status for the same reason.
+
+  The filter is the one place both sets are counted together, and necessarily
+  so: on this page the filterable unit is the STEP, and the filter acts on
+  every step rendered on the page - the background's included - so its counts
+  are page-wide while the summary in the header counts this scenario's own
+  steps. The two headings say which is which.
+
+  ---------------------------------------------------------------------------
+  VOCABULARY AND PROHIBITIONS
+  ---------------------------------------------------------------------------
+  HEADINGS - base.html renders this page's single h1 from the title block, so
+  the title block below carries THE SCENARIO'S OWN NAME and the content opens
+  at h2 and descends to h3 without skipping a level. A second h1 here would
+  break the one-h1 rule that shell owns; the scenario name is still the h1, and
+  it is that shell which renders it.
+
+  NO RENAMING - the scenario name, the feature name, the element keywords and
+  the source path are displayed exactly as the data carries them. Three
+  vocabularies disagree across the sources of this project and all three are
+  preserved where they occur, so no product or vendor label is introduced here
+  and none is rewritten.
+
+  CLASSES - app/static/css/main.css, the tqa- namespace, and only names that
+  stylesheet declares: tqa-scenario with tqa-scenario-name, tqa-feature-desc,
+  tqa-background, tqa-steps, tqa-toggle, tqa-meta and its item, label and value
+  parts, tqa-summary with tqa-count, tqa-filter with tqa-filter-btn, tqa-tags
+  with tqa-tag, tqa-timestamp, tqa-duration, tqa-nav, tqa-link and tqa-empty.
+  The description class is the stylesheet's own for feature AND element
+  descriptions, which is why this scenario's description uses it - the
+  stylesheet declares no scenario-specific one, and inventing a name it does
+  not carry would style nothing. Status colour arrives only as the status data
+  attribute, which the stylesheet matches case-insensitively; there is no
+  per-status class to write. The page shell classes belong to base.html and are
+  not repeated here.
+
+  The metadata grid resolves to four columns at its widest, so the scenario's
+  grid holds exactly eight short fields - two full rows - and its three long
+  values, the identifier and the feature's name and source path, sit below it
+  at full width where no fixed track can break them mid-word. The background's
+  grid holds exactly four.
+
+  BEHAVIOUR HOOKS - app/static/js/report.js, the data-report- namespace, four
+  of them: the filter attribute on each filter control, the toggle attribute on
+  each step-list control with the region attribute on the list it controls, and
+  the expand-all attribute on the two detail controls. That last one is read BY
+  VALUE and the only values it acts on are expand and collapse, so it is
+  written with one or the other and never bare, which would be inert markup.
+  The filterable-and-status pairing belongs to the individual steps and is
+  emitted by the step partial, not here. The one per-page scope hook the script
+  resolves all of this against is emitted by base.html, on the main element,
+  and is never repeated here. Interactivity is progressive enhancement: with no
+  scripting the buttons are inert and everything stays visible and expanded.
+
+  THE STEP IS THE FILTERABLE UNIT on this page, which is the one place this
+  template's use of the step partial differs from view/feature.html's. There a
+  whole scenario is the unit and its steps pass filterable=false, because
+  hiding an element hides its whole subtree and a nested second registration
+  would fight the outer one. Here there is only ever one scenario on the page,
+  so filtering it as a unit would offer a reader a button that empties the
+  page; the step is the only unit that means anything, and the partial's
+  default is therefore the correct call.
+
+  NO STATE IS SERVER-RENDERED. The stylesheet reads the absence of its three
+  boolean state attributes as expanded, visible and closed, and the behaviour
+  script sets its own three state classes at run time, writing the pressed
+  state onto every filter control as it initialises. What is authored here is
+  therefore the fully visible, unfiltered, FULLY EXPANDED page, which is
+  exactly what it means with scripting turned off and on paper - and on this
+  page that is load-bearing twice over, because a printed scenario has to show
+  the failure text and the screenshot, and both live inside collapsible detail.
+  Nothing here hides collapsible detail from the accessibility tree either.
+
+  Standing prohibitions, each with its reason: automatic escaping is never
+  turned off and no value is ever marked pre-escaped - this is the page that
+  renders assertion text and tracebacks, the reference generator's own output
+  escapes exactly the same failure text, and the stylesheet's pre-wrap rules
+  preserve multi-line text and leading indentation without any such override.
+  No inline script, no inline style and no style attribute. No external,
+  protocol-relative or content-delivery-network address, and none of the
+  vendored generator assets, which exist only inside the emitted report tree -
+  the only addresses on this page are the URL builder's output and the inline
+  data URI the lightbox partial emits for a screenshot. No filesystem path
+  literal: the path module under app/utils owns every path, and this page needs
+  no artifact link at all - the overview and the index own those. And nothing
+  that starts, or appears to start, a test run.
+-#}
+{% extends "base.html" %}
+{% set active_nav = "reports" %}
+{% from "partials/status_badge.html" import status_badge, status_token %}
+{% from "partials/step_row.html" import step_row %}
+{% from "partials/lightbox.html" import screenshots, lightbox_overlay %}
+
+{#- Rule 1 of the aggregation contract, as data, and the same sequence
+    view/feature.html and view/overview.html declare. Highest severity first:
+    the first member of this sequence that occurs among a set of step statuses
+    is the status of the element those steps belong to. It is declared once,
+    here, and reaches worst_token below as that macro's default argument so the
+    order cannot be restated - and therefore cannot be restated differently -
+    anywhere else in this file. -#}
+{% set STATUS_PRECEDENCE = ('failed', 'undefined', 'ambiguous', 'pending', 'skipped', 'untested', 'passed') %}
+
+{#- Reading order for the tallies, again the other two views': the reference
+    overview page's own column order first - passed, failed, skipped, pending,
+    undefined - then the three remaining states that page has no column for, so
+    a tally is never silently dropped. Every token the status partial can answer
+    with appears exactly once. -#}
+{% set STATUS_READING_ORDER = ('passed', 'failed', 'skipped', 'pending', 'undefined', 'untested', 'ambiguous', 'unknown') %}
+
+{#- The worst status in a collection of already-normalised tokens, by the
+    precedence above. Answers "unknown" for an empty collection, for a missing
+    one, and for a collection holding nothing the precedence names - a status
+    the model never produced must not be reported as a pass. -#}
+{%- macro worst_token(tokens, precedence=STATUS_PRECEDENCE) -%}
+    {%- set found = namespace(token='') -%}
+    {%- set candidates = tokens|default([], true) -%}
+    {%- for candidate in precedence -%}
+        {%- if not found.token and candidate in candidates -%}
+            {%- set found.token = candidate -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {{- found.token if found.token else 'unknown' -}}
+{%- endmacro -%}
+
+{#- How many of one token a collection holds. Kept as a macro so the header's
+    tallies and each filter control's count are counted the same way. -#}
+{%- macro count_of(tokens, token) -%}
+    {{- (tokens|default([], true))|select('equalto', token)|list|length -}}
+{%- endmacro -%}
+
+{#- A nanosecond total as seconds to three decimals. samples is the number of
+    duration keys that were actually present, which is what separates a
+    genuinely zero total from a total of nothing at all: with no sample the
+    duration is unknown and renders an em dash. The raw nanosecond integer is
+    never rendered. -#}
+{%- macro duration_value(total_ns, samples) -%}
+    {%- if (samples|default(0, true)) > 0 and (total_ns|default(0, true)) is number -%}
+        <span class="tqa-duration">{{ '%.3f'|format(total_ns / 1000000000) }} s</span>
+    {%- else -%}
+        <span class="tqa-duration">&mdash;</span>
+    {%- endif -%}
+{%- endmacro -%}
+
+{#- One timestamp, machine-readable and human-readable from the same string:
+    the results file already carries fixed-width UTC ISO-8601, so reformatting
+    it would only invite the two forms to disagree. Blank or absent renders an
+    em dash. -#}
+{%- macro timestamp_value(iso) -%}
+    {%- set stamp = iso|default('', true)|string|trim -%}
+    {%- if stamp -%}
+        <time class="tqa-timestamp" datetime="{{ stamp }}">{{ stamp }}</time>
+    {%- else -%}
+        <span class="tqa-timestamp">&mdash;</span>
+    {%- endif -%}
+{%- endmacro -%}
+
+{#- One integer field, rendered whether or not it is there: an em dash is what
+    tells a reader a value is absent rather than that a field failed to render.
+    A line number is tested for its type rather than its truth, since it is the
+    one integer field here that could legitimately be zero. -#}
+{%- macro integer_value(number) -%}
+    {%- if number is integer and number is not boolean -%}
+        {{- number -}}
+    {%- else -%}
+        &mdash;
+    {%- endif -%}
+{%- endmacro -%}
+
+{#- The control that shows and hides one step list. A real button,
+    non-navigating, named in words because its glyph is generated content and
+    so has no text of its own to be named by, and authored EXPANDED because the
+    authored page is the fully expanded one. It is emitted only where there is a
+    step list to control: an expander controlling nothing is an accessibility
+    defect. -#}
+{%- macro steps_toggle(region_id, label) -%}
+    <button type="button"
+            class="tqa-toggle"
+            data-report-toggle="{{ region_id }}"
+            aria-controls="{{ region_id }}"
+            aria-expanded="true"
+            aria-label="{{ label }}"></button>
+{%- endmacro -%}
+
+{#- Only a tag's name is read, and a blank one is dropped: a feature tag also
+    carries a type and a location, a scenario tag carries neither, and a
+    background carries no tags key at all. Returned as markup rather than a
+    list because a macro can only answer with text - the caller tests the
+    result for emptiness, exactly as it does with the screenshot partial. -#}
+{%- macro tag_items(raw_tags) -%}
+    {%- for tag in (raw_tags if (raw_tags is sequence and raw_tags is not string and raw_tags is not mapping) else []) -%}
+        {%- set tag_name = tag.get('name') if tag is mapping else none -%}
+        {%- set tag_text = (tag_name if tag_name is string else '')|trim -%}
+        {%- if tag_text %}
+        <li class="tqa-tag">{{ tag_text }}</li>
+        {%- endif -%}
+    {%- endfor -%}
+{%- endmacro -%}
+
+{#- The two mappings are read once, at top level, so the title block and the
+    content block cannot read them differently. Each value is type-tested
+    rather than truth-tested, because a truth test on an undefined name is what
+    raises under a strict undefined policy - and malformed input has to render
+    rather than take the page down, since a report is what a reader turns to
+    when a run has gone wrong. -#}
+{%- set scenario_map = scenario if scenario is mapping else {} -%}
+{%- set feature_map = feature if feature is mapping else {} -%}
+
+{%- set scenario_name = (scenario_map.get('name') if scenario_map.get('name') is string else '')|trim -%}
+{%- set scenario_keyword = (scenario_map.get('keyword') if scenario_map.get('keyword') is string else '')|trim -%}
+{%- set scenario_id = (scenario_map.get('id') if scenario_map.get('id') is string else '')|trim -%}
+{%- set scenario_line = scenario_map.get('line') -%}
+{%- set scenario_desc = scenario_map.get('description') if scenario_map.get('description') is string else '' -%}
+{%- set scenario_started = (scenario_map.get('start_timestamp') if scenario_map.get('start_timestamp') is string else '')|trim -%}
+
+{%- set feature_name = (feature_map.get('name') if feature_map.get('name') is string else '')|trim -%}
+{%- set feature_uri = (feature_map.get('uri') if feature_map.get('uri') is string else '')|trim -%}
+{%- set feature_line = feature_map.get('line') -%}
+
+{#- The two link keys, coerced once. Both are required and arrive as integer
+    positions; the coercion is a rendering guard alone, so a context that
+    somehow carries either as text still yields usable links instead of an
+    error page, and it is applied HERE so every link on the page uses the same
+    values. -#}
+{%- set link_findex = (findex|int(0)) if (findex is defined and findex is not none) else 0 -%}
+{%- set link_sindex = (sindex|int(0)) if (sindex is defined and sindex is not none) else 0 -%}
+
+{#- The text that names this scenario, in the document title, in the page's one
+    h1 and in the breadcrumb, so the three can never disagree. A blank name
+    would leave the h1 with nothing in it, so the keyword stands in, and the
+    scenario's own zero-based position behind that - both values the results
+    file itself carries, and neither of them a label invented for a product
+    this port deliberately does not rename. -#}
+{%- set scenario_heading = scenario_name or scenario_keyword or ('Scenario ' ~ link_sindex) -%}
+
+{#- The feature's own label, for the breadcrumb and the header context, by the
+    same rule and the one view/feature.html applies to it. -#}
+{%- set feature_heading = feature_name or feature_uri or ('Feature ' ~ link_findex) -%}
+
+{% block title %}{{ scenario_heading }}{% endblock %}
+
+
+{% block content %}
+    {#- ---------------------------------------------------------------------
+        Derivation. The background and the scenario are walked SEPARATELY,
+        each accumulating its own statuses and its own duration, because they
+        are separate elements in the model and rule 3 of the aggregation
+        contract gives each its own status. Only the filter counts the two
+        together, and it has to: the filterable unit here is the step, and the
+        filter acts on every step on the page.
+
+        Every lookup is guarded, and by a type test rather than a truth test
+        wherever an absent key is legitimate. A sequence that is a string or a
+        mapping is rejected rather than iterated, since both would otherwise
+        iterate into nonsense.
+        --------------------------------------------------------------------- -#}
+
+    {#- How many scenarios this feature carries, by the SAME rule that defines
+        this page's own key: the number of elements whose type is "scenario",
+        never the element count, which double-counts in this suite. It bounds
+        the previous and next links, so an out-of-range link - which would
+        resolve to a 404 - can never be fabricated. An absent element list
+        yields zero and therefore no sibling link at all, rather than raising. -#}
+    {%- set raw_elements = feature_map.get('elements') -%}
+    {%- set element_list = raw_elements if (raw_elements is sequence and raw_elements is not string and raw_elements is not mapping) else [] -%}
+    {%- set counter = namespace(scenarios=0) -%}
+    {%- for element in element_list -%}
+        {%- set el_type = (element.get('type') if (element is mapping and element.get('type') is string) else '')|trim|lower -%}
+        {%- if el_type == 'scenario' -%}
+            {%- set counter.scenarios = counter.scenarios + 1 -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {%- set total_scenarios = counter.scenarios -%}
+    {%- set has_previous = total_scenarios > 0 and link_sindex > 0 -%}
+    {%- set has_next = total_scenarios > 0 and (link_sindex + 1) < total_scenarios -%}
+
+    {#- This scenario's own steps. failure.position records the FIRST failed
+        step, which is where the failure screenshot is attached below: the
+        embedding documents that failure, so it belongs beside the assertion
+        text rather than in a region of its own. -#}
+    {%- set raw_scenario_steps = scenario_map.get('steps') -%}
+    {%- set scenario_steps = raw_scenario_steps if (raw_scenario_steps is sequence and raw_scenario_steps is not string and raw_scenario_steps is not mapping) else [] -%}
+    {%- set scenario_tokens = [] -%}
+    {%- set scenario_time = namespace(duration_ns=0, samples=0) -%}
+    {%- set failure = namespace(position=none) -%}
+    {%- for step in scenario_steps -%}
+        {%- set result = step.get('result') if step is mapping else none -%}
+        {%- set result_map = result if result is mapping else {} -%}
+        {%- set token = status_token(result_map.get('status'))|string|trim -%}
+        {%- set _ = scenario_tokens.append(token) -%}
+        {#- A skipped step may carry no duration key at all, and a non-numeric
+            one would poison the sum, so both count as no sample rather than as
+            zero. -#}
+        {%- set step_duration = result_map.get('duration') -%}
+        {%- if step_duration is number -%}
+            {%- set scenario_time.duration_ns = scenario_time.duration_ns + step_duration -%}
+            {%- set scenario_time.samples = scenario_time.samples + 1 -%}
+        {%- endif -%}
+        {%- if token == 'failed' and failure.position is none -%}
+            {%- set failure.position = loop.index0 -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {%- set scenario_status = worst_token(scenario_tokens)|string|trim -%}
+
+    {#- The background, when the route supplied one. Its steps, its statuses
+        and its duration are entirely its own. -#}
+    {%- set background_map = background if (background is defined and background is mapping) else {} -%}
+    {%- set raw_background_steps = background_map.get('steps') -%}
+    {%- set background_steps = raw_background_steps if (raw_background_steps is sequence and raw_background_steps is not string and raw_background_steps is not mapping) else [] -%}
+    {%- set background_tokens = [] -%}
+    {%- set background_time = namespace(duration_ns=0, samples=0) -%}
+    {%- for step in background_steps -%}
+        {%- set result = step.get('result') if step is mapping else none -%}
+        {%- set result_map = result if result is mapping else {} -%}
+        {%- set _ = background_tokens.append(status_token(result_map.get('status'))|string|trim) -%}
+        {%- set step_duration = result_map.get('duration') -%}
+        {%- if step_duration is number -%}
+            {%- set background_time.duration_ns = background_time.duration_ns + step_duration -%}
+            {%- set background_time.samples = background_time.samples + 1 -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {%- set background_status = worst_token(background_tokens)|string|trim -%}
+    {#- A background is rendered whenever the route supplied a mapping for it,
+        even one carrying no step: dropping it would misreport what the results
+        file says ran before this scenario. -#}
+    {%- set has_background = background_map|length > 0 -%}
+
+    {#- Every step the page renders, which is what the filter acts on. -#}
+    {%- set page_tokens = (background_tokens if has_background else []) + scenario_tokens -%}
+
+    {#- The statuses those steps actually carry, in severity order, which is
+        what the filter controls offer. Offering a status no step carries would
+        give the reader a button that empties the page. -#}
+    {%- set filter_statuses = [] -%}
+    {%- for token in STATUS_PRECEDENCE + ('unknown',) -%}
+        {%- if token in page_tokens -%}
+            {%- set _ = filter_statuses.append(token) -%}
+        {%- endif -%}
+    {%- endfor -%}
+
+    {#- Screenshots belong to the SCENARIO, on its after-hook list, and the
+        lightbox partial flattens that one level of nesting itself - so the
+        list is passed straight in. A list of embeddings carried directly is
+        accepted by the same call. It is rendered once and its own emptiness is
+        the test: a failed scenario with no screenshot is a wholly normal
+        state, because a capture that fails is logged and suppressed. -#}
+    {%- set raw_hooks = scenario_map.get('after') if scenario_map.get('after') is not none else scenario_map.get('embeddings') -%}
+    {%- set shots = screenshots(raw_hooks) -%}
+    {%- set has_shots = shots|trim != '' -%}
+
+    {#- Tag markup, built once. A macro can only answer with text, so its
+        emptiness is the test for "this element declares no tag" - which is the
+        common case, since five of the ten features in this suite carry no
+        feature-level tag and a scenario with none of its own then omits the
+        key entirely. -#}
+    {%- set scenario_tag_items = tag_items(scenario_map.get('tags')) -%}
+    {%- set has_scenario_tags = scenario_tag_items|trim != '' -%}
+
+    {#- Region ids and step uids are DERIVED from the two positions this page
+        was handed, never from an identifier slug and never generated, so
+        identical input yields identical markup. The two prefixes differ by
+        element kind, which is what keeps the background's detail-region ids
+        distinct from the scenario's: the same background is rendered before
+        every scenario and its steps repeat line numbers, so page-wide
+        uniqueness - which the step partial makes the caller's job - could not
+        otherwise be guaranteed. -#}
+    {%- set background_region_id = 'tqa-steps-' ~ link_findex ~ '-' ~ link_sindex ~ '-background' -%}
+    {%- set scenario_region_id = 'tqa-steps-' ~ link_findex ~ '-' ~ link_sindex ~ '-scenario' -%}
+    {%- set background_uid_prefix = 'f' ~ link_findex ~ '-s' ~ link_sindex ~ '-bg' -%}
+    {%- set scenario_uid_prefix = 'f' ~ link_findex ~ '-s' ~ link_sindex ~ '-sc' -%}
+
+    {#- Trail back to the three views a reader can have arrived from. The
+        current page is the last item and is plain text rather than a link to
+        itself; the feature is keyed by its position, never by its identifier
+        slug. -#}
+    <nav aria-label="Breadcrumb">
+        <ul class="tqa-nav">
+            <li>
+                <a class="tqa-link" href="{{ url_for('web.index') }}">Artifacts</a>
+            </li>
+            <li>
+                <a class="tqa-link" href="{{ url_for('web.reports_overview') }}">Report overview</a>
+            </li>
+            <li>
+                <a class="tqa-link" href="{{ url_for('web.report_feature', findex=link_findex) }}">{{ feature_heading }}</a>
+            </li>
+            <li aria-current="page">{{ scenario_heading }}</li>
+        </ul>
+    </nav>
+
+
+    <section class="tqa-scenario" data-tqa-status="{{ scenario_status }}">
+        {#- The scenario's name is already this page's h1, rendered by the shell
+            from the title block, so this heading names the section and carries
+            the aggregate status beside it rather than repeating the name. -#}
+        <h2 class="tqa-scenario-name">
+            Scenario summary
+            {{ status_badge(scenario_status) }}
+        </h2>
+
+        {#- The description is prose, and the one value whose absence is its
+            own statement: the model records "no description" as an empty
+            string, so an empty paragraph or a dash would add furniture and no
+            information. It renders only when it has content, at full width, in
+            the class whose pre-wrap rule keeps its own leading indentation. -#}
+        {%- if scenario_desc|trim %}
+        <p class="tqa-feature-desc">{{ scenario_desc }}</p>
+        {%- endif %}
+
+        {#- Eight short labelled fields, which is two full rows of the four
+            columns this grid resolves to at its widest, so no field is
+            stranded beside empty tracks. Every one is always rendered: an em
+            dash is what tells a reader the value is absent rather than that a
+            field failed to render - and a scenario with no tags at all is the
+            common case in this suite, not an edge one. -#}
+        <dl class="tqa-meta">
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Keyword</dt>
+                <dd class="tqa-meta-value">
+                    {%- if scenario_keyword %}{{ scenario_keyword }}{% else %}&mdash;{% endif -%}
+                </dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Line</dt>
+                <dd class="tqa-meta-value">{{ integer_value(scenario_line) }}</dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Started</dt>
+                <dd class="tqa-meta-value">{{ timestamp_value(scenario_started) }}</dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Duration</dt>
+                <dd class="tqa-meta-value">{{ duration_value(scenario_time.duration_ns, scenario_time.samples) }}</dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Steps</dt>
+                <dd class="tqa-meta-value">{{ scenario_tokens|length }}</dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Position</dt>
+                <dd class="tqa-meta-value">
+                    {%- if total_scenarios > 0 %}{{ link_sindex + 1 }} of {{ total_scenarios }}{% else %}{{ link_sindex + 1 }}{% endif -%}
+                </dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Feature line</dt>
+                <dd class="tqa-meta-value">{{ integer_value(feature_line) }}</dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Results modified</dt>
+                <dd class="tqa-meta-value">{{ timestamp_value(artifact_modified|default('', true)) }}</dd>
+            </div>
+        </dl>
+
+        {%- if has_scenario_tags %}
+        <ul class="tqa-tags">{{ scenario_tag_items }}
+        </ul>
+        {%- endif %}
+
+        {#- The three long values, below the grid and at full width: a fixed
+            grid track narrow enough to break any of them mid-word leaves a
+            character stranded on a line of its own. The identifier is
+            DISPLAYED DATA and nothing more - it is never a link key, because
+            an outline row's names its Examples block and row position and two
+            features in this suite share theirs. -#}
+        <div class="tqa-meta-item">
+            <span class="tqa-meta-label">Identifier</span>
+            <span class="tqa-meta-value">
+                {%- if scenario_id %}<code>{{ scenario_id }}</code>{% else %}&mdash;{% endif -%}
+            </span>
+        </div>
+        <div class="tqa-meta-item">
+            <span class="tqa-meta-label">Feature</span>
+            <span class="tqa-meta-value">
+                <a class="tqa-link" href="{{ url_for('web.report_feature', findex=link_findex) }}">{{ feature_heading }}</a>
+            </span>
+        </div>
+        <div class="tqa-meta-item">
+            <span class="tqa-meta-label">Source</span>
+            <span class="tqa-meta-value">
+                {%- if feature_uri %}<code>{{ feature_uri }}</code>{% else %}&mdash;{% endif -%}
+            </span>
+        </div>
+
+        <h3>Steps by status</h3>
+
+        <p>
+            These counts are this scenario's OWN steps, which are the steps its
+            status is taken from: a scenario takes the worst status among them,
+            so one failure is never averaged away by the passes around it. The
+            background that ran before it keeps its own status and its own
+            counts in its own section below.
+        </p>
+
+        <ul class="tqa-summary">
+            {%- for token in STATUS_READING_ORDER %}
+            {%- set counted = count_of(scenario_tokens, token)|int %}
+            {%- if counted %}
+            <li class="tqa-count" data-tqa-status="{{ token }}">
+                {{ status_badge(token) }}
+                <strong>{{ counted }}</strong>
+            </li>
+            {%- endif %}
+            {%- endfor %}
+            <li class="tqa-count">
+                <span>All steps</span>
+                <strong>{{ scenario_tokens|length }}</strong>
+            </li>
+        </ul>
+    </section>
+
+    {#- Filter and detail controls, offered only where there is a step to act
+        on. Each filter button names a status the steps below actually carry;
+        "all" is the reserved value that clears the filter. They are
+        non-navigating buttons because the behaviour script never suppresses an
+        authored default action, and they are authored unpressed because the
+        unfiltered page is the authored state. THE FILTERABLE UNIT HERE IS THE
+        STEP, so these counts span every step the page renders - the
+        background's included - which is what the filter will actually hide. -#}
+    {%- if page_tokens %}
+    <div class="tqa-filter" role="group" aria-label="Filter steps by status">
+        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="false">
+            All steps ({{ page_tokens|length }})
+        </button>
+        {%- for token in filter_statuses %}
+        <button type="button" class="tqa-filter-btn" data-report-filter="{{ token }}" aria-pressed="false">
+            {{ token|capitalize }} ({{ count_of(page_tokens, token) }})
+        </button>
+        {%- endfor %}
+    </div>
+
+    {#- Expand and collapse everything the page can expand - the two step
+        lists and the step partial's own detail regions inside them, which is
+        where the failure text, the resolved location and the screenshot live.
+        The behaviour script reads this hook BY VALUE and acts only on expand
+        and collapse, so there are two controls rather than one bare attribute,
+        which it would ignore. -#}
+    <div class="tqa-filter" role="group" aria-label="Step detail">
+        <button type="button" class="tqa-filter-btn" data-report-toggle-all="expand">
+            Expand all detail
+        </button>
+        <button type="button" class="tqa-filter-btn" data-report-toggle-all="collapse">
+            Collapse all detail
+        </button>
+    </div>
+    {%- endif %}
+
+
+    {#- ---------------------------------------------------------------------
+        The background, when the route supplied one. It is rendered BEFORE the
+        scenario's own steps because that is where it ran, and it is labelled
+        as the background in its heading so a reader cannot mistake its steps
+        for the scenario's. It carries no id, no start timestamp and no tags -
+        those three keys are the difference between the two element kinds - so
+        its grid renders a step count where the scenario's renders a start
+        time, rather than an em dash for a key that cannot exist.
+        --------------------------------------------------------------------- -#}
+    {%- if has_background %}
+    {%- set background_keyword = (background_map.get('keyword') if background_map.get('keyword') is string else '')|trim %}
+    {%- set background_name = (background_map.get('name') if background_map.get('name') is string else '')|trim %}
+    {%- set background_desc = background_map.get('description') if background_map.get('description') is string else '' %}
+    {%- set background_lead = background_keyword or 'Background' %}
+    <section class="tqa-background">
+        <h2 class="tqa-scenario-name">
+            {%- if background_name %}{{ background_lead }}: {{ background_name }}{% else %}{{ background_lead }}{% endif %}
+            {{ status_badge(background_status) }}
+            {%- if background_steps %}
+            {{ steps_toggle(background_region_id, 'Toggle steps for the background of this scenario') }}
+            {%- endif %}
+        </h2>
+
+        <p>
+            This background ran immediately before the scenario above. The same
+            background runs once for every scenario in the feature and the
+            results file records a separate copy for each, so this one is this
+            scenario's own: its status and its duration are counted here and
+            never folded into the scenario's.
+        </p>
+
+        {%- if background_desc|trim %}
+        <p class="tqa-feature-desc">{{ background_desc }}</p>
+        {%- endif %}
+
+        {#- Four short labelled fields, filling the row this grid resolves to. -#}
+        <dl class="tqa-meta">
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Keyword</dt>
+                <dd class="tqa-meta-value">
+                    {%- if background_keyword %}{{ background_keyword }}{% else %}&mdash;{% endif -%}
+                </dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Line</dt>
+                <dd class="tqa-meta-value">{{ integer_value(background_map.get('line')) }}</dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Steps</dt>
+                <dd class="tqa-meta-value">{{ background_tokens|length }}</dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Duration</dt>
+                <dd class="tqa-meta-value">{{ duration_value(background_time.duration_ns, background_time.samples) }}</dd>
+            </div>
+        </dl>
+
+        {%- if background_steps %}
+        <div id="{{ background_region_id }}" class="tqa-steps" data-report-detail>
+            {%- for step in background_steps %}
+            {{ step_row(step,
+                        uid=background_uid_prefix ~ '-s' ~ loop.index0,
+                        filterable=true,
+                        show_location=true,
+                        inline_args=true) }}
+            {%- endfor %}
+        </div>
+        {%- else %}
+        <p class="tqa-empty">The results file records no step for this background.</p>
+        {%- endif %}
+    </section>
+    {%- endif %}
+
+    {#- ---------------------------------------------------------------------
+        The scenario's own steps, in the order the results file carries them.
+        Both of the step partial's detail options are turned on here, and this
+        is the page they exist for: show_location renders the resolved step
+        function, which is what turns a failure into something a reader can go
+        and open, and inline_args splices the matched arguments into the step
+        text at their recorded offsets, which is how an outline row's actual
+        values become visible. The failure text and any screenshot ride in the
+        same detail region.
+        --------------------------------------------------------------------- -#}
+    <h2>
+        Steps
+        {%- if scenario_steps %}
+        {{ steps_toggle(scenario_region_id, 'Toggle the step list for this scenario') }}
+        {%- endif %}
+    </h2>
+
+    {%- if scenario_steps %}
+    <div id="{{ scenario_region_id }}" class="tqa-steps" data-report-detail>
+        {%- for step in scenario_steps %}
+        {#- The failure screenshot is attached to the FIRST FAILED step, so the
+            image sits with the assertion text it documents rather than in a
+            region of its own. When no step failed but embeddings were carried
+            anyway, the fallback section below renders them instead, so an
+            embedding is never dropped and never rendered twice. -#}
+        {{ step_row(step,
+                    uid=scenario_uid_prefix ~ '-s' ~ loop.index0,
+                    filterable=true,
+                    show_location=true,
+                    inline_args=true,
+                    embeddings=(raw_hooks if (failure.position is not none and loop.index0 == failure.position) else none)) }}
+        {%- endfor %}
+    </div>
+    {%- else %}
+    {#- A scenario carrying no step at all. This is NOT a missing-data state:
+        an absent, unreadable or unparseable results file never reaches this
+        template, because the route answers 404 for all three alike, and so
+        does an index out of range. The header above is this scenario's own,
+        exactly as the run wrote it. -#}
+    <p class="tqa-empty">
+        The results file records no step for this scenario, so there is no
+        status, timing or failure detail to show for it. The
+        <a class="tqa-link" href="{{ url_for('web.report_feature', findex=link_findex) }}">feature page</a>
+        lists the other elements of the same run.
+    </p>
+    {%- endif %}
+
+    {#- The fallback path for screenshots: embeddings were carried but no step
+        failed, so there is no failure to attach them to. Rendered here rather
+        than dropped, because a capture that happened is evidence the run
+        produced. With no embedding at all - the ordinary case, including for a
+        failed scenario, since a capture that fails is logged and suppressed -
+        nothing is emitted here at all: no placeholder, no "unavailable" note
+        and no broken image. -#}
+    {%- if has_shots and failure.position is none %}
+    <h2>Screenshots</h2>
+    {{ shots }}
+    {%- endif %}
+
+    {#- Sibling navigation, derived from the scenario count above and keyed on
+        positions alone. A link is emitted only where the target exists, so no
+        link on this page can resolve to a 404; the feature link is always
+        available, which is what keeps a reader from being stranded on a
+        feature holding a single scenario. -#}
+    <nav aria-label="Scenario navigation">
+        <ul class="tqa-nav">
+            {%- if has_previous %}
+            <li>
+                <a class="tqa-link"
+                   href="{{ url_for('web.report_scenario', findex=link_findex, sindex=link_sindex - 1) }}"
+                   rel="prev">Previous scenario</a>
+            </li>
+            {%- endif %}
+            <li>
+                <a class="tqa-link" href="{{ url_for('web.report_feature', findex=link_findex) }}">All elements of {{ feature_heading }}</a>
+            </li>
+            {%- if has_next %}
+            <li>
+                <a class="tqa-link"
+                   href="{{ url_for('web.report_scenario', findex=link_findex, sindex=link_sindex + 1) }}"
+                   rel="next">Next scenario</a>
+            </li>
+            {%- endif %}
+        </ul>
+    </nav>
+
+    {#- The one overlay the page needs, rendered once and last. Every thumbnail
+        above reuses it; the behaviour script finds it for the whole document
+        and writes the image source itself when a reader opens it. -#}
+    {{ lightbox_overlay() }}
+{% endblock %}

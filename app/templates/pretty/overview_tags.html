@@ -1,0 +1,596 @@
+{#-
+  ===========================================================================
+  pretty/overview_tags.html - the tag statistics page of the generated report
+  tree.
+  ===========================================================================
+
+  One of the six page templates app/reporting/pretty_reports.py renders. It
+  produces cucumber-html-reports/overview-tags.html inside the generated
+  report tree - contract 2 of the port's two HTML artifacts, whose reference
+  output came from me.jvt.cucumber:reporting-plugin 7.2.0 (pom.xml:66-70) over
+  net.masterthought:cucumber-reporting 5.6.1 and velocity-engine-core 2.3.
+
+  The template is underscore-named and the artifact is hyphen-named: the file
+  is overview_tags.html and the page it writes is overview-tags.html. The two
+  names differ on purpose and neither follows the other.
+
+  ---------------------------------------------------------------------------
+  PROVENANCE: THE GENERATOR'S OWN TEMPLATES, NOT THE SPLICED COMMITTED PAGE
+  ---------------------------------------------------------------------------
+  The committed reference page is unusable as a value baseline and only
+  partly usable as a structural one. It carries EIGHT unresolved merge-conflict
+  marker blocks, so its numbers splice two different runs - its footer reports
+  0 passed scenarios in the sum row and 100.00% passed in the percentage row -
+  and it reports a @Dash tag that NO feature at the pinned revision declares,
+  which proves the tree predates the source. Nothing on this page is derived
+  from those numbers.
+
+  So the structure below was taken from the generator itself, read out of
+  net.masterthought:cucumber-reporting 5.6.1 rather than inferred from its
+  output: templates/generators/overviewTags.vm (this page), templates/js/
+  tags-chart.js.vm (the chart), templates/macros/report/statsTable.vm and
+  reportHeader.vm (the table, which pretty/_stats_table.html owns), and
+  templates/macros/page/lead.vm (the lead region, which pretty/_layout.html
+  owns). Where the requirements for this file and that source disagree, the
+  disagreement is named below with the evidence and the decision taken; two
+  such places exist and both are recorded.
+
+  ---------------------------------------------------------------------------
+  TWO ABSOLUTE STRUCTURAL RULES, SHARED BY EVERY TEMPLATE IN THIS FOLDER
+  ---------------------------------------------------------------------------
+  1. This page extends pretty/_layout.html and NEVER app/templates/base.html.
+     That template builds every asset link with the framework's static-URL
+     builder, which resolves only while an application is serving; this tree is
+     written to disk and opened straight from a Jenkins workspace over the file
+     protocol.
+  2. NO framework URL building anywhere in this folder, and none here. This
+     page emits no asset reference of its own at all - every script, stylesheet
+     and icon belongs to the layout, and every one of those is tree-relative -
+     and the one link it does emit, the tag detail page in each row, is a plain
+     relative filename its caller passes in.
+
+  ---------------------------------------------------------------------------
+  WHAT MAKES THIS PAGE DIFFERENT FROM overview_features.html
+  ---------------------------------------------------------------------------
+  The two pages are the tree's only chart-bearing overviews and they are the
+  easiest pair to conflate. Every difference below is measured, and the first
+  four are the ones a template written by analogy gets wrong:
+
+    1. ONE canvas, not three. id="tags-chart", height="50" - not 120 - and
+       there is NO carousel, NO indicator list and NO previous/next control
+       anywhere on this page.
+    2. The chart column is col-md-10 col-md-offset-1, not col-md-6
+       col-md-offset-3.
+    3. The chart is a STACKED BAR - type "bar" with stacked xAxes and yAxes,
+       one bar per tag over five status series - not a doughnut, and its
+       tooltip configuration is the plain mode "label" rather than the
+       doughnut pages' percentage label callback.
+    4. Its series carry PERCENTAGES, not counts. See the chart section below.
+    5. The lead sentence is SINGULAR - "The following graph shows" - where the
+       features page has "The following graphs show". Both are the generator's
+       own text and neither is normalised to the other.
+    6. The first header cell of the statistics table reads Tag, not Feature.
+       That single word is the only difference between the two tables, which
+       is why both call the same macro.
+
+  ---------------------------------------------------------------------------
+  THE RENDER CONTEXT - the contract app/reporting/pretty_reports.py renders
+  against, and the contract tests/test_pretty_reports.py asserts. Neither
+  exists yet, so this declaration is the specification for both.
+  ---------------------------------------------------------------------------
+  project_name, build_date_display, title_suffix and active_page are the
+  layout's own and are documented there; the last two are set below rather
+  than passed. This page reads two inputs of its own:
+
+      tags       REQUIRED in practice. A sequence of row mappings, one per
+                 tag, in the order they are to be rendered. The row contract
+                 is pretty/_stats_table.html's and is not restated here: name,
+                 href, the six step counts, the three scenario counts,
+                 duration_ns as RAW NANOSECONDS, and status.
+
+                 The name carries its leading @, because the @ is part of the
+                 tag name in the model. The href is the tag's detail page as a
+                 plain relative filename.
+
+      totals     OPTIONAL. The run-level summary mapping that fills the two
+                 footer rows, again pretty/_stats_table.html's contract: the
+                 same nine count keys, duration_ns, and features with
+                 features_passed for the last percentage cell.
+
+                 Supply it. When it is absent this page derives the nine sums
+                 and the duration from the rows it renders, so the footer the
+                 generator always emits on this page is still emitted, but
+                 features and features_passed CANNOT be derived from tag rows
+                 - they are run-level feature counts, which no tag row carries
+                 - so the last percentage cell then reads 0.00%.
+
+  Two synonyms are accepted for each, and they exist for one reason: the
+  writer that renders this template does not exist yet, and a page that
+  silently renders an empty table because the writer chose a different name
+  for the same value is the worst failure available here - it looks like a run
+  with no tags. tags is canonical; tag_stats and all_tags are accepted, the
+  last being the generator's own Velocity name. totals is canonical and
+  report_summary is accepted, again the generator's own name. This is a
+  tolerant NAME lookup and nothing more: no second aggregation, no second
+  formatting rule, no second answer to any question this page asks.
+
+  WHAT THIS PAGE DELIBERATELY DOES NOT DERIVE. Tag aggregation, tag ordering
+  and the detail-page filenames all belong to app/reporting/pretty_reports.py,
+  which owns them alone:
+
+    - AGGREGATION. A tag's counts come from the scenario elements that carry
+      it. Measured against the reference result set: the @Smoke row reports 15
+      steps where its feature reports 19, and the difference is exactly the
+      four Background steps, one per scenario - so background steps count
+      towards a feature and NOT towards a tag, and the tag's duration
+      62051000000 ns, rendered 1:2.051, is the sum over its scenario elements
+      alone. Reproducing that rule in Jinja as well would be a second answer
+      to the same question, so it is not reproduced: this page renders the
+      rows it is handed.
+    - ORDERING. The generator sorts through its own configurable sorting
+      factory, and the publisher's ALPHABETICAL option is a display setting
+      that imposes nothing on the artifact. Row order is therefore the
+      writer's decision and this page preserves the order it receives.
+    - FILENAMES. Tag detail names are report-tag_<hash>.html - a fixed prefix,
+      an unsigned decimal hash and .html. The algorithm is the generator's
+      Util.toValidFileName: the Java string hash code of the TAG NAME plus
+      2147483647, confirmed against both committed pages - @Smoke gives
+      4059758862 and @Dash gives 2208711665. It belongs to pretty_reports.py,
+      which derives it and confirms it against a regenerated baseline. THE
+      HREF IS ALWAYS A PASSED-IN VALUE AND IS NEVER COMPUTED HERE. Unlike the
+      feature pages, tag-page filenames do not move when the features
+      directory moves, because a tag name is not a path.
+
+  Both inputs are reached through guards that test definedness first, so the
+  page renders under a strict undefined policy whatever the writer omits. That
+  matters beyond tidiness: the run's exit contract requires all four artifacts
+  to be written even when the tag expression selects nothing, so "no tags at
+  all" is a real, reachable, must-not-fail input - and with five of the ten
+  features carrying no feature-level tag, it is not even an unusual one.
+
+  ---------------------------------------------------------------------------
+  THE CHART - MEASURED, AND TWO REQUIREMENTS CORRECTED BY MEASUREMENT
+  ---------------------------------------------------------------------------
+  templates/js/tags-chart.js.vm, reproduced below with its five series in its
+  order, its two stacked axes and its label-mode tooltip. Two of its details
+  contradict the requirements for this file, and in both places the generator
+  wins because it IS the contract:
+
+    THE PALETTE. This chart's series colours are #92DD96, #F2928C, #8AF,
+    #F5F28F and #F5B975. The palette the requirements name - #00B000,
+    #FF3030, #88AAFF, #F5F28F, #F5B975 - is the DOUGHNUT palette, measured on
+    all three of overview_features.html's charts, and the requirements
+    themselves say to confirm the series against a clean baseline. Three of
+    the five differ. The evidence is not only the generator's template: those
+    three colour literals sit OUTSIDE every merge-conflict block in the
+    committed page, so both sides of the splice agree on them.
+
+    THE DATA. The series carry percentages of that tag's steps, not counts.
+    TagsOverviewPage.generateTagValues fills each series with
+    Util.formatAsDecimal(tag.get<Status>Steps(), tag.getSteps()), which is
+    100.0 * part / whole at two decimals and 0 when the whole is zero. It
+    checks out arithmetically on the reference row: 10, 2 and 3 of 15 steps
+    render 66.67, 13.33 and 20.00, and the five values sum to 100.00. Counts
+    would have rendered 10, 2 and 3, which is what the committed page would
+    have shown had the series been counts.
+
+  THE SERIES ARE DERIVED FROM THE ROWS THIS PAGE RENDERS, not from a second
+  input, so the chart and the table cannot disagree about the same run. The
+  percentage itself comes from pretty/_macros.html's percent_text, the
+  project's single owner of percentage arithmetic, with its percent sign
+  removed for the JavaScript number literal - so the bars, the footer's
+  percentage row and every other percentage in the tree round identically and
+  answer 0.00 for an empty denominator identically.
+
+  NO MODEL TEXT IS EVER CONCATENATED INTO THE SCRIPT. The five series are
+  numbers, produced by a macro that coerces its arguments numerically and can
+  therefore emit nothing but a number, and the labels go through the JSON
+  encoder, which escapes the angle brackets, ampersands and quotes that tag
+  names may legally contain. One visible consequence of encoding rather than
+  concatenating: a whole percentage is written 100.0 where the generator's own
+  number formatter wrote 100.00. It is the same number to the same two
+  decimals - the rounding happens in the macro, before the encoder sees it -
+  and building the literal by hand to add the trailing zero would put string
+  assembly back into a script block, which is the one thing this page will not
+  do.
+
+  new Chart APPEARS EXACTLY ONCE on this page, and it appears together with
+  its canvas or not at all - which is the one place this page knowingly
+  departs from the generator, and it is a defect correction rather than a
+  liberty:
+
+      overviewTags.vm wraps the whole chart block in #if(!$all_tags.isEmpty())
+      but emits the chart script in the head UNCONDITIONALLY. On a report with
+      no tags the generator therefore calls new Chart against a canvas that
+      the very same template chose not to emit, which Chart.js 2.7.3 answers
+      by logging "Failed to create chart: can't acquire context from the given
+      item" to the console. The canvas and its initialisation are gated
+      together here, so the emitted page never calls a chart constructor for a
+      canvas it does not contain.
+
+  Charting is the vendored Chart.js 2.7.3's and is never reimplemented. This
+  initialisation and the tablesorter initialisation the layout owns are the
+  only inline scripts on this page - both blocks the reference itself carries -
+  and no behaviour hook from app/static/js/report.js is put on the canvas: the
+  chart is not filterable, not collapsible and not a screenshot.
+
+  ---------------------------------------------------------------------------
+  THE EMPTY TAG LIST, AND THE SECOND DEPARTURE FROM THE REQUIREMENTS
+  ---------------------------------------------------------------------------
+  overviewTags.vm is unambiguous about a report with no tags, and it is the
+  only page in the tree that says anything on the subject:
+
+      #if(!$all_tags.isEmpty())   ... the chart block ...   #end
+      ...
+      #if($all_tags.isEmpty())
+        <p>You have no tags in your cucumber report</p>
+      #else
+        #includeStatsTable("Tag", $all_tags, $report_summary)
+      #end
+
+  So with no tags the generator emits NO chart, NO canvas and NO table - it
+  emits that one sentence inside the report container - and this page does the
+  same. The requirements for this file ask instead for "table with no rows,
+  chart with no series", and that is the one measurable claim in them the
+  generator contradicts: a header-and-footer-only table of zeros and an
+  axes-only chart are pages this generator never produces. The substantive
+  requirement in that sentence - that the empty render must not raise under a
+  strict undefined policy, because the exit contract writes all four artifacts
+  even when nothing was selected - is met exactly, and it is what the empty
+  render is tested for.
+
+  ---------------------------------------------------------------------------
+  THE TABLE IS DELEGATED, WHOLE
+  ---------------------------------------------------------------------------
+  pretty/_stats_table.html renders it, called with first_column_label 'Tag',
+  the rows, the totals mapping that gives it its footer, and sortable left at
+  its default so the table carries the id the layout's tablesorter
+  initialisation binds to and the hover class. Everything the requirements
+  list about that table - the grouping row's dont-sort class and its 6 / 3 / 2
+  colspans, the twelve columns, the tagname cell and its anchor, and the
+  duration cells whose data-value carries raw nanoseconds so the sorter orders
+  1:2.051 above 24.654 - is that macro's, is asserted in its own tests, and is
+  deliberately not restated here. A page that rebuilt any of it would be the
+  second answer this folder exists to avoid.
+
+  ---------------------------------------------------------------------------
+  WHICH TAGS APPEAR
+  ---------------------------------------------------------------------------
+  Whatever the model contains: this page selects nothing, filters nothing and
+  invents nothing. For orientation only, and drawn from the plan rather than
+  from this template's behaviour: @Smoke occurs exactly once in the suite, at
+  Crm.feature:1, and is the default tag filter, so a default run reports one
+  feature and only the tags it declares; five features carry no feature-level
+  tag at all; and several scenarios carry tags of their own. @Dash is NOT one
+  of them - it appears only on the stale side of the committed page - and it
+  is not a tag this port produces.
+
+  ---------------------------------------------------------------------------
+  CLASS VOCABULARY - both stylesheets, and nothing invented in either
+  ---------------------------------------------------------------------------
+  The generator's own classes and ids are kept exactly: charts and report on
+  the two containers, the Bootstrap grid classes that lay them out, and the
+  canvas id the initialisation looks up. Every class inside the table is
+  _stats_table.html's.
+
+  One name is added from app/static/css/main.css, the port's own prefixed
+  stylesheet, and one is deliberately withheld:
+
+      tqa-empty      ADDED, on the no-tags sentence. The generator's own
+                     paragraph carries no class, so this is additive rather
+                     than a substitution, and it cannot collide: main.css is
+                     entirely tqa- prefixed with no bare element, class or id
+                     selector, and the vendored stylesheet declares no rule
+                     that would reach this paragraph. It renders the sentence
+                     as a bordered notice, which is a visible change to a page
+                     no reference output shows - the reference run had a tag -
+                     and it is the same treatment the sibling steps overview
+                     gives its own empty notice.
+      tqa-table      WITHHELD, and not by this page: the table element belongs
+                     to _stats_table.html, which withholds it on a measurement
+                     - its cell rule wins over the twelve header status
+                     backgrounds and collapses them to one grey. Adding a
+                     class to that table from here would defeat that decision
+                     silently, so this page adds nothing to it.
+      tqa-page,      WITHHELD. Both impose their own box on markup the
+      tqa-table-wrap Bootstrap grid already lays out, which is also what
+                     carries this page's responsive and print behaviour.
+
+  NO PRESENTATION STATE. None of main.css's three boolean hooks -
+  data-tqa-collapsed, data-tqa-filtered, data-tqa-open - and none of
+  report.js's three run-time state classes. The stylesheet takes their absence
+  to mean expanded, visible and closed, so the emitted page is complete with
+  scripting disabled and correct on paper. The status hook the table's rows
+  carry is a status hook, not a state hook, and it is emitted by the macro
+  that owns those rows.
+
+  NO BEHAVIOUR HOOK EITHER. report.js's data-report-* attributes drive
+  filtering, step expansion and the screenshot overlay; this page has no
+  filter control, no collapsible region and no screenshot, so it emits none of
+  them - not even a root attribute, which would scope the script to a region
+  containing nothing for it to act on.
+
+  ---------------------------------------------------------------------------
+  ESCAPING, RESPONSIVENESS, ACCESSIBILITY
+  ---------------------------------------------------------------------------
+  ESCAPING - the engine's own, on every interpolated value, with nothing
+  declared trusted markup and no value marked safe anywhere in this file. It
+  matters: tag names are model text and the reference generator escapes its
+  own output too.
+
+  RESPONSIVE AND PRINT behaviour is the Bootstrap grid's and the two
+  stylesheets' own, exactly as on the sibling overviews. The chart canvas is
+  responsive by its own configuration - the option is measured, not added -
+  and the statistics table behaves as _stats_table.html documents.
+
+  Measured in a browser on the emitted page rather than assumed, because the
+  next reader will otherwise either doubt it or "fix" it:
+    - At 1440 wide the document is exactly the viewport width with no
+      horizontal scrolling at all. The chart occupies the ten-column column at
+      1170 CSS pixels, the table the same, and the five status backgrounds plus
+      the two greys of the twelve header cells stay seven distinct colours.
+    - At 768 wide both the chart and the full twelve-column table still fit,
+      and the canvas resizes to 738 by 123 on its own.
+    - At 390 wide the twelve-column table is 712 wide, so the page scrolls
+      horizontally. Nothing is clipped, nothing is unreachable and nothing
+      overlaps - measured: 109 text rectangles, zero own-cell overflows, zero
+      intrusions into a neighbouring cell, zero overlapping pairs - which is
+      the reference's own behaviour for a wide data table and is left alone.
+    - Under print emulation all twelve header cells, all body rows and both
+      footer rows render, every status tint goes transparent, and the
+      navigation bar and page footer are dropped. Nothing is clipped.
+    BLITZY [LAYOUT]: at 390 wide, Chart.js auto-skips to three x-axis labels
+      and draws them 6 to 15 pixels BELOW the canvas box, so they are clipped.
+      The cause is entirely measured values in combination: height="50" on the
+      canvas and the responsive option, which together give a 360 by 60 box at
+      that width - too short for a rotated category label. Correcting it would
+      mean changing the measured height, adding a layout-padding or
+      aspect-ratio option the generator's configuration does not have, or
+      styling the canvas from the port's stylesheet, and the measured contract
+      wins over a generic recommendation. Note also that this contract's pages
+      declare no viewport element, which _layout.html records as measured, so a
+      real phone renders this page scaled down from its desktop width rather
+      than at 390 CSS pixels. Implemented as measured and flagged for review
+      rather than silently altered.
+
+  ACCESSIBILITY - the invisible kind is applied because it changes nothing
+  rendered, and the layout records the three chrome-level items it leaves as
+  measured. One addition is this page's own:
+    The canvas is given role="img" and an accessible name taken from the
+    page's own lead sentence. A canvas is an image with no intrinsic text, and
+    the reference leaves it nameless; naming it changes not one rendered pixel
+    and gives a screen reader something better than "graphic". The numbers the
+    chart draws are all present in the table below it, which is the real text
+    alternative, so nothing is announced twice.
+-#}
+{% extends "pretty/_layout.html" %}
+{% import 'pretty/_stats_table.html' as stats %}
+{% import 'pretty/_macros.html' as fmt %}
+
+{#- The layout's own context, set here rather than passed, which is the form it
+    documents. The title becomes "Cucumber Reports  - Tags Overview", the
+    double space included; the navigation key marks the Tags item current and
+    leaves the other three plain. -#}
+{% set title_suffix = 'Tags Overview' %}
+{% set active_page = 'tags' %}
+
+{#- ---------------------------------------------------------------------------
+    Input resolution and derivation.
+
+    All of it at the top level, deliberately: the head and the body both need
+    the same answer to "are there any tags", and the chart in the head needs
+    the same numbers the table in the body renders. Deriving either twice is
+    how a page comes to contradict itself.
+
+    Every lookup tests definedness FIRST so a strict undefined policy never
+    raises on a name the writer did not pass, and rules out null SECOND so no
+    absent value can surface as the text "None". The plain default filter is
+    used on the numeric lookups rather than its boolean form, because zero is
+    a measured count and a measured duration, not an absence.
+    --------------------------------------------------------------------------- -#}
+{%- set rows_candidate = tags if (tags is defined and tags is not none)
+      else (tag_stats if (tag_stats is defined and tag_stats is not none)
+      else (all_tags if (all_tags is defined and all_tags is not none)
+      else none)) -%}
+{#- A string is iterable one character at a time and a mapping one key at a
+    time; neither is a row sequence, and both are excluded here rather than
+    spelled out one row per character further down. The result is a real list,
+    so it can be walked twice - once for the chart, once for the table. -#}
+{%- set tag_rows = rows_candidate|list
+      if (rows_candidate is iterable and rows_candidate is not string and rows_candidate is not mapping)
+      else [] -%}
+{%- set totals_candidate = totals if (totals is defined and totals is not none)
+      else (report_summary if (report_summary is defined and report_summary is not none)
+      else none) -%}
+
+{#- The nine count keys the footer sums, in the table's own column order, and
+    the five the chart's five series read, in the generator's series order. -#}
+{%- set count_keys = ('steps_passed', 'steps_failed', 'steps_skipped',
+                      'steps_pending', 'steps_undefined', 'steps_total',
+                      'scenarios_passed', 'scenarios_failed', 'scenarios_total') -%}
+{%- set series_keys = ('steps_passed', 'steps_failed', 'steps_skipped',
+                       'steps_pending', 'steps_undefined') -%}
+
+{#- One label list and five series lists, filled in row order so that bar N of
+    the chart is row N of the table. Lists are appended to rather than
+    reassigned, which is what carries a value out of a loop in this engine. -#}
+{%- set chart_labels = [] -%}
+{%- set chart_series = [[], [], [], [], []] -%}
+{#- The footer this page derives when the writer passed none. features and
+    features_passed are absent on purpose: they are run-level feature counts
+    and no tag row carries one, so the last percentage cell answers 0.00%
+    through the macro's own empty-denominator rule rather than through a
+    number this page invented. -#}
+{%- set derived_totals = {'steps_passed': 0, 'steps_failed': 0, 'steps_skipped': 0,
+                          'steps_pending': 0, 'steps_undefined': 0, 'steps_total': 0,
+                          'scenarios_passed': 0, 'scenarios_failed': 0,
+                          'scenarios_total': 0, 'duration_ns': 0} -%}
+
+{%- for row in tag_rows -%}
+    {#- The whole row through one guarded name, so a row that is not a mapping
+        at all degrades once instead of once per lookup. -#}
+    {%- set data = row|default({}, true) -%}
+    {#- The bar's label is the table's own first-column text, folded the same
+        way that macro folds it - the name, or the link target when a row
+        carries no name - so no bar can be labelled differently from its row. -#}
+    {%- set label = data.name|default('', true)|string|trim -%}
+    {%- set link = data.href|default('', true)|string|trim -%}
+    {%- set _ = chart_labels.append(label if label else link) -%}
+    {#- The five status counts, coerced once and read twice: by the series and
+        by the denominator below. -#}
+    {%- set counts = [] -%}
+    {%- for key in series_keys -%}
+        {%- set raw = data[key]|default(none) -%}
+        {%- set _ = counts.append(0 if raw is none else raw|int(0)) -%}
+    {%- endfor -%}
+    {#- The denominator is the tag's own step total, which is what the
+        generator divides by. The sum of the five stands in when a row carries
+        no total, and a zero denominator is handed to the macro rather than
+        divided by, because its answer for that case - 0.00 - is the
+        generator's answer too. -#}
+    {%- set declared = data.steps_total|default(none) -%}
+    {%- set declared_total = (declared|int(0)) if declared is not none else 0 -%}
+    {%- set denominator = declared_total if declared_total > 0 else counts|sum -%}
+    {#- Percentage arithmetic through its single owner, with the percent sign
+        removed for the JavaScript number literal and the result coerced to a
+        number, so the series can carry nothing but numbers into the script. -#}
+    {%- for index in range(5) -%}
+        {%- set _ = chart_series[index].append(
+              fmt.percent_text(counts[index], denominator)|trim|replace('%', '')|float(0.0)) -%}
+    {%- endfor -%}
+    {#- The derived footer accumulates exactly the values the body rows
+        display, including each row's own step total, so a derived footer can
+        never disagree with the rows above it. -#}
+    {%- for key in count_keys -%}
+        {%- set raw = data[key]|default(none) -%}
+        {%- set _ = derived_totals.update({key: derived_totals[key] + (0 if raw is none else raw|int(0))}) -%}
+    {%- endfor -%}
+    {#- A duration that is absent, malformed or negative contributes nothing,
+        which is the same rule the duration macros apply when they render an
+        empty cell instead of 0.000. -#}
+    {%- set raw_duration = data.duration_ns|default(none) -%}
+    {%- set nanos = (raw_duration|int(-1)) if raw_duration is not none else -1 -%}
+    {%- set _ = derived_totals.update({'duration_ns': derived_totals.duration_ns + (nanos if nanos > 0 else 0)}) -%}
+{%- endfor -%}
+
+{#- Presence decides, exactly as the table macro documents: a supplied mapping
+    is used as it stands, an empty supplied mapping included, and only its
+    absence falls back to the sums above. The footer itself is never omitted,
+    because the generator emits one on this page unconditionally. -#}
+{%- set footer_totals = totals_candidate if totals_candidate is not none else derived_totals -%}
+
+{#- The chart initialisation, injected into the head where the reference puts
+    it, and gated with the canvas below so that a chart constructor is never
+    emitted for a canvas the page does not contain - see the chart note above
+    for the generator defect that gating corrects. Every literal here is
+    measured: the five series and their order, the three axis-relevant
+    options, the label-mode tooltip and the five colours. -#}
+{% block head_extra %}{% if tag_rows %}
+  <script>
+$(document).ready(function() {
+
+    var chartData = {
+        labels: {{ chart_labels|tojson }},
+        datasets: [
+            {
+                label: "Passed",
+                backgroundColor: "#92DD96",
+                data: {{ chart_series[0]|tojson }}
+            },
+            {
+                label: "Failed",
+                backgroundColor: "#F2928C",
+                data: {{ chart_series[1]|tojson }}
+            },
+            {
+                label: "Skipped",
+                backgroundColor: "#8AF",
+                data: {{ chart_series[2]|tojson }}
+            },
+            {
+                label: "Pending",
+                backgroundColor: "#F5F28F",
+                data: {{ chart_series[3]|tojson }}
+            },
+            {
+                label: "Undefined",
+                backgroundColor: "#F5B975",
+                data: {{ chart_series[4]|tojson }}
+            }
+        ]
+    };
+
+    var context = document.getElementById("tags-chart");
+    window.myBar = new Chart(context, {
+        type: "bar",
+        data: chartData,
+        options: {
+            tooltips: {
+                mode: "label"
+            },
+            responsive: true,
+            legend: {
+                display: false
+            },
+            scales: {
+                xAxes: [{
+                    stacked: true
+                }],
+                yAxes: [{
+                    stacked: true
+                }]
+            }
+        }
+    });
+
+});
+  </script>
+{% endif %}{% endblock %}
+
+{#- The lead. Heading and sentence are the generator's own text, reproduced
+    byte for byte, and the sentence is SINGULAR here - "graph shows" - where
+    the features overview has "graphs show". The heading opens on the block
+    tag's own line so the layout's surrounding indentation comes out exactly as
+    measured; a newline there would insert a blank line the reference does not
+    have, and the paragraph's deeper indentation is the generator's too. -#}
+{% block lead %}    <h2>Tags Statistics</h2>
+      <p>The following graph shows passing and failing statistics for tags</p>
+{%- endblock %}
+
+{% block content %}
+{#- The chart block, present only when there is at least one tag, exactly as
+    #if(!$all_tags.isEmpty()) gates it. One canvas, height 50, in a ten-column
+    offset-one column: no carousel, no indicators and no controls belong on
+    this page. -#}
+{%- if tag_rows %}
+<div class="container-fluid" id="charts">
+  <div class="row">
+    <div class="col-md-10 col-md-offset-1">
+      <canvas id="tags-chart" height="50" role="img" aria-label="Passing and failing statistics for tags"></canvas>
+    </div>
+  </div>
+</div>
+{%- endif %}
+
+{#- Measured, and outside the gate above: this page emits its line break
+    whether or not it drew a chart. The report container follows, once and
+    only once on this page. #}
+
+<br/>
+<div class="container-fluid" id="report">
+  <div class="row">
+    <div class="col-md-10 col-md-offset-1">
+{%- if tag_rows %}
+      {{ stats.stats_table(tag_rows, 'Tag', footer_totals, true) }}
+{%- else %}
+      {#- The generator's own sentence for a report with no tags, carrying the
+          port's empty-notice class and no other change. #}
+      <p class="tqa-empty">You have no tags in your cucumber report</p>
+{%- endif %}
+    </div>
+  </div>
+</div>
+{#- The block closes without a trailing newline: the layout already supplies
+    the separation between the page body and the footer. -#}
+{%- endblock %}
+

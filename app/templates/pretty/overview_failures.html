@@ -1,0 +1,506 @@
+{#-
+  ===========================================================================
+  pretty/overview_failures.html - the failures summary page of the generated
+  report tree.
+  ===========================================================================
+
+  One of the six page templates app/reporting/pretty_reports.py renders. It
+  produces cucumber-html-reports/overview-failures.html inside the generated
+  report tree - contract 2 of the port's two HTML artifacts, whose reference
+  output came from me.jvt.cucumber:reporting-plugin 7.2.0 (pom.xml:66-70),
+  which pulls net.masterthought:cucumber-reporting 5.6.1 over
+  org.apache.velocity:velocity-engine-core 2.3.
+
+  The template is underscore-named and the artifact is hyphen-named: this file
+  is overview_failures.html and it writes overview-failures.html. The two
+  names differ on purpose and neither follows the other.
+
+  WHAT MAKES THIS PAGE DIFFERENT FROM THE OTHER THREE OVERVIEWS
+  -------------------------------------------------------------
+  Measured on the reference tree, and every difference is load-bearing:
+
+    1. NO STATISTICS TABLE AND NO CHART - the only overview with neither.
+       Measured: the page holds zero canvas elements, zero chart constructor
+       calls, no stats-table and no sortable table id. _stats_table.html is
+       therefore not imported, head_extra is not overridden, and no numeric
+       table exists on this page to sort.
+    2. IT RENDERS AN ELEMENT TREE, which no other overview does. The markup is
+       the same vocabulary the two detail pages use, so it comes wholesale
+       from _element_tree.html and none of it is restated here.
+    3. ITS HEADING IS THE "OVERVIEW" FORM. This page says "Failures Overview"
+       where the other three say "... Statistics". Measured; not normalised.
+
+  THE TWO VARIATIONS THIS PAGE SELECTS, and both are parameters of
+  _element_tree.html rather than branches on a page name:
+
+    - div.elements carries NO inner-level here. Measured: the failures page
+      and report-tag_4059758862.html both emit <div class="elements">, while
+      report-feature_1735223818.html emits <div class="elements inner-level">
+      because there its container sits inside a div.feature wrapper. This page
+      has no feature wrapper, so it passes the outer form.
+    - EACH ELEMENT OPENS WITH A FEATURE-LINK ROW - div.indention holding
+      <b>Feature:</b> and an anchor to that feature's detail page - which a
+      feature page never has, for the same reason: there the page is already
+      about one feature. Measured: two link rows on the reference failures
+      page, four on the reference tag page, zero on the two feature pages.
+
+  ---------------------------------------------------------------------------
+  THE RENDER CONTEXT - the contract app/reporting/pretty_reports.py renders
+  against and tests/test_pretty_reports.py asserts. Neither exists yet, so
+  this declaration is the specification for both.
+  ---------------------------------------------------------------------------
+  project_name, build_date_display, title_suffix and active_page belong to
+  _layout.html and are documented there; the last two are set below rather
+  than passed in. This page reads three further inputs, and accepts the
+  failure list in either of two shapes so that the writer's choice of
+  contract cannot silently empty the page:
+
+      features        PRIMARY. The normalised result model's feature list -
+                      the same value app/templates/view/overview.html and
+                      overview_steps.html consume, and the shape
+                      tests/fixtures/sample_results.json carries. The failure
+                      list is derived from it here, by the rule below.
+
+      feature_hrefs   OPTIONAL mapping from a feature to the plain relative
+                      filename of its detail page, looked up by uri, then
+                      path, then id, then name - the first of those keys the
+                      mapping actually holds wins. A feature that also carries
+                      its own href key is honoured when the mapping answers
+                      nothing, so a writer may inject the value either way. A
+                      feature with no destination at all still renders its
+                      name as plain text: feature_link_block degrades to text
+                      rather than to a link that goes nowhere.
+
+      tag_hrefs       OPTIONAL mapping from tag name - the leading @ included
+                      - to the plain relative filename of that tag's detail
+                      page. Handed straight to elements_block, which hands it
+                      to tags_block; a tag with no entry renders as a plain
+                      chip.
+
+      failed_rows     OPTIONAL OVERRIDE, for a writer that would rather select
+                      and order the failures in Python. A sequence in
+                      elements_block's own row shape: either an element
+                      mapping, or a mapping carrying element plus the optional
+                      feature_href and feature_name. When it is present and
+                      non-empty it is used verbatim and features is not read
+                      for the listing. Nothing is re-filtered - a writer that
+                      supplies rows owns their selection - which is what makes
+                      this override useful for a regression fixture.
+
+  Every one of them is reached through the guarded-default form, so an absent
+  input renders the empty page rather than raising under a strict undefined
+  policy. That matters beyond tidiness: the run's exit contract writes all
+  four artifacts even when nothing failed and even when the tag expression
+  selected nothing, so "no failures at all" is a real, common, must-not-fail
+  input - and on this page it is the state a healthy run produces.
+
+  ---------------------------------------------------------------------------
+  WHICH SCENARIOS APPEAR, AND WHY THE RULE IS SHARED
+  ---------------------------------------------------------------------------
+  The rule is app/reporting/rerun_report.py's own, restated here so that the
+  failures page and the rerun manifest cannot disagree about which scenarios
+  failed - two artifacts of one run naming different failures is a defect a
+  reader cannot diagnose. That module's iter_failed_scenarios pairs a
+  Background occurrence with the scenario that follows it, skips a scenario
+  the tag expression did not select, and treats a failure in either as a
+  failure of that scenario. Here:
+
+    - A SCENARIO IS LISTED when it records a failure, or when the Background
+      occurrence immediately preceding it does. contains_failure from
+      _element_tree.html is the test, and it is the same predicate the .in
+      rule uses: any step OR any after-hook entry carrying the failed status.
+      A failed teardown therefore lists the scenario, which is the behaviour
+      the port's corrected after-hook makes reachable at all - the Java Hooks
+      class imported the wrong After annotation, so its teardown never ran.
+    - A SCENARIO THE TAG EXPRESSION DID NOT SELECT IS NEVER LISTED. The Java
+      runner never started such a scenario, so it was absent from the JSON the
+      reference tree was generated from and could not have appeared. The
+      port's model carries it with selected false; a model without the key
+      predates the flag and counts as selected.
+    - A BACKGROUND OCCURRENCE IS NOT A ROW OF ITS OWN unless it is where the
+      failure is. Measured: the reference page holds exactly two elements,
+      both failed scenarios - one Scenario and one Scenario Outline row - and
+      no Background at all, even though the feature declares one and it ran
+      before each of them. Where the failure IS in the Background, that
+      occurrence is rendered immediately before its scenario, in model order,
+      exactly as a feature page renders the pair, so the traceback the reader
+      came for is actually on the page. DERIVED, NOT MEASURED: no Background
+      failed in the reference run, so the reference can neither confirm nor
+      contradict it. The alternative - listing a scenario whose visible steps
+      all passed and whose failure is nowhere on the page - is a broken view,
+      and a failures report that hides a failure has no reason to exist.
+    - IN THAT ONE CASE THE SCENARIO'S BRIEF SHOWS ITS OWN STEPS' STATUS, and
+      that is deliberate rather than an oversight. element_block does offer a
+      status argument, but _element_tree.html's contract is explicit that an
+      element is coloured by its own steps and "is not coloured by its
+      neighbours"; overriding it here would make the same scenario render
+      differently on this page than on its feature page, which is the single
+      thing that vocabulary is shared to prevent. The pairing carries the
+      meaning instead: the Background row directly above holds the failed
+      brief, the expanded container and the traceback, under the same feature
+      link, which is exactly how a feature page presents the pair.
+
+  "FAILED", NOT "NOT PASSED". The lead sentence this page reproduces says
+  "scenarios that failed", and the requirements for this file say failed only.
+  The reference data cannot settle the difference - its run held two failed and
+  two passed scenarios and no pending, undefined, skipped or ambiguous one - so
+  the wording governs. A scenario whose worst step is undefined or pending is
+  therefore absent from this page; it is still counted by the publisher's own
+  undefined and pending thresholds, which read the JSON artifact and not this
+  one, so nothing is lost by the narrow reading.
+
+  ORDER IS THE MODEL'S: features in source order, elements in the order the
+  collector recorded them, which is line order within a feature. Nothing here
+  sorts, so the page is deterministic for identical input, as AAP 0.6 requires
+  of the artifact set. The publisher's ALPHABETICAL sorting option is a display
+  option of the publisher and imposes nothing on this file.
+
+  ---------------------------------------------------------------------------
+  DECISIONS TAKEN HERE, AND WHY
+  ---------------------------------------------------------------------------
+  1. THE REFERENCE'S EXPAND-ALL AND COLLAPSE-ALL CHEVRONS ARE NOT REPRODUCED,
+     and this is the one place their absence could be mistaken for an
+     oversight. The reference emits a pair of font-icon controls after the
+     report container, each carrying an inline click-handler attribute that
+     calls the vendored collapse widget over jQuery. Three independent
+     reasons:
+       - No inline JavaScript belongs on this page. The two chart-bearing
+         overviews inject the reference's own chart initialisation and
+         _layout.html owns the tablesorter initialisation; this page has
+         neither, so it emits no script of any kind.
+       - There is no non-inline mechanism that would drive those containers.
+         report.js's data-report-toggle-all acts on its own
+         [data-report-detail] regions, of which this page emits NONE -
+         _element_tree.html withholds the error message from step_row so that
+         no step detail region is produced on this surface - and putting a
+         report.js state hook on a container the vendored widget owns is
+         forbidden there, because two state machines on one container
+         desynchronise the moment a reader touches either. The vendored data
+         API offers only toggle, which cannot express a separate show and
+         hide.
+       - Emitting the controls without their handler would ship a visible
+         affordance that does nothing, which is worse than their absence.
+     What is actually lost is nothing a reader of THIS page needs: every
+     container here belongs to a failure-bearing element and therefore already
+     ships EXPANDED through the vendored widget's own in class, so there is
+     nothing to expand. Collapse-all was a convenience on a page that is
+     entirely failures.
+
+  2. THE <br/> BEFORE THE FOOTER IS EMITTED. _layout.html deliberately leaves
+     it to the pages that carry it - measured on five of the eight reference
+     pages and absent from three - and this page is one that carries it. It is
+     spacing the artifact has, independent of decision 1 above.
+
+  3. THE EMPTY STATE SAYS SO IN WORDS. elements_block emits its container even
+     with no rows, because a container that disappears makes an empty report
+     look like a broken page; a bare empty container, though, cannot tell a
+     reader whether nothing failed or nothing ran, and the run's exit contract
+     draws exactly that distinction - all four artifacts are written both when
+     every scenario passed and when the tag expression selected none. So a
+     sibling notice reports how many selected scenarios were examined and, when
+     there were any, how long they took. It is anchored to the closing tag of
+     the container so that a page WITH failures is left byte-identical to the
+     reference here, and it is the only content on this page the reference has
+     no counterpart for - the reference run had failures, so it has no empty
+     state at all.
+
+  4. NO FILENAME IS COMPUTED HERE, in either direction. The four overview
+     filenames are the layout's fixed navigation targets; every feature and tag
+     destination is a value looked up in a caller-supplied mapping. Those are
+     numeric hashes - report-feature_<hash>.html and report-tag_<hash>.html, a
+     fixed prefix, an unsigned decimal hash and the extension - whose algorithm
+     belongs to app/reporting/pretty_reports.py, which derives it from
+     cucumber-reporting 5.6.1 and confirms it against a regenerated baseline.
+     Feature-page names necessarily change because the feature URI moves into
+     features/, which is expected. Looking a value up in a mapping is not
+     computing it: it is the same arrangement tags_block already uses.
+
+  5. THE ELEMENT VOCABULARY IS NOT RESTATED. Every part of an element after the
+     feature-link opener - the tags row, the lead duration, the collapse
+     control, the brief and its status, the description, the nested Steps
+     group, the step list, the failure message region and the screenshots -
+     comes from _element_tree.html, which is shared with the feature and tag
+     pages precisely so that a scenario cannot look like one thing there and
+     another here. This page contributes the container, the row selection and
+     the two variations named above, and nothing else.
+
+  ---------------------------------------------------------------------------
+  CONSTRAINTS THIS FILE HOLDS TO
+  ---------------------------------------------------------------------------
+    - NO value is declared pre-escaped or trusted markup anywhere. The engine's
+      automatic escaping carries every interpolated value, and it matters in
+      every direction on this page: scenario names carry quotation marks and
+      apostrophes, step arguments carry quoted Examples data, descriptions
+      carry punctuation and leading indentation, and assertion text carries
+      angle brackets, braces and tracebacks. The reference generator escapes
+      its own output too - &quot;, &lt;, &gt; and a symbol entity all appear in
+      its pages.
+    - NO framework URL building, no application endpoint, no absolute or
+      protocol-relative address and no externally hosted resource. The tree is
+      written to disk and read over the file protocol or from a build
+      workspace, where no route resolves. Every reference the emitted page
+      carries is a tree-relative filename or a self-contained data URI.
+    - NO merge-conflict marker, ever. The reference copy of this very page
+      carries two unresolved marker blocks; they stay in the read-only
+      reference checkout, its STRUCTURE is all that was read from it, and
+      every writer of this port produces clean output.
+    - NO PRESENTATION STATE OF THE PORT'S OWN: none of main.css's three
+      boolean hooks - data-tqa-collapsed, data-tqa-filtered, data-tqa-open -
+      and none of report.js's three runtime state classes. Their absence is
+      the state a page with no scripting must be in, so the emitted page is
+      complete and correct with scripting disabled and on paper. The vendored
+      widget's own in class is a different thing entirely: it is generator
+      vocabulary, _element_tree.html owns the rule that applies it, and it is
+      neither added nor stripped here. Selection attributes are allowed and one
+      is used - data-report-root on the single report container, which is the
+      use _layout.html documents for it, and which scopes the report script to
+      this page's own elements rather than to the whole document.
+    - CLASS VOCABULARY: the bare generator classes the vendored stylesheet
+      declares, and alongside them the port's own tqa- names. main.css is
+      entirely tqa- prefixed with no bare element, class or id selector, so the
+      two sets are declared over disjoint selectors and cannot collide. This
+      page adds exactly one of its own, tqa-empty on the notice, and the
+      element tree adds tqa-scenario, tqa-background, tqa-steps, tqa-step,
+      tqa-tags, tqa-tag, tqa-error, tqa-timestamp, tqa-link and the
+      data-tqa-status hook where each is structurally appropriate. Three were
+      considered and rejected, so their absence is not an oversight: tqa-page
+      and tqa-table-wrap impose their own box on markup the Bootstrap grid
+      already lays out, which is also what carries this page's responsive and
+      print behaviour, and tqa-root declares nothing but CSS custom properties
+      whose every use already repeats a literal fallback, so scoping it here
+      would change nothing rendered.
+    - NO COLOUR, dimension or presentation attribute in the markup, and no
+      embedded stylesheet block. Status colour arrives from the vendored
+      stylesheet's status classes and from main.css's data-tqa-status tokens,
+      and every status is additionally spelt out in words by the badge the
+      element tree renders, so colour is never the sole indicator of meaning.
+    - NO RENAMING. Feature and scenario names render exactly as the model
+      carries them, whether they say Testinium, Odoo or Upgenix. Two pairs of
+      features share a JSON id because they share a title; that collision is
+      source behaviour and is preserved here, which is also why this page keys
+      nothing on an id. The Examples tables carry plaintext credentials for an
+      external test instance: they are pre-existing fixture data and are
+      neither redacted, masked, parameterised nor flagged where they appear in
+      a step argument.
+    - EVERY optional input is reached defensively, so the page renders under a
+      strict undefined policy: no failures at all, an absent description, an
+      untagged feature, a Background with no id, tags or start timestamp, a
+      skipped step with no duration key and a failed scenario with no
+      embeddings all render without raising.
+
+  ACCESSIBILITY - the invisible kind, which changes nothing rendered: a real
+  heading and paragraph in the lead, and the element tree's own real time
+  element, spelt-out statuses, decorative chevron hidden from assistive
+  technology and preformatted error text. The visible defaults the reference
+  fixes - its collapse control's element type and tab order, the absent lang
+  and viewport declarations - are _layout.html's and _element_tree.html's to
+  flag, and both do; nothing is half-fixed here.
+-#}
+{% extends "pretty/_layout.html" %}
+{#- The element vocabulary, and the formatter. Both are imported in the plain
+    namespace form the folder uses throughout: no macro in either reads an
+    ambient template variable, so every value one needs is passed at the call
+    site and the same call renders identically from a page and from a test
+    harness.
+
+    _stats_table.html IS DELIBERATELY NOT IMPORTED. This page carries no
+    statistics table, so importing the helper that renders one is how a chart
+    page's markup would eventually leak onto it. -#}
+{% import 'pretty/_element_tree.html' as tree %}
+{% import 'pretty/_macros.html' as fmt %}
+
+{#- The layout's own context, set here rather than passed, which is the form it
+    documents. The title becomes "Cucumber Reports  - Failures Overview", the
+    double space included; the navigation key marks the Failures item current
+    and leaves the other three plain. -#}
+{% set title_suffix = 'Failures Overview' %}
+{% set active_page = 'failures' %}
+
+{#- head_extra is deliberately NOT overridden. The two chart-bearing overviews
+    inject their chart initialisation through it; this page has no chart, so
+    leaving the block untouched is what keeps every canvas element and every
+    chart constructor call out of the emitted page. -#}
+
+{#- The lead. Heading and paragraph are the generator's own text, reproduced
+    byte for byte, including the indentation the reference carries inside the
+    layout's lead region: four spaces before the heading and six before the
+    paragraph.
+
+    THE HEADING IS THE "OVERVIEW" FORM. Every other overview page says
+    "... Statistics"; this one says "Failures Overview". Measured, and it is
+    not normalised to match its siblings.
+
+    THE PARAGRAPH IS A COMPLETE, UNDAMAGED SENTENCE, which makes this page the
+    exception among the overviews - the steps page's lead is a truncated
+    sentence and is copied in that state. There is nothing to repair here and
+    nothing is added: no failure count, no run summary, no advice. The heading
+    opens on the block tag's own line so the layout's surrounding indentation
+    survives exactly; a newline there would insert a blank line the reference
+    does not have. -#}
+{% block lead %}    <h2>Failures Overview</h2>
+      <p>The following summary displays scenarios that failed.</p>
+{%- endblock %}
+
+{% block content %}
+{#- ---------------------------------------------------------------------
+    Derivation. One pass over the model builds the row list and the two
+    tallies the empty state reports, so the page never walks the features
+    twice and the notice cannot disagree with the listing.
+
+    Every lookup is guarded. The type tests are isinstance-style rather than
+    truth tests, because a truth test is what raises on a strict undefined -
+    which is exactly how an omitted argument arrives - and because a
+    duration of integer zero is falsy and is a real, measured value. The
+    plain default form is used rather than the boolean one wherever absent
+    and falsy mean different things: never on selected, where false is a
+    decision and absence is not.
+    --------------------------------------------------------------------- -#}
+{#- ONE counter for the whole page, threaded into the only call that
+    allocates ids. It reproduces the reference's single monotonic sequence
+    across all three kinds of collapsible container - element-1, steps-2,
+    msg-3, element-4, steps-5, msg-6 - so every data-target resolves to an
+    id that exists and no id occurs twice. -#}
+{%- set ids = namespace(next=0) -%}
+{%- set supplied = failed_rows|default(none) -%}
+{%- set override = supplied if (supplied is not none and supplied is sequence
+                                and supplied is not string and supplied is not mapping
+                                and supplied|length) else none -%}
+{%- set href_source = feature_hrefs|default(none) -%}
+{%- set href_map = href_source if href_source is mapping else {} -%}
+{%- set tag_source = tag_hrefs|default(none) -%}
+{%- set tag_map = tag_source if tag_source is mapping else {} -%}
+{%- set feature_source = features|default(none) -%}
+{%- set feature_items = feature_source if (feature_source is sequence
+                                           and feature_source is not string
+                                           and feature_source is not mapping) else [] -%}
+{%- set rows = [] -%}
+{%- set examined = namespace(scenarios=0, duration_ns=0) -%}
+{%- for feature in feature_items -%}
+    {%- if feature is mapping -%}
+        {%- set elements = feature.get('elements') -%}
+        {%- set element_items = elements if (elements is sequence and elements is not string
+                                             and elements is not mapping) else [] -%}
+        {#- The feature's destination, resolved ONCE per feature and never
+            computed: the first of uri, path, id and name that the caller's
+            mapping actually answers for wins, and a feature carrying its own
+            href key supplies the fallback. A feature with no destination
+            leaves the value empty, and feature_link_block then renders the
+            name as plain text instead of a link that goes nowhere. -#}
+        {%- set link = namespace(href='') -%}
+        {%- for key in [feature.get('uri'), feature.get('path'),
+                        feature.get('id'), feature.get('name')] -%}
+            {%- if not link.href and key is string -%}
+                {%- set offered = href_map.get(key) -%}
+                {%- if offered is string and offered|trim != '' -%}
+                    {%- set link.href = offered|trim -%}
+                {%- endif -%}
+            {%- endif -%}
+        {%- endfor -%}
+        {%- if not link.href -%}
+            {%- set own = feature.get('href') -%}
+            {%- if own is string and own|trim != '' -%}
+                {%- set link.href = own|trim -%}
+            {%- endif -%}
+        {%- endif -%}
+        {%- set feature_label = feature.get('name') if feature.get('name') is string else '' -%}
+        {#- Background pairing, as app/reporting/rerun_report.py performs it:
+            an occurrence belongs to the scenario immediately following it,
+            and where two follow one another the earlier one is dropped
+            rather than carried forward, which is how the collector groups
+            them. Anything not typed background is treated as a scenario, so
+            an unclassifiable element is reported rather than silently lost. -#}
+        {%- set pending = namespace(background=none) -%}
+        {%- for element in element_items -%}
+            {%- if element is mapping -%}
+                {%- set kind = (element.get('type') if element.get('type') is string else '')|trim|lower -%}
+                {%- if kind == 'background' -%}
+                    {%- set pending.background = element -%}
+                {%- else -%}
+                    {%- set background = pending.background -%}
+                    {%- set pending.background = none -%}
+                    {#- A scenario the tag expression excluded never ran, so
+                        it never reached the reference generator either. A
+                        model without the key predates the flag. -#}
+                    {%- if element.get('selected', true) -%}
+                        {%- set examined.scenarios = examined.scenarios + 1 -%}
+                        {%- set examined.duration_ns = examined.duration_ns
+                                + tree.element_duration_ns(element)|int -%}
+                        {%- if background is not none -%}
+                            {%- set examined.duration_ns = examined.duration_ns
+                                    + tree.element_duration_ns(background)|int -%}
+                        {%- endif -%}
+                        {%- set background_failed = background is not none
+                                and tree.contains_failure(background)|trim != '' -%}
+                        {#- The Background row exists only where the failure
+                            is in it, which is why the reference page - whose
+                            Backgrounds all passed - carries none. -#}
+                        {%- if background_failed -%}
+                            {%- set _ = rows.append({'element': background,
+                                                      'feature_href': link.href,
+                                                      'feature_name': feature_label}) -%}
+                        {%- endif -%}
+                        {%- if background_failed or tree.contains_failure(element)|trim != '' -%}
+                            {%- set _ = rows.append({'element': element,
+                                                      'feature_href': link.href,
+                                                      'feature_name': feature_label}) -%}
+                        {%- endif -%}
+                    {%- endif -%}
+                {%- endif -%}
+            {%- endif -%}
+        {%- endfor -%}
+    {%- endif -%}
+{%- endfor -%}
+{#- The override owns its own selection and ordering and is never
+    re-filtered, which is what makes it usable for a regression fixture. -#}
+{%- set listed = override if override is not none else rows -%}
+{#- The single report container of the page - id="report" occurs exactly
+    once, which the reference feature page gets wrong by emitting it twice
+    and leaving the collapse selector's scope ambiguous. data-report-root is
+    a selection attribute, not presentation state: it scopes the report
+    script to this page's own elements, each of which the element tree marks
+    data-report-filterable, instead of letting it fall back to the whole
+    document. -#}
+<div class="container-fluid" id="report" data-report-root>
+  <div class="row">
+    <div class="col-md-10 col-md-offset-1">
+      {#- The elements container and every element inside it, from the
+          vocabulary the feature and tag pages render too. inner_level is
+          false, which is the measured failures form: div.elements with no
+          inner-level, because this page has no div.feature wrapper for it
+          to sit inside. Each row carries its owning feature's name and
+          destination, which is what makes the element tree emit the
+          <b>Feature:</b> opener a feature page never has.
+
+          EVERYTHING ELSE IS THE MACRO'S, and none of it is restated here:
+          the tags row, the lead duration, the start timestamp, the collapse
+          control and its chevron, the brief and its status badge, the
+          description, the nested Steps group, the step list, the failure
+          message region with its preformatted text, the screenshots, and
+          the rule that adds the vendored widget's own in class to every
+          failure-bearing container - which, on a page that lists nothing
+          but failures, is every container it emits. #}
+      {{ tree.elements_block(listed, counter=ids, inner_level=false, tag_hrefs=tag_map) }}
+{%- if not listed %}
+      {#- The empty state, which is what a healthy run produces and is
+          therefore not an error path. The container above still renders, so
+          the page's shape never depends on the data; this says in words what
+          an empty container cannot, and it draws the one distinction the
+          run's exit contract draws - all four artifacts are written both
+          when every scenario passed and when the tag expression selected
+          none. Anchored to the tag so that a page WITH failures is left
+          byte-identical to the reference here. #}
+      <p class="tqa-empty">{% if examined.scenarios %}No scenario failed in this run: {{ examined.scenarios }} selected {{ 'scenario' if examined.scenarios == 1 else 'scenarios' }} {{ 'was' if examined.scenarios == 1 else 'were' }} examined, in {{ fmt.duration_text(examined.duration_ns) }}.{% else %}No scenario was selected for this run, so nothing was executed and there is nothing to report here. Every artifact is still written when a run selects no scenario.{% endif %}</p>
+{%- endif %}
+    </div>
+  </div>
+</div>
+{#- The page-owned line break before the footer. _layout.html leaves it to
+    the pages that carry it - measured on five of the eight reference pages
+    and absent from three - and this page is one that carries it.
+
+    THE REFERENCE'S EXPAND-ALL AND COLLAPSE-ALL CHEVRONS SIT HERE AND ARE
+    DELIBERATELY ABSENT; decision 1 in the notes above records the three
+    reasons and why nothing a reader of this page needs is lost by it. #}
+
+<br/>
+{%- endblock %}
