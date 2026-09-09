@@ -1,0 +1,503 @@
+{#-
+  ---------------------------------------------------------------------------
+  pretty/_stats_table.html - the grouped statistics table of the generated
+  report tree, shared by four of its six pages.
+  ---------------------------------------------------------------------------
+
+  A macro-only template. It renders no page, is never rendered standalone and
+  is never a target of app/reporting/pretty_reports.py, which renders only the
+  six page templates in this folder - overview_features, overview_failures,
+  overview_steps, overview_tags, feature and tag. The underscore prefix is the
+  folder's convention for a helper.
+
+  Consumers import it; they never include it:
+
+      {% import 'pretty/_stats_table.html' as stats %}
+
+  and then call stats.stats_table(...). The plain import form is deliberate.
+  No macro here reads an ambient template variable - every value a macro needs
+  arrives as an argument - and that restraint is what lets the same call
+  render identically from all four consuming pages.
+
+  ---------------------------------------------------------------------------
+  THE FOUR CONSUMERS, AND THE TWO VARIATIONS BETWEEN THEM
+  ---------------------------------------------------------------------------
+      overview_features.html   overview, first column "Feature", sortable,
+                               one row per feature, footer present.
+      overview_tags.html       overview, first column "Tag", sortable, one row
+                               per tag, footer present.
+      feature.html             detail, first column "Feature", NOT sortable,
+                               exactly one row, NO footer.
+      tag.html                 detail, first column "Tag", NOT sortable,
+                               exactly one row, NO footer.
+
+  So the table varies in exactly two ways, and both are parameters:
+
+    1. THE CONTAINER. An overview emits
+
+           <table id="tablesorter" class="stats-table table-hover">
+
+       and a detail page emits
+
+           <table class="stats-table">
+
+       with no id and no table-hover. The id is what the tablesorter
+       initialisation in _layout.html binds to, so it is also what makes a
+       table sortable; a detail page shows a single row, where sorting means
+       nothing, and the reference does not wire it. THE TWO DETAIL PAGES MUST
+       PASS sortable=false. The default is true because three quarters of the
+       markup below is the overview form and the two overviews are the pages
+       that carry the id.
+
+    2. THE FOOTER. Present on the two overviews, absent from the two detail
+       pages. Passing no totals - or none - is what leaves it out, so a caller
+       never has to say twice that a single-row table has no column sums.
+
+  Everything else - the grouped two-row header, the twelve columns and their
+  order, the cell classes - is identical on all four pages and is written once
+  here.
+
+  ---------------------------------------------------------------------------
+  PROVENANCE: MEASURED, THEN CONFIRMED AGAINST THE GENERATOR ITSELF
+  ---------------------------------------------------------------------------
+  This is contract 2 of the port's two HTML artifacts, the tree the Java build
+  produced with me.jvt.cucumber:reporting-plugin 7.2.0 (pom.xml:66-70), which
+  pulls net.masterthought:cucumber-reporting 5.6.1 over Velocity 2.3.
+
+  The structure below was read out of the committed report tree at the pinned
+  reference revision and then checked line by line against that library's own
+  Velocity macros - templates/macros/report/statsTable.vm (the overview form),
+  templates/macros/report/reportTable.vm (the detail form) and
+  templates/macros/report/reportHeader.vm (the shared header) - so no part of
+  it rests on inference. Reading the generator settled two questions the
+  committed pages cannot answer, both recorded in the footer notes below.
+
+  The four overview pages carry unresolved merge markers and splice two
+  different runs, so their STRUCTURE is readable and their ARITHMETIC is not:
+  the same tree pairs data-value="9533750000" with body text 30.202 on one
+  side and 9.533 on the other, and the tags footer reports 0 passed scenarios
+  in its sum row and 100.00% passed in its percentage row. Nothing here is
+  derived from those numbers. Every count and every percentage is computed
+  from the normalised model by the macros in pretty/_macros.html.
+
+  ---------------------------------------------------------------------------
+  THE RENDER CONTEXT - the contract app/reporting/pretty_reports.py renders
+  against, and the contract tests/test_pretty_reports.py asserts. Neither
+  exists yet, so this declaration is the specification for both.
+  ---------------------------------------------------------------------------
+  ONE ROW - a mapping, one per feature on overview_features and per tag on
+  overview_tags, and the single subject row on the two detail pages:
+
+      name               string. The display text: the feature name, or the
+                         tag including its leading @. Escaped on the way out,
+                         never trusted markup.
+      href               string, OPTIONAL. The detail page this row links to,
+                         as a plain relative filename. Supplied on the two
+                         overviews and omitted on the two detail pages, where
+                         the row is the subject of the page the reader is
+                         already on. Absent, none or blank renders the name as
+                         plain text with no anchor at all.
+      steps_passed       integer. )
+      steps_failed       integer. )
+      steps_skipped      integer. ) the six step columns, in this order
+      steps_pending      integer. )
+      steps_undefined    integer. )
+      steps_total        integer. )
+      scenarios_passed   integer. )
+      scenarios_failed   integer. ) the three scenario columns
+      scenarios_total    integer. )
+      duration_ns        integer. RAW NANOSECONDS. Never a formatted string:
+                         the sort attribute carries this number verbatim and
+                         pretty/_macros.html owns the human rendering.
+      status             string. Any of the result model's status names, in
+                         any case; folded by partials/status_badge.html.
+
+  THE TOTALS - a mapping, on the two overviews only:
+
+      the same nine count keys, as run-level sums
+      duration_ns        integer. The run's total duration, raw nanoseconds.
+      features           integer. The number of features in the run. This is
+                         the DENOMINATOR of the last percentage only.
+      features_passed    integer, OPTIONAL. The numerator of that percentage.
+                         Absent answers 0.00% rather than failing.
+
+  Every key of both mappings is reached defensively. An absent count renders
+  0, an absent duration renders an empty cell, an absent href renders plain
+  text, an absent status renders Unknown and absent totals render no footer at
+  all - so the table renders under a strict undefined policy whatever the
+  model omits. A report is what a reader turns to when a run has gone wrong,
+  so malformed input has to render rather than take the page down.
+
+  NO FILENAME IS EVER COMPUTED HERE. Detail-page names are numeric hashes -
+  report-feature_<hash>.html and report-tag_<hash>.html, a fixed prefix, an
+  unsigned decimal hash and .html, with feature pages hashing the feature URI
+  and tag pages the tag name. That algorithm belongs to pretty_reports.py,
+  which derives it from cucumber-reporting 5.6.1 and confirms it against a
+  regenerated baseline; this table emits whatever href it is handed. Because
+  the feature URI moves into features/, the feature-page filenames necessarily
+  change, which is expected and not a defect.
+
+  ---------------------------------------------------------------------------
+  THE TWELVE COLUMNS, AND THE TWO FOOTER CELLS THAT DISAGREE ABOUT THEIR
+  SOURCE
+  ---------------------------------------------------------------------------
+  The grouping row spans them 1 + 6 + 3 + 2:
+
+      1        the row key            Feature or Tag
+      2 - 7    Steps                  passed failed skipped pending undefined
+                                      total
+      8 - 10   Scenarios              passed failed total
+      11 - 12  Features               duration status
+
+  Duration and Status sitting under a "Features" heading is the generator's
+  own grouping, measured on all four pages and reproduced rather than tidied.
+
+  The footer's sum row and percentage row do NOT read the same value in their
+  last cell, which is the one thing the committed pages could never have
+  revealed - the reference run has one feature and one tag, so both readings
+  are the number 1 there. The generator is unambiguous:
+
+      sum row, last cell          $items.size()   the number of rows in THIS
+                                                  table - features on the
+                                                  features page, TAGS on the
+                                                  tags page
+      percentage row, last cell   formatAsPercentage($report_summary.
+                                  getPassedFeatures(), $report_summary.
+                                  getFeatures())  run-level features, on both
+                                                  pages
+
+  stats_table therefore hands stats_footer the row count it just rendered, so
+  the whole-table macro reproduces $items.size() exactly; a caller invoking
+  stats_footer on its own falls back to the totals mapping's features key. The
+  percentage is always features_passed over features and never touches either.
+
+  The footer's nine count cells carry NO class of any kind - not the status
+  classes and not the total class the body row's two Total cells carry. Only
+  the tfoot element itself is classed, which is what tints the whole block.
+  Measured, and confirmed in statsTable.vm.
+
+  THE GENERATOR'S THIRTEENTH COLUMN IS NOT REPRODUCED. statsTable.vm and
+  reportHeader.vm both emit an extra Qualifier column when the report was
+  built for parallel testing. No reference page carries it, the port's
+  normalised model has no qualifier, and the column count is fixed at twelve.
+
+  ---------------------------------------------------------------------------
+  CLASS VOCABULARY - both, and exactly where each one belongs
+  ---------------------------------------------------------------------------
+  The bare generator classes are kept in full, because they are the report
+  contract and two of them are load-bearing rather than decorative:
+
+      stats-table table-hover   the table. app/static/vendor/css/cucumber.css
+                                styles table.stats-table and its cells.
+      header dont-sort          the grouping row. LOAD-BEARING: the
+                                tablesorter initialisation selects headers
+                                with '> thead tr:not(.dont-sort) th', so this
+                                class is the only thing that stops the colspan
+                                grouping row from being treated as three
+                                sortable headers. Never omit it.
+      passed failed skipped     the header cells, the non-zero count cells and
+      pending undefined         the status cell. The five backgrounds
+                                cucumber.css declares.
+      total                     the two Total columns and the tfoot.
+      tagname                   the row key cell, which cucumber.css left-
+                                aligns against the centred default.
+      duration                  the two duration cells. Right-aligned and
+                                non-wrapping there.
+
+  The port's own vocabulary is emitted alongside it, additively, in the three
+  places where it cannot mask a measured value:
+
+      tqa-link                  on the row-key anchor.
+      tqa-duration              on both duration cells, through the
+                                extra_classes parameter the duration macros
+                                expose for exactly this.
+      data-tqa-status           on the body row and on the status cell. Every
+                                rule main.css declares for this attribute sets
+                                custom properties only, so the hook paints
+                                nothing by itself and the generator's own
+                                status background is what remains visible.
+
+  ONE tqa- CLASS IS DELIBERATELY WITHHELD, and it was withheld on a
+  measurement rather than on taste. main.css declares
+  .tqa-table th { background-color: ... } at specificity (0,1,1), while the
+  five status backgrounds it would sit beside are .passed and its siblings at
+  (0,1,0) and the Total header is th.total at (0,1,1) with main.css loaded
+  last - so tqa-table on this table wins every one of those cells. Rendering
+  the features overview twice in a browser, once as written and once with the
+  class added, confirmed it exactly: the twelve header backgrounds collapse
+  from their five distinct status colours plus two greys - rgb(146,221,150),
+  rgb(242,146,140), rgb(136,170,255), rgb(245,242,143), rgb(245,185,117),
+  rgb(211,211,211) - to rgb(243,245,248) across the whole row, and every cell
+  of the last body row loses its border-bottom, 1px becoming 0px. The measured
+  reference is authoritative over a stylesheet default that would hide what it
+  shows, so the class is not applied here. It remains correct on the port's own
+  surfaces, which render statistics without cucumber.css present.
+
+  The two load-bearing claims above were also confirmed at run time rather than
+  assumed. Clicking the Duration header sorts the rows 0.000, 0.067, 1.648,
+  24.654, 1:40.186 - numeric order by the sort attribute, where sorting the
+  displayed text would put 1:40.186 before 24.654 - and clicking each of the
+  three grouping cells changes nothing at all, which is the dont-sort class
+  doing its job. A detail page, carrying no id, gains no sorting behaviour from
+  the initialisation at all.
+
+  ---------------------------------------------------------------------------
+  CONSTRAINTS THIS FILE HOLDS TO
+  ---------------------------------------------------------------------------
+    - NO framework URL building. Every href is a value the caller passes in,
+      already a plain relative filename, because these pages are written to
+      disk and opened over the file protocol or straight from a build
+      workspace where an application route cannot resolve. Nothing here builds
+      an endpoint, and no absolute or protocol-relative URL appears.
+
+    - It declares no value pre-trusted and marks no output as ready-made
+      markup, leaning on the engine's own escaping of HTML templates instead.
+      It matters: feature names in this suite contain quotation marks, and the
+      reference generator escapes them too.
+
+    - It emits none of the three boolean state attributes main.css reads and
+      none of the state classes app/static/js/report.js sets at run time. The
+      stylesheet takes their absence to mean expanded, visible and closed, so
+      server output always describes the fully expanded, fully visible page -
+      which is what keeps the emitted tree legible with scripting off and
+      correct on paper. The status attribute above is a status hook, not a
+      state hook, and no filtering hook is emitted: these rows are not
+      independently hideable.
+
+    - The reference's irregular attribute whitespace - td      class="passed"
+      - is Velocity noise and is not reproduced. Acceptance of both HTML
+      artifacts is structural, never a byte comparison.
+
+    - It introduces no component library. The Bootstrap, jQuery, chart, table-
+      sorting, date and icon-font files inside the emitted tree are the
+      reference generator's own output, not a design system this port adopts.
+
+  ACCESSIBILITY. The invisible part is applied, because it costs nothing
+  visually and cannot conflict with the measured design: scope on every header
+  cell, colgroup scope on the three grouping headers, and a real thead / tbody
+  / tfoot split. Colour is never the only carrier of meaning here - the status
+  cell states its status in words beside the background, and each count sits
+  in a column whose header names it. Two things are deliberately left as
+  measured:
+    - the row key is a td, not a th with a row scope. cucumber.css styles
+      td.tagname specifically, so promoting it would change the rendered
+      alignment of the first column on all four pages.
+    - the table carries no caption and no accessible-name override. The lead
+      heading each page renders directly above it already names it, and a
+      caption would add visible text the contract does not have.
+-#}
+{#- Formatting, borrowed from its single owner. Every cell that carries a
+    count, a duration, a percentage or a status label is built by a macro
+    there, so this file decides WHICH cells exist and in what order, and never
+    how a value is rendered. -#}
+{%- import 'pretty/_macros.html' as fmt -%}
+{#- Status normalisation, imported from its own single owner rather than
+    through the alias above: a name that file imports is not re-exported
+    through its namespace. -#}
+{%- from 'partials/status_badge.html' import status_token -%}
+
+
+{#- ---------------------------------------------------------------------------
+    The grouped two-row header, identical on all four pages but for the first
+    cell of the second row.
+
+    first_column_label   REQUIRED in practice: 'Feature' or 'Tag'. Absent,
+                         none or blank renders an empty header cell rather
+                         than raising, which keeps a page that forgot it
+                         readable instead of unbuilt.
+    --------------------------------------------------------------------------- -#}
+{%- macro stats_header(first_column_label) -%}
+    {%- set key_label = first_column_label|default('', true)|string|trim -%}
+{#- Every macro in this file opens its markup with no leading indentation of
+    its own and closes at the nesting level of its own element, so the caller
+    places it: stats_table indents each call site once and the emitted tree
+    comes out nested and readable rather than flush left. -#}
+<thead>
+    {#- The grouping row. Its class pair is what excludes these three cells
+        from the sortable header set; see the vocabulary note above. #}
+    <tr class="header dont-sort">
+      <th></th>
+      <th colspan="6" scope="colgroup">Steps</th>
+      <th colspan="3" scope="colgroup">Scenarios</th>
+      <th colspan="2" scope="colgroup">Features</th>
+    </tr>
+    {#- The twelve column headers, in the one order the contract fixes. The
+        five status classes here are the same words the body cells carry, so a
+        reader matches a column to a colour without reading the header. #}
+    <tr>
+      <th scope="col">{{ key_label }}</th>
+      <th class="passed" scope="col">Passed</th>
+      <th class="failed" scope="col">Failed</th>
+      <th class="skipped" scope="col">Skipped</th>
+      <th class="pending" scope="col">Pending</th>
+      <th class="undefined" scope="col">Undefined</th>
+      <th class="total" scope="col">Total</th>
+      <th class="passed" scope="col">Passed</th>
+      <th class="failed" scope="col">Failed</th>
+      <th class="total" scope="col">Total</th>
+      <th scope="col">Duration</th>
+      <th scope="col">Status</th>
+    </tr>
+  </thead>
+{%- endmacro -%}
+
+
+{#- ---------------------------------------------------------------------------
+    One body row: twelve cells, in the header's order.
+
+    row   REQUIRED. The mapping described in the render context above. A
+          missing key, a null value and a row that is not a mapping at all all
+          render - as a zero, an empty cell or an unknown status - because one
+          malformed row must not cost the reader the other rows.
+
+    Nine of the twelve cells are built by pretty/_macros.html, which owns the
+    two rules they follow: a count cell carries its status class ONLY when the
+    count is non-zero, so a zero is a bare cell, and a Total cell always
+    carries its class, including for zero. Neither rule is restated here.
+    --------------------------------------------------------------------------- -#}
+{%- macro stats_row(row) -%}
+    {#- The whole row is reached through one guarded name, so every cell below
+        reads the same object and a non-mapping row degrades once rather than
+        twelve times. -#}
+    {%- set data = row|default({}, true) -%}
+    {#- The presentation status, folded exactly once and used twice: as the
+        cell's generator class and as the port's status hook. Deriving it twice
+        is how a cell's colour and its hook come to disagree. -#}
+    {%- set token = status_token(data.status) -%}
+    {%- set label = data.name|default('', true)|string|trim -%}
+    {%- set link = data.href|default('', true)|string|trim -%}
+    {#- A blank name would leave an anchor with no accessible name at all, so
+        the link target's own text stands in - a value the model already
+        carries, never a label invented for a system this port deliberately
+        does not rename. With neither a name nor a target the cell is empty,
+        which is what the generator emits for a nameless subject. -#}
+    {%- set key_text = label if label else link -%}
+<tr data-tqa-status="{{ token }}">
+      <td class="tagname">{% if link %}<a class="tqa-link" href="{{ link }}">{{ key_text }}</a>{% else %}{{ key_text }}{% endif %}</td>
+      {{ fmt.count_cell(data.steps_passed, 'passed') }}
+      {{ fmt.count_cell(data.steps_failed, 'failed') }}
+      {{ fmt.count_cell(data.steps_skipped, 'skipped') }}
+      {{ fmt.count_cell(data.steps_pending, 'pending') }}
+      {{ fmt.count_cell(data.steps_undefined, 'undefined') }}
+      {{ fmt.total_cell(data.steps_total) }}
+      {{ fmt.count_cell(data.scenarios_passed, 'passed') }}
+      {{ fmt.count_cell(data.scenarios_failed, 'failed') }}
+      {{ fmt.total_cell(data.scenarios_total) }}
+      {#- The sortable duration cell. Its sort attribute carries the raw
+          nanosecond count, which is the only reason 1:40.186 sorts above
+          24.654 instead of below it lexically. #}
+      {{ fmt.duration_cell(data.duration_ns, extra_classes='tqa-duration') }}
+      {#- The status: the generator's background through the class, the word
+          itself through the label, and the port's hook alongside both. #}
+      <td class="{{ token }}" data-tqa-status="{{ token }}">{{ fmt.status_label(data.status) }}</td>
+    </tr>
+{%- endmacro -%}
+
+
+{#- ---------------------------------------------------------------------------
+    The footer, on the two overview pages only.
+
+    totals      REQUIRED. The totals mapping described above.
+    row_count   OPTIONAL. The number of rows the table rendered, which is what
+                the sum row's last cell reports. stats_table always supplies
+                it, reproducing the generator's $items.size() exactly - the
+                number of rows in THIS table, so tags on the tags page. A
+                caller invoking this macro on its own may omit it, and the
+                totals mapping's features key is then used instead.
+
+    Two rows, and the shape of the second is measured rather than derived: it
+    leaves the cells under both Total columns and under Duration EMPTY. A
+    percentage of a total against itself is always 100% and says nothing, and
+    a percentage of a duration is meaningless, so the generator prints
+    neither. They are not gaps to fill.
+    --------------------------------------------------------------------------- -#}
+{%- macro stats_footer(totals, row_count=none) -%}
+    {%- set data = totals|default({}, true) -%}
+    {#- The sum row's last cell: the rendered row count where the caller gave
+        one - a genuine zero included, which is why this tests definedness
+        rather than truthiness - and the run's feature count otherwise. -#}
+    {%- set subject_count = row_count if row_count is not none else data.features -%}
+{#- The class on the element, not on its cells: it is what tints the whole
+    block. The nine count cells below are deliberately unclassed. -#}
+<tfoot class="total">
+    <tr>
+      <td></td>
+      {{ fmt.count_cell(data.steps_passed) }}
+      {{ fmt.count_cell(data.steps_failed) }}
+      {{ fmt.count_cell(data.steps_skipped) }}
+      {{ fmt.count_cell(data.steps_pending) }}
+      {{ fmt.count_cell(data.steps_undefined) }}
+      {{ fmt.count_cell(data.steps_total) }}
+      {{ fmt.count_cell(data.scenarios_passed) }}
+      {{ fmt.count_cell(data.scenarios_failed) }}
+      {{ fmt.count_cell(data.scenarios_total) }}
+      {#- The total duration, through the macro variant that has no sort
+          attribute in it at all: a footer row is never sorted, so emitting one
+          here is not a mistake this file can make. #}
+      {{ fmt.duration_total_cell(data.duration_ns, extra_classes='tqa-duration') }}
+      {{ fmt.count_cell(subject_count) }}
+    </tr>
+    <tr>
+      <td></td>
+      <td>{{ fmt.percent_text(data.steps_passed, data.steps_total) }}</td>
+      <td>{{ fmt.percent_text(data.steps_failed, data.steps_total) }}</td>
+      <td>{{ fmt.percent_text(data.steps_skipped, data.steps_total) }}</td>
+      <td>{{ fmt.percent_text(data.steps_pending, data.steps_total) }}</td>
+      <td>{{ fmt.percent_text(data.steps_undefined, data.steps_total) }}</td>
+      <td></td>
+      <td>{{ fmt.percent_text(data.scenarios_passed, data.scenarios_total) }}</td>
+      <td>{{ fmt.percent_text(data.scenarios_failed, data.scenarios_total) }}</td>
+      <td></td>
+      <td></td>
+      {#- Run-level features, both parts - never the row count above. #}
+      <td>{{ fmt.percent_text(data.features_passed, data.features) }}</td>
+    </tr>
+  </tfoot>
+{%- endmacro -%}
+
+
+{#- ---------------------------------------------------------------------------
+    The whole table: the macro all four pages call.
+
+    rows                 REQUIRED. An iterable of row mappings. Empty, none,
+                         absent or a value that is not an iterable of rows -
+                         a bare number, a string, a mapping - all render a
+                         table with a complete header and no body rows, rather
+                         than raising or spelling a string out one character
+                         per row.
+    first_column_label   REQUIRED. 'Feature' or 'Tag'.
+    totals               OPTIONAL, default none. Supplying it renders the
+                         footer; omitting it renders no tfoot at all, which is
+                         the two detail pages. An empty mapping is a supplied
+                         mapping and renders a footer of zeros: presence
+                         decides, not content.
+    sortable             OPTIONAL, default true. True emits the id the
+                         tablesorter initialisation binds to, plus the
+                         hover class. THE TWO DETAIL PAGES MUST PASS false -
+                         their reference tables carry neither, and a single
+                         row has nothing to sort.
+    --------------------------------------------------------------------------- -#}
+{%- macro stats_table(rows, first_column_label, totals=none, sortable=true) -%}
+    {%- set candidate = rows|default(none) -%}
+    {#- A string is iterable one character at a time and a mapping one key at a
+        time; neither is a row sequence, and both are excluded before the copy
+        rather than after it. -#}
+    {%- set items = candidate|list if (candidate is iterable and candidate is not string and candidate is not mapping) else [] -%}
+    {%- set is_sortable = sortable|default(false, true) -%}
+    {#- Presence of the mapping decides the footer, so an empty one still
+        renders a footer and an absent one still renders none. -#}
+    {%- set footer_totals = totals|default(none) -%}
+{#- The three call sites below each supply the indentation of the fragment
+    they place, per the note in stats_header. -#}
+<table{% if is_sortable %} id="tablesorter"{% endif %} class="stats-table{% if is_sortable %} table-hover{% endif %}">
+  {{ stats_header(first_column_label) }}
+  <tbody>
+{%- for item in items %}
+    {{ stats_row(item) }}
+{%- endfor %}
+  </tbody>
+{%- if footer_totals is not none %}
+  {{ stats_footer(footer_totals, items|length) }}
+{%- endif %}
+</table>
+{%- endmacro -%}

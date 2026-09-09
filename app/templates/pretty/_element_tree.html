@@ -1,0 +1,1027 @@
+{#-
+  ===========================================================================
+  pretty/_element_tree.html - the feature / scenario / step markup vocabulary
+  of the generated report tree, in one place.
+  ===========================================================================
+
+  A MACRO-ONLY helper. It renders no page, extends nothing, is never rendered
+  standalone and is never a target of app/reporting/pretty_reports.py, which
+  renders only the six page templates of this folder - overview_features,
+  overview_tags, overview_steps, overview_failures, feature and tag. The
+  underscore prefix is this folder's convention for a helper, the same one
+  _layout.html and _macros.html carry.
+
+  Three of those six pages render an element tree, and they render the same
+  one: feature.html, tag.html and overview_failures.html. Holding that
+  vocabulary here is what stops a scenario looking like one thing on a feature
+  page and another on the failures page.
+
+      {% import 'pretty/_element_tree.html' as tree %}
+
+  The plain import form is deliberate, as in every sibling: no macro here
+  reads an ambient template variable. Every value a macro needs arrives as an
+  argument, which is what lets the same call render identically from three
+  different pages and from a test harness.
+
+  PROVENANCE
+  ----------
+  This is contract 2 of the port's two HTML artifacts - the tree the Java
+  build produced with me.jvt.cucumber:reporting-plugin 7.2.0 (pom.xml:66-70),
+  which pulls net.masterthought:cucumber-reporting 5.6.1 over
+  org.apache.velocity:velocity-engine-core 2.3. Contract 1, the single
+  self-contained page from io.cucumber:html-formatter 17.0.0, is a different
+  generator with its own template set under app/templates/artifact/. The only
+  markup the two contracts share is the three partials in
+  app/templates/partials/.
+
+  EVERY STRUCTURE BELOW WAS MEASURED, not inferred. The four detail pages of
+  the reference tree - report-feature_1735223818.html,
+  report-feature_3146354636.html, report-tag_2208711665.html and
+  report-tag_4059758862.html - carry ZERO merge-conflict markers, so they are
+  clean, directly readable references for this vocabulary and they are what
+  every "measured" note here cites. The four overview pages are spliced from
+  two different runs and are readable for structure only. Acceptance of these
+  artifacts is structural: the plan maps no HTML golden fixture.
+
+  ---------------------------------------------------------------------------
+  THE PUBLIC API
+  ---------------------------------------------------------------------------
+  Three entry points, in the order a page reaches for them:
+
+    feature_block(feature, tag_hrefs={}, counter=none, inner_level=true,
+                  filterable=true, status=none)
+        The whole div.feature wrapper - tags, brief, description and the
+        elements container - as feature.html renders it. No element inside it
+        carries a feature-link block, because the page is already about that
+        one feature.
+
+    elements_block(rows, counter=none, inner_level=false, tag_hrefs={},
+                   filterable=true)
+        The elements container and its elements, as tag.html and
+        overview_failures.html render it: no feature wrapper, and each element
+        free to carry its own feature-link block. A row is EITHER an element
+        mapping on its own OR a mapping carrying 'element' plus the optional
+        'feature_href' and 'feature_name'. Both shapes may be mixed in one
+        call, so feature.elements can be passed straight in.
+
+    element_block(element, counter=none, feature_href=none,
+                  feature_name=none, tag_hrefs={}, filterable=true,
+                  status=none)
+        One scenario or one Background occurrence, with no container around
+        it, for a page that owns its own container markup.
+
+  Supporting macros, exported because the pages and the tests need the same
+  answers this file works from:
+
+    STATUS_PRECEDENCE           the severity order, as data
+    worst_token(tokens, precedence, empty='unknown')
+                                the worst of a collection of status tokens
+    steps_status(steps, empty='passed')
+                                the status of one element's steps
+    element_status(element, empty='passed')
+                                the status of one element
+    feature_status(feature, empty='passed')
+                                the status of a whole feature
+    element_duration_ns(element)  the element duration as a nanosecond integer
+    contains_failure(node)      '1' when a node holds a failure, else ''
+    tags_block(...)             the div.tags.indention row
+    feature_link_block(...)     the tag/failures pages' <b>Feature:</b> row
+    steps_group(...)            the nested Steps collapse group
+    step_block(...)             one div.step, with its failure message
+    message_block(...)          one failure message region
+    next_id(counter, prefix)    allocates one collapse id from the counter
+    collapse_control_class(expanded)         the measured control class string
+    collapse_details_class(expanded, inner_level=false)  its container's
+
+  THE TWO PREDICATES ANSWER TEXT, NOT A BOOLEAN, because a Jinja macro can
+  only answer text: contains_failure yields '1' or '', so a caller writes
+  {% if tree.contains_failure(element)|trim %}. worst_token and the three
+  status macros yield a token string, exactly as the sibling view/overview.html
+  does.
+
+  THE COUNTER CONTRACT - collapse ids are unique per page, and page-wide
+  uniqueness is the caller's job, as it is for step_row. A page allocates one
+  counter and threads it through every call it makes:
+
+      {% set ids = namespace(next=0) %}
+      {{ tree.elements_block(rows, counter=ids) }}
+
+  Omit it and the macro allocates a private counter that starts at 1, which is
+  correct for a page that makes exactly one call and wrong for a page that
+  makes several. The counter is threaded explicitly rather than derived from
+  loop.index, which resets per loop and would collide across the three nesting
+  levels. Nothing here is random, time-based or render-order dependent, so the
+  same input yields byte-identical ids - which is what AAP 0.6 requires when
+  it asks for "the PrettyReports page set identical for identical inputs".
+
+  ---------------------------------------------------------------------------
+  THE MEASURED VOCABULARY, top to bottom
+  ---------------------------------------------------------------------------
+  FEATURE   div.feature > div.tags.indention, div.brief.<status> holding
+            span.keyword.indention and span.name, div.description.indention,
+            div.elements.inner-level. There is NO lead-duration at feature
+            level and no step-name-* class: that class occurs only on steps.
+
+  ELEMENT   div.element > [feature-link row] > div.tags.indention >
+            span.lead-duration.duration > the collapse control wrapping
+            div.brief.<status> (span.keyword.indention, span.name,
+            i.chevron.fa.fa-fw) > div.description.indention > the collapse
+            container. The element keyword is the model's own - Scenario,
+            Scenario Outline or Background - and carries NO trailing space,
+            unlike a step keyword.
+
+  STEPS     div.steps.inner-level > the collapse control wrapping
+            div.brief.<aggregate status> whose keyword is the literal "Steps"
+            and whose span.name is EMPTY > the collapse container holding the
+            steps. Note the class ORDER on that container:
+            "inner-level collapse collapsable-details", where the element's
+            own container has no inner-level.
+
+  STEP      div.step > div.brief.step-name-<Keyword>.<status> holding
+            span.keyword.indention, span.name and span.lead-duration.duration,
+            then - only on a failure - the message region.
+
+  MESSAGE   div.inner-level > div.message.indention > the collapse control
+            holding a bare <a> label > the collapse container holding a <pre>.
+            The anchor has NO href in the reference and none is invented here.
+
+  FIVE MEASURED DETAILS THAT ARE EASY TO GET WRONG, each with its evidence:
+
+    1. div.tags.indention IS EMITTED EVEN WITH NO TAGS, without the
+       <b>Tags:</b> label. Measured on the untagged features and on every
+       Background. Five of the ten features in this suite carry no
+       feature-level tag - Contact, Inventory, Notes, Sales and Session - so
+       the empty form is the common case, not an edge case.
+
+    2. div.description.indention IS EMITTED EVEN WHEN EMPTY, and its text is
+       rendered VERBATIM. The reference result model carries
+       "  Account is: PosManager" with its two leading spaces and uses "" for
+       an absent description rather than omitting the key. The vendored
+       stylesheet sets white-space: pre on that class, so the indentation is
+       load-bearing and is never stripped, trimmed or reflowed here.
+
+    3. THE ELEMENT DURATION IS THE SUM OF ITS STEP DURATIONS. Verified against
+       all eight reference elements - 30.202, 8.933, 3.130, 17.090, 2.344,
+       22.345, 2.459 and 13.683 seconds - and against the feature total of
+       1:40.186. A step with no duration key contributes nothing, exactly as
+       the sum of the four surviving durations of the 8.933 second scenario
+       proves.
+
+    4. THE SKIPPED-STEP ZERO IS FABRICATED BY THE GENERATOR. The reference
+       result set holds two skipped steps with NO duration key at all, and the
+       reference pages render 0.000 for both while rendering 0.001 for the
+       skipped step that does carry one. That is why step_row is called with
+       duration_fallback='0.000' rather than being left to omit the element.
+
+    5. BACKGROUND OCCURRENCES ARE REPEATED, ONE BEFORE EACH SCENARIO, and are
+       rendered where they occur. The reference elements list runs background,
+       scenario, background, scenario, so a feature with four scenarios
+       renders its Background four times. Nothing here deduplicates or hoists
+       them. A Background occurrence carries no id, no tags, no start
+       timestamp and no after-hook list, so every access to those four is
+       defensive - which is also why step_row reads only step.* and renders
+       identically inside one.
+
+  ---------------------------------------------------------------------------
+  THE .in RULE, AND THE COLLAPSE-OWNERSHIP BOUNDARY
+  ---------------------------------------------------------------------------
+  The reference expands a container by adding the vendored widget's own "in"
+  class, and it does so on FAILURE-BEARING CONTAINERS ONLY. Measured:
+  report-feature_1735223818.html, which has failures, carries four expanded
+  containers and six collapsed ones; report-tag_4059758862.html four and two;
+  the failure-free pages carry none at all. So a container is expanded when
+  the element it holds records a failure, and collapsed otherwise. A message
+  container is ALWAYS expanded, in every reference occurrence.
+
+  The control mirrors it: the reference emits class=" collapsable-control" on
+  an expanded control and class=" collapsed  collapsable-control" on a
+  collapsed one, and the vendored stylesheet turns that second class into the
+  right-pointing chevron through .collapsed .chevron:after. Both strings,
+  including their doubled and trailing spaces, are reproduced exactly as
+  measured by collapse_control_class and collapse_details_class; class tokens
+  are whitespace-separated, so the spacing is invisible to a browser and to a
+  token-level assertion, and reproducing it lets a literal comparison against
+  the reference succeed.
+
+  "in" IS NOT ONE OF THE PORT'S STATE HOOKS. It is the vendored widget's own
+  expanded-state class and part of the generator vocabulary this folder
+  reproduces, so the rule that forbids server-rendered presentation state does
+  not reach it.
+
+  WHAT THIS FILE THEREFORE NEVER EMITS: none of the three boolean state hooks
+  app/static/css/main.css reads - data-tqa-collapsed, data-tqa-filtered and
+  data-tqa-open - and none of the three runtime state classes
+  app/static/js/report.js sets - report-is-collapsed, report-is-filtered-out
+  and report-lightbox-is-open. The stylesheet reads the absence of those hooks
+  as expanded, visible and closed, so server output always describes a fully
+  expanded, fully visible page and stays correct with scripting off and on
+  paper. Every sibling template in this port holds to the same rule.
+
+  TWO STATE MECHANISMS, NEVER ON ONE ELEMENT. The element, steps and message
+  containers belong to the vendored collapse widget, driven by its
+  data-toggle and data-target attributes; they carry no report.js state hook,
+  because two state machines on one container desynchronise the moment a
+  reader touches either. step_row's own toggle and detail region live INSIDE a
+  step, which is a leaf here, so it never competes - that nesting is expected
+  and correct. Selection attributes are a different thing and are allowed:
+  data-report-filterable with data-report-status is emitted on each element so
+  a page's status filter can hide it.
+
+  THE FILTER UNIT IS THE ELEMENT, so step_row is called with filterable=false.
+  Hiding an element hides its whole subtree, and step_row documents that a
+  caller whose scenario container is already the filter unit passes false
+  rather than registering every descendant a second time. A reader filtering a
+  report wants the failing SCENARIOS, with all of their steps intact.
+
+  NO INLINE JAVASCRIPT, in any form. Collapsing belongs to the vendored
+  widget, filtering and the screenshot overlay to report.js, and the
+  tablesorter and chart initialisations to _layout.html and the two overview
+  pages. Nothing here reimplements any of them.
+
+  ---------------------------------------------------------------------------
+  DECISIONS TAKEN HERE, AND WHY
+  ---------------------------------------------------------------------------
+  1. THE FAILURE TEXT IS RENDERED EXACTLY ONCE, by message_block. step_row
+     renders an error message of its own inside its detail region, so the step
+     handed to it is a copy with error_message withheld. Both would otherwise
+     print the same traceback twice in every failed step. With the error
+     withheld and inline arguments spliced, step_row emits no detail region at
+     all on this surface, which is precisely the reference's step shape: a
+     brief, and nothing after it.
+
+  2. THE STATUS IS SPELT OUT IN WORDS at feature, element and steps-group
+     level. In the generator vocabulary a brief's status arrives as a
+     background colour and nothing else, and colour is never the sole
+     indicator of meaning. The badge partial is step_row's own documented
+     default for exactly this reason, and using it here keeps one reading of a
+     status everywhere in the tree.
+
+  3. SCENARIO START TIMESTAMPS ARE RENDERED, in the port's own vocabulary.
+     The reference pages carry none - measured, zero occurrences - but AAP
+     0.3.4 requires per-scenario start timestamps on both HTML artifacts, so
+     the value goes through timestamp_text from _macros.html into a real
+     <time> element beside the duration. A Background has no timestamp and
+     renders none.
+
+  4. SCREENSHOTS ARE RENDERED ONCE PER ELEMENT, inside its collapse container
+     after the steps group. Embeddings live on a scenario's after-hook list,
+     never on a step, and the lightbox partial flattens that one level itself,
+     so the hook list is handed straight to it. It is called on every element,
+     because its own emptiness is the test: it renders NOTHING - no wrapper,
+     no placeholder, no broken image - when there is nothing to show, and a
+     failed scenario carrying no screenshot is a wholly normal state. The
+     generator's own div.embedding wrapper is emitted only when the macro
+     actually produced something, so no empty container is ever left behind.
+     The single per-page overlay belongs to _layout.html and is never called
+     from here.
+
+  5. THE ELEMENT AND STEPS BRIEFS TAKE THEIR STATUS FROM THEIR OWN STEPS, by
+     the precedence app/templates/view/overview.html declares - failed,
+     undefined, ambiguous, pending, skipped, untested, passed. That contract
+     is declared in a template this file may not import, so it is restated
+     here and cited rather than re-invented differently. It is followed with
+     ONE measured departure: the sibling answers 'unknown' for an empty
+     collection and the generator answers PASSED, proven by
+     EmployeeFc.feature, whose Background has an empty body - its four
+     occurrences carry zero steps and the reference renders each as
+     div.brief.passed. The three status macros therefore default to 'passed'
+     for the empty case and take the sibling's answer as a parameter, so
+     neither reading is lost. The .in rule additionally counts a failed
+     after-hook, mirroring app/reporting/rerun_report.py's own failure test: a
+     scenario whose teardown failed is one a reader needs opened, even though
+     its steps alone decide the colour of its brief.
+
+  6. NO tqa- CLASS GOES ON A NAME SPAN. main.css declares tqa-feature-name and
+     tqa-scenario-name as flex containers, which is right for the heading
+     element the Flask views use them on and wrong here: on the inline
+     span.name inside a brief it would push the keyword and the name onto
+     separate lines. The port's classes go where they are structurally
+     appropriate - tqa-feature on the feature wrapper, tqa-scenario or
+     tqa-background on the element, tqa-steps on the steps group, tqa-tags and
+     tqa-tag on the tags row, tqa-error on the failure text, tqa-timestamp on
+     the timestamp - so both vocabularies are emitted and neither is broken.
+
+  7. KEYWORD TRIMMING IS BORROWED, NEVER REPEATED. The result model carries a
+     step keyword with the single trailing space the JVM emits, and
+     step_keyword from partials/step_row.html is the one place in the project
+     that removes it. It is used here BOTH for display and to build the
+     generator's step-name-<Keyword> class, so the two can never disagree.
+     Nothing is trimmed inline.
+
+  8. NO FILENAME IS EVER COMPUTED HERE. Every href is a value the caller
+     passed in. Detail-page filenames are numeric hashes -
+     report-feature_<hash>.html and report-tag_<hash>.html, a fixed prefix, an
+     unsigned decimal hash and the extension - whose algorithm belongs to
+     app/reporting/pretty_reports.py, which derives it from cucumber-reporting
+     5.6.1 and confirms it against a regenerated baseline. Feature-page names
+     necessarily change because the feature URI moves into features/, which is
+     expected. A tag with no href renders as a plain chip rather than as a
+     dead link.
+
+  9. THE TAG PAGE SHARES THE FAILURES PAGE'S TWO VARIATIONS. Measured:
+     report-tag_4059758862.html carries div.elements without inner-level and
+     four <b>Feature:</b> link rows, exactly as overview-failures.html does,
+     while a feature page carries div.elements.inner-level and no link rows.
+     Both variations are parameters here, not branches on a page name.
+
+  THE SOURCE'S INCONSISTENCIES ARE RENDERED, NOT TIDIED, per AAP 0.2.2. Two
+  features are titled "Testinium app Inventory feature" and two "Testinium app
+  login feature", so two pairs share a JSON id: the collision is source
+  behaviour and is preserved, which is also why the Flask routes key on a
+  feature's index instead. Contact.feature's header is mis-titled "Inventory
+  feature" and Notes.feature's "login feature". The feature titles say
+  Testinium, the assertions target Odoo and the pipeline's original checkout
+  named Upgenix: there is no renaming here, and report metadata uses whatever
+  the data itself carries. The Examples tables carry plaintext credentials for
+  an external test instance, which are pre-existing fixture data and are
+  neither redacted, parameterised nor flagged.
+
+  ---------------------------------------------------------------------------
+  CONSTRAINTS THIS FILE HOLDS TO
+  ---------------------------------------------------------------------------
+    - NO value is ever declared pre-escaped or trusted markup. Jinja's
+      automatic escaping is relied on throughout, and it matters in every
+      direction here: step names carry quotation marks and apostrophes,
+      descriptions carry punctuation, and assertion text carries angle
+      brackets, braces, tabs and characters outside ASCII. The reference
+      generator escapes its own output too - &quot;, &lt;, &gt; and a symbol
+      entity all appear in its pages.
+    - NO framework URL building, no application endpoint, no absolute or
+      protocol-relative web address, and no reference to a stylesheet, script
+      or image. These pages are written to disk and opened over the file
+      protocol or from a build workspace, where no route resolves. Every
+      reference this vocabulary emits is either a caller-supplied relative
+      filename or a self-contained data URI.
+    - NO merge-conflict marker, ever. The reference's markers stay in the
+      read-only reference checkout; every writer of this port produces clean
+      output.
+    - EVERY optional input is reached defensively, so the file renders under a
+      strict undefined policy: an absent duration, an absent embeddings list,
+      a Background's absent id, tags and start timestamp, an empty
+      description, an untagged feature and an unnamed Examples block all
+      render without raising. Guards are type tests rather than truth tests,
+      because a truth test on a strict undefined is what raises - and because
+      a duration of integer zero is falsy and is a real, measured value.
+    - CLASS VOCABULARY: the bare generator classes the vendored stylesheet
+      declares - feature, tags, indention, brief, name, keyword, description,
+      elements, inner-level, element, lead-duration, duration, steps, step,
+      step-name-<Keyword>, message, embedding, chevron, collapse,
+      collapsable-details, collapsable-control, argument and the lowercase
+      status words - and alongside them the port's own tqa- classes and its
+      data-tqa-status and data-report-* hooks. main.css is entirely tqa-
+      prefixed with no bare element, class or id selector, so the two sets are
+      declared over disjoint selectors. No name is invented in either
+      namespace.
+    - NO COLOUR, dimension or presentation attribute in the markup, and no
+      embedded stylesheet block. Status colour comes from the vendored
+      stylesheet's status classes and from main.css's data-tqa-status tokens,
+      which between them cover all seven statuses.
+
+      WHICH PALETTE WINS WHERE, MEASURED IN A BROWSER, because a reader of
+      the rendered page will notice the difference: the feature, element and
+      steps briefs carry no tqa- class, so the vendored palette governs them
+      and they render its exact colours - a failed brief measured
+      rgb(242, 146, 140) and a passed brief rgb(146, 221, 150). A STEP row
+      also carries partials/step_row.html's own tqa-step, for which both
+      stylesheets declare a background at equal specificity, and main.css is
+      linked last on purpose - so its data-tqa-status palette wins there, a
+      skipped step measuring rgb(253, 239, 224) rather than the vendored
+      blue. That is _layout.html's stated reason for the link order rather
+      than a collision; both palettes satisfy the plan's status-colour
+      requirement, and neither is written into the markup.
+
+  ACCESSIBILITY
+  -------------
+  Invisible accessibility is applied because it costs nothing visually: the
+  decorative chevron is hidden from assistive technology, each collapse
+  control names the region it controls and reports its expanded state - which
+  is the vendored widget's own documented contract and what it maintains at
+  runtime - and every status is spelt out in words rather than carried by
+  colour alone. The error message is a preformatted block, which is what the
+  plan requires for text carrying tracebacks and what preserves its lines with
+  no bypass of escaping.
+
+    BLITZY [A11Y]: the collapse control is a <span> at element level and a
+      <div> at steps level, as measured, and receives neither a role nor a
+      tabindex. Confirmed in a browser: the six collapse controls of a page
+      are mouse-operable and absent from the tab order, and a collapsed
+      container is display:none, so the steps of a passing scenario cannot be
+      reached without a pointer. Neither available correction is free.
+      Adding tabindex alone yields a focusable control that Enter and Space
+      do nothing to, since the vendored widget binds click only; writing that
+      key handling here would put a second state machine on a container the
+      widget owns; and turning the control into an anchor - the vendored
+      widget's own keyboard-capable form - changes the emitted element type
+      and so departs from the artifact this template is accepted against,
+      structure for structure. Implemented as measured and flagged for a
+      designer decision rather than half-fixed. What survives regardless: the
+      failure-bearing containers, which are what a report is opened for, ship
+      expanded and are therefore always reachable, and the report script's own
+      step-detail toggles are real buttons.
+
+    BLITZY [A11Y]: on paper, a collapsed container stays hidden - measured,
+      12 of 18 containers and 46 report-data leaves absent from a print
+      rendering of a feature page. It follows from the two rules above it: the
+      measured .in rule expands failure-bearing containers only, and the
+      vendored widget's collapsed state is display:none. main.css's print
+      block forces open exactly the regions the PORT's own state hooks
+      collapsed, and it cannot reach the vendored class because it declares no
+      bare selector anywhere - by design - while putting one of those hooks on
+      these containers is forbidden here and would not work through a hidden
+      ancestor anyway. The reference artifact prints the same way. Every
+      failure, traceback and screenshot does print, which is the case a
+      failures report exists for. Flagged rather than corrected by a rule this
+      file has no place writing.
+-#}
+
+{#- Imports: the four dependency templates, and nothing else. Each is the
+    single owner of what it answers - formatting, one step, one status, one
+    screenshot - and every name imported below is used in this file. -#}
+{%- from 'pretty/_macros.html' import duration_span, timestamp_text -%}
+{%- from 'partials/step_row.html' import step_row, step_keyword -%}
+{%- from 'partials/status_badge.html' import status_badge, status_token -%}
+{%- from 'partials/lightbox.html' import screenshots -%}
+
+
+{#- ===================================================================
+    AGGREGATION
+    ===================================================================
+
+    Severity order, highest first, restated from the contract
+    app/templates/view/overview.html declares: the first member of this
+    sequence that occurs among a set of step statuses is the status of the
+    scenario or feature those steps belong to. It is declared once here and
+    reaches worst_token as that macro's default argument, so the order cannot
+    be restated - and therefore cannot be restated differently - anywhere
+    else in this file. -#}
+{% set STATUS_PRECEDENCE = ('failed', 'undefined', 'ambiguous', 'pending', 'skipped', 'untested', 'passed') %}
+
+
+{#- The worst status in a collection of already-normalised tokens.
+
+    THE EMPTY ANSWER IS A PARAMETER, because the two consumers of this fold
+    disagree about it and both are right. The sibling's default is kept here:
+    'unknown' for an empty collection, for a missing one and for a collection
+    holding nothing the precedence names, on the grounds that a status the
+    model never produced must not be reported as a pass. The three macros
+    below override it with the answer the generator was MEASURED to give, for
+    the reason recorded there. -#}
+{%- macro worst_token(tokens, precedence=STATUS_PRECEDENCE, empty='unknown') -%}
+    {%- set found = namespace(token='') -%}
+    {%- set candidates = tokens|default([], true) -%}
+    {%- for candidate in precedence -%}
+        {%- if not found.token and candidate in candidates -%}
+            {%- set found.token = candidate -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {{- found.token if found.token else ((empty|string|trim) if (empty is string and empty|trim) else 'unknown') -}}
+{%- endmacro -%}
+
+
+{#- The status of one list of steps. Each step's status is normalised through
+    status_token, the project's single normalisation point, before the
+    precedence above is applied. A list that is not a real sequence - none, a
+    string, a mapping, an omitted argument - contributes nothing and raises
+    nothing.
+
+    A STEP-LESS ELEMENT IS PASSED, and that is measured rather than chosen.
+    EmployeeFc.feature declares a Background with an empty body, so its four
+    Background occurrences carry zero steps, and the reference generator
+    renders each of them - and their Steps group - as div.brief.passed with a
+    0.000 duration. Answering anything else here would disagree with the
+    artifact this template reproduces. The parameter exists so a caller with a
+    different question - a run-level tally, say - can ask for the honest
+    'unknown' instead. -#}
+{%- macro steps_status(steps, empty='passed') -%}
+    {%- set items = steps if (steps is sequence and steps is not string and steps is not mapping) else [] -%}
+    {%- set tokens = [] -%}
+    {%- for step in items -%}
+        {%- if step is mapping -%}
+            {%- set result = step.get('result') if step.get('result') is mapping else {} -%}
+            {%- set _ = tokens.append(status_token(result.get('status'))|string|trim) -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {{- worst_token(tokens, empty=empty) -}}
+{%- endmacro -%}
+
+
+{#- The status of one element, decided by its OWN steps alone - a scenario is
+    not coloured by its neighbours, and a Background occurrence is not coloured
+    by the scenario that follows it. -#}
+{%- macro element_status(element, empty='passed') -%}
+    {{- steps_status(element.get('steps') if element is mapping else none, empty=empty) -}}
+{%- endmacro -%}
+
+
+{#- The status of a whole feature: the worst across the steps of ALL its
+    elements, Background occurrences included, which is what the reference
+    feature brief shows. -#}
+{%- macro feature_status(feature, empty='passed') -%}
+    {%- set elements = feature.get('elements') if feature is mapping else none -%}
+    {%- set items = elements if (elements is sequence and elements is not string and elements is not mapping) else [] -%}
+    {%- set tokens = [] -%}
+    {%- for element in items -%}
+        {%- if element is mapping -%}
+            {%- set steps = element.get('steps') -%}
+            {%- for step in (steps if (steps is sequence and steps is not string and steps is not mapping) else []) -%}
+                {%- if step is mapping -%}
+                    {%- set result = step.get('result') if step.get('result') is mapping else {} -%}
+                    {%- set _ = tokens.append(status_token(result.get('status'))|string|trim) -%}
+                {%- endif -%}
+            {%- endfor -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {{- worst_token(tokens, empty=empty) -}}
+{%- endmacro -%}
+
+
+{#- The element duration as a nanosecond integer: the sum of its step
+    durations, which is measured to be exactly what the reference emits. A
+    duration that is absent, a boolean, a float or negative counts as no
+    sample rather than as zero, so one malformed step cannot poison the sum;
+    an element with no samples at all answers 0, which the generator's own
+    arithmetic also produces and which renders as 0.000. -#}
+{%- macro element_duration_ns(element) -%}
+    {%- set steps = element.get('steps') if element is mapping else none -%}
+    {%- set items = steps if (steps is sequence and steps is not string and steps is not mapping) else [] -%}
+    {%- set total = namespace(ns=0) -%}
+    {%- for step in items -%}
+        {%- if step is mapping -%}
+            {%- set result = step.get('result') if step.get('result') is mapping else {} -%}
+            {%- set duration = result.get('duration') -%}
+            {%- if duration is integer and duration is not boolean and duration >= 0 -%}
+                {%- set total.ns = total.ns + duration -%}
+            {%- endif -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {{- total.ns -}}
+{%- endmacro -%}
+
+
+{#- Whether a node records a failure, which is what decides the .in rule.
+    Steps AND after-hook entries take part, mirroring the failure test
+    app/reporting/rerun_report.py applies for the same reason: a scenario
+    whose teardown failed is one a reader needs opened. A Background carries
+    no after list, so its second group is simply empty. Answers '1' or the
+    empty string, since a macro can only answer text. -#}
+{%- macro contains_failure(node) -%}
+    {%- set found = namespace(hit=false) -%}
+    {%- if node is mapping -%}
+        {%- for group in ('steps', 'after') -%}
+            {%- set items = node.get(group) -%}
+            {%- for item in (items if (items is sequence and items is not string and items is not mapping) else []) -%}
+                {%- if item is mapping -%}
+                    {%- set result = item.get('result') if item.get('result') is mapping else {} -%}
+                    {%- if (status_token(result.get('status'))|string|trim) == 'failed' -%}
+                        {%- set found.hit = true -%}
+                    {%- endif -%}
+                {%- endif -%}
+            {%- endfor -%}
+        {%- endfor -%}
+    {%- endif -%}
+    {{- '1' if found.hit else '' -}}
+{%- endmacro -%}
+
+
+{#- ===================================================================
+    COLLAPSE STATE AND COLLAPSE IDS
+    =================================================================== -#}
+
+{#- The control's class string, measured on both states, doubled and trailing
+    spaces included. The collapsed form is what drives the vendored
+    stylesheet's .collapsed .chevron:after rule and therefore the direction
+    the chevron points. -#}
+{%- macro collapse_control_class(expanded) -%}
+    {{- ' collapsable-control' if expanded else ' collapsed  collapsable-control' -}}
+{%- endmacro -%}
+
+
+{#- The container's class string. inner_level is first in the token order on a
+    steps container and absent on an element container, and the expanded form
+    appends the vendored widget's own "in" - both measured. -#}
+{%- macro collapse_details_class(expanded, inner_level=false) -%}
+    {{- ('inner-level ' if inner_level else '') ~ 'collapse collapsable-details ' ~ (' in ' if expanded else '') -}}
+{%- endmacro -%}
+
+
+{#- One id from the page counter. The reference uses a single monotonic
+    counter shared by all three kinds of collapsible container - element-1,
+    steps-2, element-3, steps-4, msg-5, element-6 - so an individual step
+    consumes nothing and the numbering follows document order exactly. A
+    counter that is absent or carries no next attribute is replaced by a
+    private one, which keeps a careless call rendering rather than raising;
+    page-wide uniqueness then depends on the caller threading one counter, as
+    the counter contract above sets out. -#}
+{%- macro next_id(counter, prefix) -%}
+    {%- set ids = counter if (counter is not none and counter.next is defined) else namespace(next=0) -%}
+    {%- set ids.next = ids.next + 1 -%}
+    {{- (prefix if prefix is string and prefix|trim else 'collapse') ~ '-' ~ ids.next -}}
+{%- endmacro -%}
+
+
+{#- ===================================================================
+    THE TAGS ROW AND THE FEATURE-LINK ROW
+    =================================================================== -#}
+
+{#- The tags row, at feature level and at element level alike.
+
+    THE DIV IS ALWAYS EMITTED, empty and without the label when there are no
+    tags - measured on every untagged feature and on every Background
+    occurrence, and the common case in this suite. A tag whose name is
+    missing or blank is skipped individually rather than abandoning the rest,
+    and both model shapes are accepted: a feature tag is a mapping carrying
+    name, type and location, an element tag a mapping carrying name alone,
+    and a bare string is accepted too so a hand-built fixture renders.
+
+    The leading @ is part of the tag name in the model and is kept. Each name
+    is looked up in tag_hrefs, a mapping from tag name to the page filename
+    its caller computed; a tag with no entry renders as a plain chip rather
+    than as a dead link, because no filename is ever computed here. -#}
+{%- macro tags_block(tags, tag_hrefs={}, extra_classes='') -%}
+    {%- set items = tags if (tags is sequence and tags is not string and tags is not mapping) else [] -%}
+    {%- set hrefs = tag_hrefs if tag_hrefs is mapping else {} -%}
+    {%- set names = [] -%}
+    {%- for item in items -%}
+        {%- set name = item.get('name') if item is mapping else item -%}
+        {%- if name is string and name|trim != '' -%}
+            {%- set _ = names.append(name|trim) -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {%- set extra = (extra_classes|default('', true)|string).split()|join(' ') -%}
+<div class="tags indention tqa-tags{% if extra %} {{ extra }}{% endif %}">
+{%- if names %}
+    <b>Tags:</b>
+{%- for name in names %}
+{%- set href = hrefs.get(name) %}
+{%- if href is string and href|trim != '' %}
+    <a href="{{ href|trim }}" class="tqa-tag tqa-link">{{ name }}</a>
+{%- else %}
+    <span class="tqa-tag">{{ name }}</span>
+{%- endif %}
+{%- endfor %}
+{%- endif %}
+</div>
+{%- endmacro -%}
+
+
+{#- The feature-link row the tag page and the failures page open each element
+    with, and which a feature page never has. Measured identically on
+    report-tag_4059758862.html and overview-failures.html.
+
+    Emitted only when the caller supplied something to put in it, so a
+    feature page passes nothing and gets nothing. With a destination but no
+    name the destination stands in as the link text, because a link with no
+    text has no accessible name at all; with a name but no destination the
+    name renders as plain text rather than as a link that goes nowhere. -#}
+{%- macro feature_link_block(feature_href=none, feature_name=none) -%}
+    {%- set href = (feature_href if feature_href is string else '')|trim -%}
+    {%- set label = (feature_name if feature_name is string else '')|trim -%}
+    {%- if href or label %}
+  <div class="indention">
+    <b>Feature:</b>
+{%- if href %}
+    <a href="{{ href }}" class="tqa-link">{{ label if label else href }}</a>
+{%- else %}
+    {{ label }}
+{%- endif %}
+  </div>
+    {%- endif -%}
+{%- endmacro -%}
+
+
+{#- ===================================================================
+    THE FAILURE MESSAGE REGION
+    ===================================================================
+
+    One failed step's message, inside the step it belongs to.
+
+    THE LABEL IS THE FIRST NON-BLANK LINE of the message. The reference label
+    is the Java exception class and its colon - "java.lang.AssertionError:" -
+    taken from the head of the text. This port's error_message is the
+    assertion's own message text, preserved verbatim from the Java assertion
+    strings, followed by the Python traceback with line endings normalised, so
+    the head of the text is the assertion message and the first line is the
+    closest equivalent of what the reference put there. The traceback lines
+    that follow stay in the region below, which is what the reader expands.
+
+    THE TEXT IS PREFORMATTED AND ESCAPED. Jinja's automatic escaping handles
+    the angle brackets, quotation marks, braces, tabs and non-ASCII characters
+    that assertion text and Selenium messages carry; nothing is marked
+    trusted. The reference generator escapes its own failure text the same
+    way. The preformatted block, the vendored stylesheet's own rule for it and
+    main.css's tqa-error together give the monospace, wrapping rendering the
+    plan requires for text carrying tracebacks.
+
+    Exactly one trailing newline is emitted, matching the reference, whether
+    or not the model's text already ends in one.
+
+    A message region is ALWAYS expanded, in every reference occurrence, so it
+    takes the expanded class string unconditionally.
+
+    THE LABEL ANCHOR CARRIES main.css's METADATA-VALUE CLASS, and it earns its
+    place by measurement rather than by taste: a Selenium message is one
+    115-character near-unbreakable token, and at a 480px viewport it was
+    measured extending 13.8px past the viewport with 53px of horizontal
+    overflow inside its own container, which the vendored stylesheet's
+    overflow rule turns into a clipped line the reader has to scroll. That
+    class is the project's existing answer to exactly this problem -
+    partials/step_row.html applies it to a step location for the same reason
+    and records the same 480px measurement - and it wraps the token instead.
+    The anchor still carries no href, so it is text, not a link. -#}
+{%- macro message_block(error_message, msg_id) -%}
+    {%- set error_text = error_message if error_message is string else '' -%}
+    {%- if error_text|trim != '' -%}
+        {%- set label_lines = error_text.split('\n')|map('trim')|select|list -%}
+        {%- set label = label_lines[0] if label_lines else '' -%}
+        {%- set target = (msg_id if msg_id is string else '')|trim -%}
+  <div class="inner-level">
+    <div class="message indention">
+      <div data-toggle="collapse" class="{{ collapse_control_class(true) }}" data-target="#{{ target }}" aria-controls="{{ target }}" aria-expanded="true">
+          <a class="tqa-meta-value">{{ label }}</a>
+      </div>
+      <div id="{{ target }}" class="{{ collapse_details_class(true) }}">
+        <pre class="tqa-error">{{ error_text }}{{ '\n' if not error_text.endswith('\n') else '' }}</pre>
+      </div>
+    </div>
+  </div>
+    {%- endif -%}
+{%- endmacro -%}
+
+
+{#- ===================================================================
+    ONE STEP
+    ===================================================================
+
+    div.step wrapping the row partial, plus the failure message region when
+    the step failed.
+
+    THE ROW ITSELF IS NEVER HAND-ROLLED. step_row owns one step across all
+    three surfaces of this port, and it is called here with:
+
+      inline_args=true       so each quoted parameter is spliced into the step
+                             name inside span.argument, which is the reference
+                             generator's own rendering.
+      filterable=false       because the element is this surface's filter unit
+                             and hiding it hides its whole subtree.
+      duration_fallback      '0.000', the zero the generator fabricates for a
+                             step whose result carries no duration key.
+      extra_classes          a per-slot map carrying the bare generator
+                             classes, so the emitted row carries both
+                             vocabularies: brief and step-name-<Keyword> and
+                             the status word on the container, keyword and
+                             indention on the keyword, name on the name,
+                             lead-duration and duration on the duration, and
+                             the generator's argument class on each spliced
+                             parameter and on the fallback argument list.
+
+    THE KEYWORD IS NOT TRIMMED HERE. step_keyword is the project's single
+    trimming point and its answer is used both for display, by step_row
+    itself, and to build the step-name-<Keyword> class - so the class and the
+    text can never disagree. A step with no keyword takes no such class rather
+    than a class with an empty tail.
+
+    THE ERROR IS WITHHELD FROM step_row and rendered by message_block, which
+    is the reference's own structure and the only way the traceback appears
+    once rather than twice. The copy handed over keeps every other field
+    intact, and with no error and inline arguments step_row emits no detail
+    region at all - a brief and nothing after it, exactly as measured. -#}
+{%- macro step_block(step, uid=none, counter=none) -%}
+{%- if step is mapping -%}
+    {%- set ids = counter if (counter is not none and counter.next is defined) else namespace(next=0) -%}
+    {%- set result = step.get('result') if step.get('result') is mapping else {} -%}
+    {%- set token = status_token(result.get('status'))|string|trim -%}
+    {%- set keyword_text = step_keyword(step)|string|trim -%}
+    {%- set error_message = result.get('error_message') -%}
+    {%- set error_text = error_message if error_message is string else '' -%}
+    {%- set show_error = error_text|trim != '' -%}
+    {%- set row_step = dict(step, result=dict(result, error_message=none)) if show_error else step -%}
+    {%- set step_classes = 'brief ' ~ (('step-name-' ~ keyword_text ~ ' ') if keyword_text else '') ~ token -%}
+      <div class="step">
+        {{- step_row(row_step,
+                     uid=uid,
+                     extra_classes={
+                        'step': step_classes,
+                        'keyword': 'keyword indention',
+                        'name': 'name',
+                        'duration': 'lead-duration duration',
+                        'args': 'argument',
+                        'arg': 'argument'
+                     },
+                     filterable=false,
+                     duration_fallback='0.000',
+                     inline_args=true) }}
+        {%- if show_error %}
+        {{ message_block(error_text, next_id(ids, 'msg')|string|trim) }}
+        {%- endif %}
+      </div>
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#- ===================================================================
+    THE NESTED STEPS COLLAPSE GROUP
+    ===================================================================
+
+    A level the reference emits on every element: a collapse group whose
+    keyword is the literal "Steps", whose name is EMPTY and whose brief
+    carries the aggregate status of the steps below it. Note the class order
+    on its container - inner-level first, where an element's own container
+    has no inner-level at all.
+
+    status overrides the aggregate, which is how an element hands its own
+    already-computed status down so the two briefs cannot disagree.
+    uid_prefix is what makes each step's own detail id unique across the page;
+    an element passes its collapse id, so a step's uid reads element-3-4. -#}
+{%- macro steps_group(steps, counter=none, status=none, uid_prefix=none) -%}
+    {%- set ids = counter if (counter is not none and counter.next is defined) else namespace(next=0) -%}
+    {%- set items = steps if (steps is sequence and steps is not string and steps is not mapping) else [] -%}
+    {%- set token = (status if (status is string and status|trim) else steps_status(items))|string|trim -%}
+    {%- set expanded = contains_failure({'steps': items})|trim != '' -%}
+    {%- set steps_id = next_id(ids, 'steps')|string|trim -%}
+    <div class="steps inner-level tqa-steps" data-tqa-status="{{ token }}">
+      <div data-toggle="collapse" class="{{ collapse_control_class(expanded) }}" data-target="#{{ steps_id }}" aria-controls="{{ steps_id }}" aria-expanded="{{ 'true' if expanded else 'false' }}">
+        <div class="brief {{ token }}">
+          <span class="keyword indention">Steps</span>
+          <span class="name"></span>
+          {{ status_badge(token) }}
+          <i class="chevron fa fa-fw" aria-hidden="true"></i>
+        </div>
+      </div>
+      <div id="{{ steps_id }}" class="{{ collapse_details_class(expanded, inner_level=true) }}">
+{%- for step in items %}
+{{ step_block(step, uid=((uid_prefix ~ '-' ~ loop.index) if uid_prefix else none), counter=ids) }}
+{%- endfor %}
+      </div>
+    </div>
+{%- endmacro -%}
+
+
+{#- ===================================================================
+    ONE ELEMENT - A SCENARIO OR ONE BACKGROUND OCCURRENCE
+    ===================================================================
+
+    The order of the parts is measured and is not negotiable: the optional
+    feature-link row, the tags row, the duration, the collapse control
+    wrapping the brief, the description, then the collapse container holding
+    the steps group.
+
+    A BACKGROUND OCCURRENCE IS AN ORDINARY ELEMENT HERE. It arrives once
+    before each scenario and is rendered where it arrives; nothing
+    deduplicates or hoists it. It carries no id, no tags, no start timestamp
+    and no after-hook list, and every one of those four is reached through a
+    guard, so rendering one raises nothing.
+
+    THE KEYWORD IS THE MODEL'S OWN, verbatim: Background, Scenario, or
+    Scenario Outline for an Examples row - measured, one "Scenario Outline"
+    among the reference's eight elements. It carries no trailing space, unlike
+    a step keyword, so nothing is trimmed. With no keyword at all the element
+    type supplies the obvious word rather than leaving the brief unlabelled.
+
+    THE DURATION IS THE SUM OF THE STEP DURATIONS, rendered through
+    duration_span, which is the form that carries NO sort attribute -
+    measured absent on all 27 inline duration spans of the reference feature
+    page. Using that macro rather than writing the span here is what makes
+    the attribute impossible to emit by accident.
+
+    THE START TIMESTAMP IS THIS PORT'S ONE ADDITION to the element markup, for
+    the reason recorded above. It renders in a real time element, machine
+    readable and human readable from the same string the model carries, and a
+    Background - which has none - renders nothing.
+
+    THE CONTROL IS A span AT THIS LEVEL and a div at steps level. That is the
+    reference generator's own inconsistency, measured on every element of
+    every detail page, and it is reproduced rather than tidied.
+
+    SCREENSHOTS ARE RENDERED LAST, inside the collapse container, from the
+    element's after-hook list. The lightbox partial flattens that one level
+    itself and answers nothing at all when there is nothing to show, so it is
+    called on every element and its own emptiness decides whether the
+    generator's div.embedding wrapper is emitted - which is how no empty
+    container is ever left behind. -#}
+{%- macro element_block(element, counter=none, feature_href=none, feature_name=none, tag_hrefs={}, filterable=true, status=none) -%}
+{%- if element is mapping -%}
+    {%- set ids = counter if (counter is not none and counter.next is defined) else namespace(next=0) -%}
+    {%- set steps = element.get('steps') -%}
+    {%- set step_items = steps if (steps is sequence and steps is not string and steps is not mapping) else [] -%}
+    {%- set token = (status if (status is string and status|trim) else steps_status(step_items))|string|trim -%}
+    {#- The expanded state counts a failed after-hook as well as a failed
+        step, for the reason recorded in the decisions above. -#}
+    {%- set expanded = contains_failure(element)|trim != '' -%}
+    {%- set kind = (element.get('type') if element.get('type') is string else '')|trim|lower -%}
+    {%- set keyword_text = (element.get('keyword') if element.get('keyword') is string else '')|trim -%}
+    {%- set keyword_label = keyword_text if keyword_text else ('Background' if kind == 'background' else ('Scenario' if kind == 'scenario' else '')) -%}
+    {%- set name_text = element.get('name') if element.get('name') is string else '' -%}
+    {#- Rendered exactly as carried, indentation included: the vendored
+        stylesheet sets white-space: pre on this class. -#}
+    {%- set description_text = element.get('description') if element.get('description') is string else '' -%}
+    {%- set started = timestamp_text(element.get('start_timestamp'))|string|trim -%}
+    {%- set element_id = next_id(ids, 'element')|string|trim -%}
+    {%- set shots = screenshots(element.get('after')) -%}
+<div class="element {{ 'tqa-background' if kind == 'background' else 'tqa-scenario' }}" data-tqa-status="{{ token }}"{% if filterable %} data-report-filterable data-report-status="{{ token }}"{% endif %}>
+{{- feature_link_block(feature_href, feature_name) }}
+{{ tags_block(element.get('tags'), tag_hrefs=tag_hrefs) }}
+  {{ duration_span(element_duration_ns(element)|int) }}
+{%- if started %}
+  <time class="tqa-timestamp" datetime="{{ started }}">{{ started }}</time>
+{%- endif %}
+  <span data-toggle="collapse" class="{{ collapse_control_class(expanded) }}" data-target="#{{ element_id }}" aria-controls="{{ element_id }}" aria-expanded="{{ 'true' if expanded else 'false' }}">
+    <div class="brief {{ token }}">
+      <span class="keyword indention">{{ keyword_label }}</span>
+      <span class="name">{{ name_text }}</span>
+      {{ status_badge(token) }}
+      <i class="chevron fa fa-fw" aria-hidden="true"></i>
+    </div>
+  </span>
+  <div class="description indention">{{ description_text }}</div>
+  <div id="{{ element_id }}" class="{{ collapse_details_class(expanded) }}">
+{{ steps_group(step_items, counter=ids, status=token, uid_prefix=element_id) }}
+{%- if shots|trim %}
+    <div class="inner-level">
+      <div class="embedding indention">{{ shots }}</div>
+    </div>
+{%- endif %}
+  </div>
+</div>
+{%- endif -%}
+{%- endmacro -%}
+
+
+{#- ===================================================================
+    THE ELEMENTS CONTAINER
+    ===================================================================
+
+    The container and its elements. inner_level selects between the two
+    measured forms: div.elements.inner-level inside a feature wrapper, and
+    div.elements on the tag page and the failures page, which have no feature
+    wrapper to sit inside.
+
+    A ROW IS EITHER AN ELEMENT OR AN ELEMENT WITH ITS FEATURE LINK. A mapping
+    carrying an 'element' mapping is read as the second form, and its optional
+    'feature_href' and 'feature_name' reach the element's feature-link row;
+    anything else is read as the element itself. Both shapes may be mixed in
+    one call, which is what lets feature.elements be passed straight in while
+    the tag page passes rows it built from several features.
+
+    The container is emitted even for no elements, because a container that
+    disappears makes an empty report look like a broken page. -#}
+{%- macro elements_block(rows, counter=none, inner_level=false, tag_hrefs={}, filterable=true) -%}
+    {%- set ids = counter if (counter is not none and counter.next is defined) else namespace(next=0) -%}
+    {%- set items = rows if (rows is sequence and rows is not string and rows is not mapping) else [] -%}
+<div class="elements{% if inner_level %} inner-level{% endif %}">
+{%- for row in items %}
+{%- set wrapped = row.get('element') if (row is mapping and row.get('element') is mapping) else none %}
+{%- set element = wrapped if wrapped is not none else row %}
+{%- set href = row.get('feature_href') if row is mapping else none %}
+{%- set label = row.get('feature_name') if row is mapping else none %}
+{{ element_block(element,
+                 counter=ids,
+                 feature_href=href,
+                 feature_name=label,
+                 tag_hrefs=tag_hrefs,
+                 filterable=filterable) }}
+{%- endfor %}
+</div>
+{%- endmacro -%}
+
+
+{#- ===================================================================
+    THE FEATURE WRAPPER
+    ===================================================================
+
+    The whole div.feature, as a feature page renders it: tags, brief,
+    description, elements. There is no duration and no collapse control at
+    this level - measured - so the feature brief carries no chevron and its
+    status arrives from the worst status across all of its elements'
+    steps, Background occurrences included.
+
+    THE DESCRIPTION IS EMITTED EVEN WHEN EMPTY and its leading indentation
+    survives verbatim: the reference model carries "  Account is: PosManager"
+    with two leading spaces and uses "" rather than omitting the key.
+
+    Two features of this suite share a title with two others, so two pairs
+    share an id. That collision is source behaviour and is rendered as it
+    stands; nothing here disambiguates a title, corrects a mis-titled header
+    or renames a product. -#}
+{%- macro feature_block(feature, tag_hrefs={}, counter=none, inner_level=true, filterable=true, status=none) -%}
+{%- if feature is mapping -%}
+    {%- set ids = counter if (counter is not none and counter.next is defined) else namespace(next=0) -%}
+    {%- set token = (status if (status is string and status|trim) else feature_status(feature))|string|trim -%}
+    {%- set keyword_text = (feature.get('keyword') if feature.get('keyword') is string else '')|trim -%}
+    {%- set name_text = feature.get('name') if feature.get('name') is string else '' -%}
+    {%- set description_text = feature.get('description') if feature.get('description') is string else '' -%}
+<div class="feature tqa-feature" data-tqa-status="{{ token }}">
+{{ tags_block(feature.get('tags'), tag_hrefs=tag_hrefs) }}
+  <div class="brief {{ token }}">
+    <span class="keyword indention">{{ keyword_text if keyword_text else 'Feature' }}</span>
+    <span class="name">{{ name_text }}</span>
+    {{ status_badge(token) }}
+  </div>
+  <div class="description indention tqa-feature-desc">{{ description_text }}</div>
+{{ elements_block(feature.get('elements'),
+                  counter=ids,
+                  inner_level=inner_level,
+                  tag_hrefs=tag_hrefs,
+                  filterable=filterable) }}
+</div>
+{%- endif -%}
+{%- endmacro -%}
