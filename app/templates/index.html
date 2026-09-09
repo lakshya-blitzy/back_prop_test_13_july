@@ -1,0 +1,132 @@
+{#-
+  ===========================================================================
+  index.html - the GET / landing page of the read-only report viewer.
+  ===========================================================================
+
+  ROUTE CONTRACT - one row of the HTTP surface, and the whole of it: presence
+  and modification time of each of the four report artifacts, with links.
+  Status 200 always, including before any run has ever happened.
+
+  This is the only report-ish route with no data-availability precondition.
+  The four report views answer 404 when the JSON report is absent, unreadable
+  or unparseable; this page renders on a completely empty workspace, so its
+  empty state is the normal first-run experience rather than an error. Nothing
+  here is a failure to report - an artifact that has not been generated yet is
+  simply marked as such.
+
+  RENDER CONTEXT - the view function passes exactly one variable:
+
+      artifacts   An ordered sequence of artifact descriptors, in the order of
+                  ARTIFACT_SPECS in app/utils/paths.py (the HTML report, the
+                  JSON report, the rerun manifest, then the PrettyReports
+                  directory - the plugin order of the original Java runner).
+                  Each descriptor exposes six members, addressed by name:
+
+      label               Required. Human-readable name, e.g. "Cucumber HTML
+                          report", "Cucumber JSON", "Rerun manifest",
+                          "PrettyReports tree".
+      name                Required. The artifact key, which is ArtifactSpec.key
+                          and doubles as the allowlisted name the artifact
+                          route accepts. The directory artifact resolves with
+                          or without a trailing slash and is served its
+                          overview page, so either spelling round-trips.
+      relpath             Required. ArtifactSpec.relpath - the repository-
+                          relative path, for display only.
+      exists              Bool.
+      modified_iso        str or None. Millisecond-precision UTC ISO-8601
+                          ending in a literal Z, e.g. 2022-09-07T13:37:26.297Z,
+                          which is the form the artifacts themselves carry.
+                          Used verbatim as the datetime attribute.
+      modified_display    str or None. The human-readable form, e.g.
+                          "07 Sep 2022, 15:39", matching how the generated
+                          report tree renders build dates.
+
+  The three optional members are read through default(), so a descriptor that
+  omits one, or carries None or an empty string, renders a plain textual
+  fallback instead of emitting a literal None or an empty datetime attribute.
+  The three required members are the row's identity and are not defaulted: a
+  descriptor without them describes no artifact.
+
+  This template computes nothing. It performs no filesystem access, formats no
+  timestamp and holds no path literal of its own: presence and both timestamp
+  forms are read by the view function, and every path string it displays
+  arrives in the context from the path module that owns it.
+
+  URLS - built with url_for only, never by hand. The one endpoint used here is
+  web.artifact, per the endpoint contract in base.html and app/web/__init__.py.
+  An absent artifact is rendered without a link, because the artifact route
+  answers 404 for anything not on disk and a link that is certain to fail is
+  worse than no link.
+
+  CLASSES - app/static/css/main.css, used as written there: tqa-artifacts is a
+  responsive grid list, tqa-artifact one card in it, tqa-artifact-missing the
+  warning variant, tqa-empty the guidance box, with tqa-link and tqa-timestamp
+  for the anchor and the time. No class is invented here and no style is
+  inlined. Presence is never signalled by colour alone: every card states its
+  condition in words as well.
+
+  Headings start at h2. base.html renders the page's single h1 from the title
+  block, so this template must not emit another one.
+
+  PROHIBITIONS honoured, beyond those base.html states for every child: no
+  control that starts, or appears to start, a test run - runs are started from
+  the command line; no result counts, chart or status summary, which belong to
+  the report overview and the summary route; and no reference of any kind to
+  the per-worker intermediates, which are never reachable over HTTP.
+-#}
+{% extends "base.html" %}
+{% set active_nav = "index" %}
+
+{% block title %}Report artifacts{% endblock %}
+
+{% block content %}
+    <h2>Availability and last modification</h2>
+
+    <p>
+        Each entry below is one of the four artifacts a test run writes: the
+        path it is written to, whether it is on disk now, and when it last
+        changed. An entry that is on disk links to the artifact itself. This
+        view only reads what a run has already produced - it never starts a
+        run and never writes.
+    </p>
+
+    {#- A missing or empty sequence is not an error: the tally stays at zero
+        and the guidance box below is rendered on its own. -#}
+    {%- set rows = artifacts|default([], true) -%}
+    {%- set tally = namespace(present=0) -%}
+
+    {% if rows %}
+    <ul class="tqa-artifacts">
+        {%- for a in rows %}
+        {%- set present = a.exists|default(false, true) -%}
+        {%- set modified_iso = a.modified_iso|default(none, true) -%}
+        {%- set modified_display = a.modified_display|default(none, true) -%}
+        {%- if present %}{% set tally.present = tally.present + 1 %}{% endif %}
+        <li class="tqa-artifact{% if not present %} tqa-artifact-missing{% endif %}">
+            {% if present -%}
+            <a class="tqa-link" href="{{ url_for('web.artifact', name=a.name) }}">{{ a.label }}</a>
+            {%- else -%}
+            <span>{{ a.label }}</span>
+            {%- endif %}
+            <code>{{ a.relpath }}</code>
+            {% if not present -%}
+            <span class="tqa-timestamp">Not generated yet</span>
+            {%- elif modified_iso and modified_display -%}
+            <span class="tqa-timestamp">Modified <time datetime="{{ modified_iso }}">{{ modified_display }}</time></span>
+            {%- else -%}
+            <span class="tqa-timestamp">Modification time unavailable</span>
+            {%- endif %}
+        </li>
+        {%- endfor %}
+    </ul>
+    {%- endif %}
+
+    {%- if tally.present == 0 %}
+    <p class="tqa-empty">
+        No report artifact has been generated yet. Start a run from the command
+        line with <code>run-tests</code>, or with <code>make test</code>, which
+        wraps the same entry point as the continuous-integration pipeline does,
+        then reload this page.
+    </p>
+    {%- endif %}
+{% endblock %}

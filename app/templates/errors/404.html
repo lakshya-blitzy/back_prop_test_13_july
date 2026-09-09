@@ -1,0 +1,115 @@
+{#-
+  ===========================================================================
+  errors/404.html - the viewer's single not-found page.
+  ===========================================================================
+
+  WHO RENDERS THIS - app/errors.py, and nothing else. Its not-found handler
+  renders this template by the name "errors/404.html", returns it with status
+  404, and passes NO template context at all. Every name used below must
+  therefore resolve without one: the only interpolation here is url_for, and
+  the only inherited reader, active_nav, is guarded by default('') in the
+  shell. The handler also owns content negotiation - the summary route is
+  answered with a body of its own rather than with this page - so this file is
+  the HTML branch only and assumes nothing about which route failed.
+
+  PROVENANCE - this page has no counterpart in the Java implementation the
+  project ports: that implementation exposes no HTTP surface, so the shell,
+  the index and both error pages are additions rather than ported behaviour,
+  recorded as deviation 12 in the specification's inventory and authorized by
+  its Conflict 3, which holds the mandated Flask application to the minimum it
+  compels - a read-only viewer over output that already exists. Nothing beyond
+  that minimum belongs here.
+
+  ONE RESPONSE FOR EVERY CAUSE - the requirement that shapes this file. The
+  four report routes answer 404 when the results artifact is absent, when it
+  is unreadable and when it will not parse, and they answer identically in all
+  three cases, because a run has not produced usable results and the
+  distinction is not the viewer's to make. The artifact route adds five more
+  causes - a name off its allowlist, an allowlisted name with nothing behind
+  it, a directory that is not the report tree, a path that resolves outside
+  the artifact root, and any worker-intermediates path, which must never be
+  reachable - and the two index routes add an out-of-range feature or
+  scenario index. Ten causes, one response.
+
+  Byte-identity across those ten is a property of this file, not a habit the
+  tests have to police: the body below has NO dynamic content whatsoever. No
+  request value, no path, no name, no timestamp, no counter, no conditional
+  that could take a different branch. url_for is the sole interpolation and is
+  constant for a given application, and the shell this page extends is static
+  in exactly the same way. An "improvement" that interpolated a request value
+  would break the rule above, so it must not be made.
+
+  Nothing is echoed back, for the same reason and for one more: reflecting a
+  rejected name or path would tell whoever sent it that it was parsed, and
+  would separate a probe from an honest mistake. The status is 404 for all ten
+  causes and never 403, the wording carries no notion of authorization, and no
+  cause is named or hinted at - a sentence claiming one would be wrong at
+  least two thirds of the time on the report routes alone, and would leak
+  which branch had fired. Diagnosis lives in the process log, not here.
+
+  HEADINGS - base.html renders the page's one h1, in the header, from the
+  title block, and an extending template must not emit a second. The title
+  block below is therefore this page's heading text as well as its document
+  title, and the content block starts at h2.
+
+  CLASS VOCABULARY - app/static/css/main.css, the tqa- namespace, and only
+  names that file actually declares: tqa-empty for the standing-in block, the
+  same idiom the index uses for its own empty state, and tqa-link for the two
+  anchors, which brings the focus-visible outline with it. Not tqa-error -
+  that one is the red monospace frame for assertion text and tracebacks in a
+  report, which is precisely what this page may not carry. The h2, the
+  paragraphs and the inline code render at browser defaults, since every
+  selector in that stylesheet is namespaced; that is acceptable for a page
+  this small and is not a reason to invent a class the stylesheet will never
+  define.
+
+  NO STATE HOOK AND NO BEHAVIOUR HOOK - there is nothing here to collapse,
+  filter or open, so neither the stylesheet's data-tqa- state attributes nor
+  the script's data-report- hooks appear. Both families read their own absence
+  as the correct default, and report.js is a silent no-op on a page carrying
+  no report markup.
+
+  THE REST OF THE SHELL'S PROHIBITIONS HOLD HERE TOO - no inline script and
+  no inline style, so the head and scripts blocks are left unoverridden; no
+  external, protocol-relative or content-delivery-network URL, and no target
+  attribute, so the page renders with no network at all; no filesystem path
+  literal, the path module under app/utils owning every one of those and none
+  of them reaching a template; automatic escaping left on and nothing marked
+  pre-escaped; and no form, no button and nothing else that starts, or appears
+  to start, a test run - this surface is read-only, and runs start from the
+  command line. active_nav is deliberately not set: an error page is not one
+  of the views, so no navigation link is marked current.
+-#}
+{% extends "base.html" %}
+
+{#- Short, cause-neutral, and used twice: as the document title and as the
+    single h1 the shell renders in the header. "Not found" is the HTTP
+    semantic, which is the one thing this page may state. -#}
+{% block title %}Not found{% endblock %}
+
+{% block content %}
+    <section class="tqa-empty" aria-labelledby="tqa-not-found-heading">
+        <h2 id="tqa-not-found-heading">Nothing to show here</h2>
+
+        <p>
+            Every page in this viewer is a view of a report artifact that a
+            completed test run left behind. Where there is no such view to
+            render, this page stands in its place &mdash; in the same words
+            every time, whatever the reason, because the reason is not this
+            viewer's to report.
+        </p>
+
+        <p>
+            Runs start from the command line, with <code>run-tests</code>. The
+            project documentation covers that command; this viewer only reads
+            what a run has already written, and starts nothing itself.
+        </p>
+
+        <p>
+            From here, open the
+            <a class="tqa-link" href="{{ url_for('web.index') }}">artifact index</a>,
+            which loads whether or not a run has happened yet, or browse the
+            <a class="tqa-link" href="{{ url_for('web.reports_overview') }}">report overview</a>.
+        </p>
+    </section>
+{% endblock %}

@@ -1,0 +1,163 @@
+{#-
+  ===========================================================================
+  errors/500.html - the internal-error page of the read-only report viewer.
+  ===========================================================================
+
+  RENDERED BY app/errors.py, under the template name "errors/500.html", with
+  response status 500 and with NO template context whatsoever. That handler
+  logs the traceback through the logging configuration installed by
+  app/logging_config.py, which routes WARNING and above to the standard error
+  stream. The diagnostic therefore exists, and it exists there rather than
+  here. That division of labour is the entire design of this page.
+
+  ONE JOB - render a calm, static page that discloses nothing.
+
+  WHY THERE IS A PAGE HERE AT ALL. The whole HTTP surface is an addition, not
+  ported behaviour: the Java implementation exposes none, so the technical
+  specification records the viewer as deviation 12, authorized by its
+  Conflict 3 - the request mandates a Flask application while the
+  specification states the system has no traditional application UI, and the
+  conflict resolves by holding Flask to the minimum it compels, a viewer over
+  output that already exists. Nothing beyond that minimum belongs on this
+  page.
+
+  ---------------------------------------------------------------------------
+  DISCLOSES NOTHING - the requirement, stated as the absences that meet it
+  ---------------------------------------------------------------------------
+
+  No exception type. No exception message. No traceback and no stack frame.
+  No request detail and no locals. No error code beyond the HTTP status the
+  response already carries. No filesystem path, no configuration value and no
+  name of a configuration key. No interpreter or framework version, no host
+  name and no port. No echo of anything the caller sent.
+
+  The handler passes no context, so there is nothing here to filter: the
+  requirement is met by not reaching for data rather than by sanitizing it.
+  If a future edit finds itself wanting a variable, the answer is that there
+  is none - and adding one would break the strict-undefined guarantee below.
+
+  The one sentence about the problem having been recorded is deliberate and
+  is standard practice. It says that a record was made; it names no log file,
+  no path and no destination, because where the record went is operator
+  knowledge and not a caller's business.
+
+  ---------------------------------------------------------------------------
+  RENDERS AFTER SOMETHING HAS ALREADY FAILED - hence: static, and total
+  ---------------------------------------------------------------------------
+
+  This page is the last thing standing on a request that has already gone
+  wrong. If it raised, the caller would get a bare framework error instead of
+  a response, so it contains no loop, no conditional, no filter chain and no
+  arithmetic - nothing whose evaluation can fail. It renders correctly with
+  an empty context and under a strict undefined policy, which is this file's
+  explicit acceptance criterion, and the mechanical proof that it references
+  no variable the handler does not pass.
+
+  The single URL is still built with url_for, and only ever for web.index.
+  Two reasons, and the second is the interesting one. First, url_for adds no
+  new failure mode: base.html already calls it for the stylesheet, the script
+  and all three navigation links, so this page inherits that call pattern
+  whether or not it makes a call of its own. Second, of the six endpoints the
+  blueprint carries, web.index is the one that cannot itself fail - GET /
+  answers 200 on an empty workspace, before any run has produced anything -
+  whereas web.reports_overview and the three routes beside it are bound by
+  the viewer's data-availability rule and answer 404 when no usable result
+  file exists. A page whose purpose is not to compound a failure links only
+  to the route that cannot fail.
+
+  ---------------------------------------------------------------------------
+  CONFORMANCE TO THE TWO FIXED CONTRACTS
+  ---------------------------------------------------------------------------
+
+  base.html - of its four blocks, title and content are overridden and head
+  and scripts are deliberately left alone, since the shell already loads the
+  stylesheet and the behaviour script and this page adds neither. The shell
+  renders the page's one h1 in its header from self.title(), and requires an
+  extending template not to emit a second one; the title block below is
+  therefore both the document title and that heading, and the content block
+  emits no heading at all. active_nav is left unset - the shell reads it as
+  active_nav|default(''), so unset is both strict-undefined safe and exactly
+  right, because no navigation item is the current view on an error page - so
+  the shell marks none of the three, and no current-page ARIA marker reaches
+  the response.
+
+  main.css - the tqa- namespace, composed from names that stylesheet already
+  declares. tqa-empty is the message box: a dashed, muted, centred panel, and
+  the same idiom the index and the not-found page use, so the three read
+  consistently. tqa-link is the anchor. Notably NOT the stylesheet's other
+  candidate, the one monospace class it declares for step failure text in a
+  report - that class carries assertion messages and tracebacks, so styling
+  this page with it would dress the page as though it held the very content
+  it is forbidden to hold, and it is not used here. Inventing a
+  new tqa- name would be dead markup, since that stylesheet is already
+  written; every selector in it is namespaced, so the unclassed paragraphs
+  below render at browser defaults, which is what a short prose page wants.
+
+  ---------------------------------------------------------------------------
+  STANDING PROHIBITIONS, each with its reason
+  ---------------------------------------------------------------------------
+
+  No JSON body and no serialized error envelope: content negotiation belongs
+  to app/errors.py, which answers the one JSON route with a JSON body and the
+  HTML routes with a template. This file is the HTML branch alone and assumes
+  nothing about which route failed.
+
+  No inline script and no inline style - behaviour lives in report.js and
+  styling in main.css, both already loaded by the shell. No external,
+  protocol-relative or content-delivery-network reference, and no attribute
+  that opens a link elsewhere: these pages render with no network at all. No
+  value marked pre-escaped and no escaping turned off; autoescaping stays on
+  even though this page interpolates nothing.
+
+  No form, no submit control and nothing that starts, or appears to start, a
+  test run: this surface is read-only and runs start from the command line.
+  A retry control is not required, and could not be a submission.
+
+  No state hook and no behaviour hook. main.css reads the absence of its
+  three boolean state attributes as expanded, visible and closed, and
+  report.js sets its own run-time hooks; nothing here is collapsible,
+  filterable or lightbox-able, so emitting neither vocabulary is correct and
+  sidesteps the small difference in how the two sibling contracts describe
+  their state mechanism.
+
+  No product or vendor label of this page's own invention. The naming
+  disagreement between the specification and the implementation resolved as
+  "no renaming": each vocabulary survives only where it already occurs, and
+  output carries whatever the data carries. This page carries no data, so it
+  names no product - the one label in the rendered document comes from the
+  shell's title suffix, which is the shell's decision and not this file's.
+
+  No component library and no design system: the alignment protocol is
+  recorded as not triggered, and no design system applies. Hand-written
+  markup over main.css only.
+
+  No third error page and no shared error partial. app/errors.py registers
+  exactly two handlers, the shared partial set is fixed at three - the status
+  badge, the step row and the screenshot lightbox - and none of them applies
+  to an error page. The small duplication between this page and the
+  not-found page is correct: the two carry different content rules and must
+  be able to change independently.
+-#}
+{% extends "base.html" %}
+
+{#- Used twice by the shell: as the document title, before its own product
+    suffix, and as the page's single visible h1. Short, cause-neutral, and
+    saying no more than the HTTP status already says. -#}
+{% block title %}Internal server error{% endblock %}
+
+{% block content %}
+    <div class="tqa-empty">
+        <p>
+            This request could not be completed. The problem has been recorded in
+            the server log, and no details of it are shown here.
+        </p>
+        <p>
+            Nothing has been changed by it. This viewer only reads the report
+            artifacts a test run has already produced: it never writes, and it
+            never starts a run.
+        </p>
+        <p>
+            <a class="tqa-link" href="{{ url_for('web.index') }}">Return to the artifact list</a>
+        </p>
+    </div>
+{% endblock %}
