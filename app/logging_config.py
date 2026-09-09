@@ -62,6 +62,17 @@ everything to ``stderr`` - so it is implemented with two handlers, the stdout
 one carrying a filter that excludes ``WARNING`` and above.  The filter is what
 guarantees a record is never emitted on both streams.
 
+The handlers name their stream rather than holding it.  Both entry points
+configure logging early - ``create_app()`` while an application is being
+built, the ``run-tests`` command before the run starts - and a stream object
+bound at that moment can be stale by the time a record is emitted, if a host
+or a harness has since replaced ``sys.stdout`` or ``sys.stderr``.  The two
+handlers therefore look their stream up on :mod:`sys` each time they use it,
+so the contract above is about the process's streams as they stand rather than
+about whichever objects were installed first.  ``_LiveStreamHandler`` states
+the reasoning and keeps the standard handler's degradation for a process that
+has no ``sys.stdout`` at all.
+
 Messages whose routing this design exists to guarantee:
 
 ===================================================== ======== ========
@@ -133,6 +144,14 @@ stated here so they can be implemented faithfully under ``tests/``:
    ``logging``, ``sys`` and ``typing``.
 8. *Branch coverage* - the filter, the idempotency guard, the ``verbose``
    switch, the ``stream_split=False`` path and the guarded reconfigure.
+9. *Streams resolved on use* - call :func:`configure_logging`, then replace
+   ``sys.stdout`` and ``sys.stderr``, then log: the records must reach the
+   *replacements*, on the same split.  This is what keeps the split intact for
+   a caller that configures logging early and captures output afterwards -
+   including a file-descriptor level capture - and it is asserted for both the
+   stream-split and merged configurations.  Cover the degradation too: with
+   ``sys.stdout`` set to ``None`` the stdout handler writes to ``sys.stderr``
+   rather than raising.
 """
 
 from __future__ import annotations
@@ -286,23 +305,81 @@ def _discard_managed_handlers(logger: logging.Logger) -> None:
             )
 
 
+class _LiveStreamHandler(logging.StreamHandler):
+    """A ``StreamHandler`` that resolves ``sys.stdout``/``sys.stderr`` on use.
+
+    The standard ``StreamHandler`` binds a stream *object* once, when it is
+    constructed.  That is wrong for this module, because the two entry points
+    that call :func:`configure_logging` do so long before most records are
+    emitted: ``create_app()`` configures logging while building an
+    application, and the ``run-tests`` command configures it before the run
+    starts.  Any code that legitimately replaces a process stream after that
+    point - a WSGI host redirecting diagnostics, a harness capturing output,
+    a wrapper that re-points ``stderr`` - would find records still going to
+    the object that was current at configuration time, which by then may be
+    stale or discarded.  The published contract is about *streams*, not about
+    whichever object happened to be installed first: specification 0.4.1
+    fixes "progress to stdout, engine diagnostics to stderr", so the stream
+    is looked up by name each time it is used and the contract holds however
+    a host has arranged those two streams.
+
+    Resolution is by attribute name on :mod:`sys`, and the degradation path
+    of the standard handler is preserved: a process can genuinely have no
+    ``sys.stdout`` - a Windows GUI host is the usual case, and the port must
+    run on Windows as well as Linux and macOS - and in that case output falls
+    back to ``sys.stderr``, collapsing the split into one merged stream rather
+    than failing the run.  Should both be absent, the stream bound at
+    construction is used, and if that is absent too the handler behaves
+    exactly as the standard one does: ``logging`` reports the emit failure
+    through its own ``handleError`` path and the run continues.
+
+    Nothing in the port calls ``setStream()``; it remains functional and its
+    argument becomes the last-resort stream described above.
+    """
+
+    def __init__(self, stream_attribute: str) -> None:
+        # Set before the base constructor, which assigns ``self.stream`` and
+        # therefore reaches the property setter below.
+        self._stream_attribute = stream_attribute
+        self._fallback_stream: TextIO | None = None
+        super().__init__(getattr(sys, stream_attribute, None))
+
+    @property
+    def stream(self) -> TextIO | None:
+        """The stream to write to, resolved now rather than at construction."""
+        live: TextIO | None = getattr(sys, self._stream_attribute, None)
+        if live is None:
+            # The documented degradation: merge onto the error stream.
+            live = sys.stderr
+        if live is None:
+            live = self._fallback_stream
+        return live
+
+    @stream.setter
+    def stream(self, value: TextIO | None) -> None:
+        """Record ``value`` as the last-resort stream.
+
+        Invoked by the base constructor and by ``setStream()``.  The value is
+        deliberately not made authoritative: doing so would restore exactly
+        the early-binding behaviour this class exists to avoid.
+        """
+        self._fallback_stream = value
+
+
 def _build_handler(
-    stream: TextIO | None,
+    stream_attribute: str,
     name: str,
     level: int,
     formatter: logging.Formatter,
 ) -> logging.StreamHandler:
     """Build one tagged, formatted stream handler.
 
-    ``stream`` is annotated as optional because a process can genuinely have
-    no ``sys.stdout`` - a Windows GUI host is the usual case, and the port
-    must run on Windows as well as Linux and macOS.  ``StreamHandler``
-    already defines that case: a ``None`` stream falls back to ``sys.stderr``,
-    which degrades the stream split into a single merged stream rather than
-    failing the run.  That is the desired outcome, so it is relied upon here
-    rather than pre-empted with a check.
+    ``stream_attribute`` names the attribute of :mod:`sys` to write to -
+    ``"stdout"`` or ``"stderr"`` - rather than supplying a stream object, so
+    the handler resolves it on use.  :class:`_LiveStreamHandler` explains why
+    that matters and how an absent stream degrades.
     """
-    handler = logging.StreamHandler(stream)
+    handler = _LiveStreamHandler(stream_attribute)
     handler.set_name(name)
     handler.setLevel(level)
     handler.setFormatter(formatter)
@@ -367,11 +444,11 @@ def configure_logging(
         # rejects WARNING and above through the filter, which is what makes
         # the two handlers partition the records rather than overlap.
         stdout_handler = _build_handler(
-            sys.stdout, STDOUT_HANDLER_NAME, logging.NOTSET, formatter
+            "stdout", STDOUT_HANDLER_NAME, logging.NOTSET, formatter
         )
         stdout_handler.addFilter(_MaxLevelFilter(_STDERR_THRESHOLD))
         stderr_handler = _build_handler(
-            sys.stderr, STDERR_HANDLER_NAME, _STDERR_THRESHOLD, formatter
+            "stderr", STDERR_HANDLER_NAME, _STDERR_THRESHOLD, formatter
         )
         handlers: tuple[logging.StreamHandler, ...] = (
             stdout_handler,
@@ -380,7 +457,7 @@ def configure_logging(
     else:
         handlers = (
             _build_handler(
-                sys.stderr, STDERR_HANDLER_NAME, logging.NOTSET, formatter
+                "stderr", STDERR_HANDLER_NAME, logging.NOTSET, formatter
             ),
         )
 
