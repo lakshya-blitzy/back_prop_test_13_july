@@ -1,4 +1,4 @@
-/* ==========================================================================
+/* --------------------------------------------------------------------------
    Testinium-QA report stylesheet.
 
    Consumed twice, which fixes two invariants:
@@ -13,7 +13,7 @@
    State comes from one status attribute and three boolean attributes whose
    absence is the default, so with no scripting at all the page stays
    complete: detail expanded, rows visible, overlay closed, thumbnail shown.
-   ========================================================================== */
+   -------------------------------------------------------------------------- */
 
 /* ---- tokens and page shell -------------------------------------------------
    Tokens live on the wrapper class, not on the document root, and every var()

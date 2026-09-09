@@ -1,6 +1,6 @@
 /*
  * report.js - interactive behaviour for the generated test reports.
- * =================================================================
+ * -----------------------------------------------------------------
  *
  * The one hand-written browser script in this project. Three consumers embed
  * or serve this exact text, unchanged, unbundled and untranspiled:
