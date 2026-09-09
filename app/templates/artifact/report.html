@@ -1,0 +1,394 @@
+{#-
+  ---------------------------------------------------------------------------
+  artifact/report.html - the ROOT DOCUMENT of the single, self-contained HTML
+  report artifact.
+  ---------------------------------------------------------------------------
+  Dividers here are dash rules throughout, deliberately: a run of equals signs
+  is the middle marker of an unresolved merge, the committed reference report
+  carries such a block, and no token a marker scan looks for belongs in a file
+  this project writes - not even inside a comment the engine discards.
+
+  WHICH ARTIFACT, AND WHICH GENERATOR. This file is the page template of the
+  FIRST of the project's two HTML contracts, and the two are never collapsed
+  into one. Resolving the retained historical build file settled which is
+  which: cucumber-java 7.2.3 pulls html-formatter 17.0.0, which produced the
+  single reports page - one document carrying no external asset reference of
+  any kind - and that page is what app/reporting/html_report.py renders from
+  this template and writes to the reports HTML artifact path. The report TREE
+  comes from a different generator, cucumber-reporting 5.6.1 over Velocity,
+  and owns its own page set, layout, assets and navigation in
+  app/templates/pretty/. Nothing from that folder is imported or mirrored
+  here. One difference is decisive at this level: THIS IS ONE DOCUMENT
+  CONTAINING EVERY FEATURE, with no navigation to a sibling page, so the four
+  overview pages and the per-feature and per-tag detail pages belong to the
+  other contract alone and nothing here links to any of them.
+
+  ---------------------------------------------------------------------------
+  THE SHELL, MEASURED RATHER THAN ASSUMED
+  ---------------------------------------------------------------------------
+  The head below reproduces the reference artifact's own shell, measured from
+  the committed file at the pinned reference revision - 41 lines, 1,440,365
+  bytes, line feeds only:
+
+      the document type declaration, the html element with its language,
+      then head, and inside it, each indented with ONE LITERAL TAB, the title
+      element reading exactly "Cucumber", the content-type meta, the inline
+      data-URI favicon link and the style element.
+
+  Three of those are the artifact's acceptance shape and are asserted by
+  tests/test_html_report.py: the document type declaration, the title element
+  whose text is literally "Cucumber" - not "Cucumber Report" and not the
+  project name - and the content-type meta naming text/html;charset=utf-8,
+  with NO EXTERNAL ASSET REFERENCE anywhere in the file. The tab indentation
+  and the line feeds are reproduced as measured, so a reader diffing this
+  output against the reference sees the shell line up.
+
+  The favicon link is the reference line, byte for byte. Its value is an
+  inline data URI whose text is percent-encoded down to alphanumerics and
+  the characters percent, plus, comma, hyphen, period, slash and colon: it
+  carries no engine delimiter, no ampersand, no quotation mark and no angle
+  bracket, so it passes through as literal template markup with no escaping
+  path and without being declared trusted markup. It decodes to a 2,197
+  character vector image in two fills. It is literal markup rather than a
+  context value on purpose - it is part of the shell, not part of a result.
+
+  ---------------------------------------------------------------------------
+  WHY THE RESULTS ARE RENDERED HERE AND NOT IN THE BROWSER
+  ---------------------------------------------------------------------------
+  In the committed reference artifact the content container is EMPTY. The
+  whole report travels as a client-side message payload, wrapped in an
+  unresolved merge block, and is drawn at load time by a bundled behaviour
+  script of 1,381,454 characters. This port does not reproduce that, because
+  the plan's acceptance criterion for this artifact is its exact opposite:
+  every feature, scenario, step, status, timestamp and embedded screenshot
+  from the input result set has to be PRESENT IN THE DOM, checked against a
+  generated baseline for page structure rather than by counting nodes. A
+  client-side shell has none of it in the DOM. The departure is the plan's own
+  authorised deviation for both HTML outputs being generated from this
+  project's templates and accepted structurally.
+
+  So: the shell is reproduced, the report is rendered server-side inside the
+  content container, and NEITHER the message payload NOR the bundle is
+  emitted. The reference page's two script elements collapse to the ONE below,
+  holding nothing but this project's own behaviour script.
+
+  ---------------------------------------------------------------------------
+  THE RENDER CONTEXT - the contract app/reporting/html_report.py is written
+  against. These five names are all this template reads; nothing else is
+  assumed to exist.
+  ---------------------------------------------------------------------------
+  features     The ordered list of normalised feature mappings: FEATURES IN
+               SOURCE ORDER and scenarios in line order, which is the
+               determinism the report contract requires. Each feature carries
+               uri, id, keyword, line, name, description, tags and elements
+               plus a status ROLLED UP IN PYTHON; each element carries
+               keyword, line, name, description, type and steps plus its own
+               rolled-up status, and, for a scenario, id, start_timestamp and
+               tags. Every feature is handed to the feature template of this
+               folder whole - this file reads only the status values, and only
+               to build the filter vocabulary.
+
+  summary      Counts of features, scenarios and steps by status, plus the
+               run's earliest scenario start. Deliberately THE SAME SHAPE the
+               viewer's summary route answers with, because the artifacts and
+               the HTTP views read one normalised model precisely so that no
+               view can contradict an artifact.
+
+  metadata     The environment and run descriptor. Its field vocabulary is
+               the one measured from the reference artifact's own payload -
+               implementation with a name and version, runtime with a name
+               and version, the operating system name and the processor name,
+               this port substituting its own engine, interpreter and platform
+               values - plus two run-level timestamps, generated_at and
+               started_at. Note that the writer LIFTS those two timestamps
+               INTO this mapping: the result set carries them at its top
+               level, and the metadata block reads them from here.
+
+  inline_css   The full text of app/static/css/main.css, ALREADY WRAPPED AS
+               MARKUP IN PYTHON by the writer.
+
+  inline_js    The full text of app/static/js/report.js, ALREADY WRAPPED AS
+               MARKUP IN PYTHON by the writer.
+
+  The two asset values are required rather than defaulted. A stylesheet or a
+  script that silently arrived empty would produce a plausible-looking 1.4 MB
+  page with no styling and no interactivity, which is worse than a loud
+  failure at write time - so this template interpolates them directly and the
+  writer owes them.
+
+  THE TWO WRITE-TIME ASSERTIONS THIS PAGE OWES ITS WRITER, recorded here
+  because no template can enforce them and tests/test_html_report.py asserts
+  both: the stylesheet text must not contain a closing style tag, and the
+  script text must not contain a closing script tag. Either would terminate
+  its block early and corrupt the document from that point on. Both assets are
+  written to satisfy this - the stylesheet declares no import, asset
+  reference, web font or source map, and the script is dependency-free
+  classic-script text - and the assertion is what keeps it true.
+
+  ONE MORE WRITE-TIME OBLIGATION, for the same reason. The reference artifact
+  ends with a single line feed after the closing html tag, and this template's
+  own source does too - but the engine STRIPS ONE TRAILING NEWLINE from a
+  template by default, so the rendered string would end without it. The writer
+  therefore builds its environment with the trailing newline KEPT, or appends
+  one when it is absent. Stated here because it is invisible from the markup:
+  the template cannot express it, and a file that ends mid-line is both a
+  departure from the reference and a diagnostic from ordinary text tooling.
+
+  Note also, deliberately, the blank line that precedes each of the two
+  closing asset tags: both assets end with their own line feed and this
+  template adds the one before the closing tag, so that tag always begins a
+  fresh line even if an asset were ever to arrive without a final newline.
+
+  STATUS ROLL-UP IS THE WRITER'S JOB, NEVER A TEMPLATE'S. A scenario's status
+  and a feature's status are not fields of the results schema; they are
+  derived from step results, and app/reporting/html_report.py derives them.
+  The badge partial's normaliser is the single place in this project where a
+  status is FOLDED, and it is a normaliser and not a deriver: this file passes
+  the supplied value through it and takes its "unknown" answer for an absent
+  or unrecognised one. No status is computed, rolled up or guessed here.
+
+  ---------------------------------------------------------------------------
+  COMPOSITION
+  ---------------------------------------------------------------------------
+  Four imports, all WITHOUT the calling context, because every macro takes
+  each datum it needs as an explicit argument - the convention the three
+  shared partials fix and the reason their output is identical on every
+  surface. Paths are resolved from the template loader's root, so each carries
+  its folder prefix.
+
+  THIS FILE EXTENDS NOTHING. The shell template of the template root resolves
+  its own stylesheet and script through the framework's static-address
+  builder, which would break self-containment outright, and its own contract
+  states it is explicitly not extended by this folder - an independent
+  confirmation of the plan's rule.
+
+  What this page owns, and what each of the other templates owns:
+
+    - the document shell, the page heading and the metadata block, called
+      once here;
+    - the page-level controls - the status filter and the expand-all and
+      collapse-all pair - which are page chrome and belong to the page rather
+      than to a block named for metadata;
+    - the feature loop, which hands each feature ITS INDEX IN THE MODEL LIST.
+      That index is not decoration. It propagates through the feature template
+      into the element template's document-unique step and region identifiers,
+      and this artifact is one document containing every feature, so a scheme
+      keyed on anything else - a feature name, or above all a feature id slug,
+      two pairs of which collide in this suite because two pairs of features
+      share a title - would silently emit duplicate identifiers, invalid
+      markup and toggles that expand the wrong region. The loop therefore runs
+      over the model list ITSELF, unfiltered, so an index is always that
+      feature's true position; the feature template renders the empty string
+      for an entry that is not a mapping.
+    - THE ONE SCREENSHOT OVERLAY, called exactly once for the whole document,
+      because the behaviour script finds a single overlay and reuses it for
+      every thumbnail on the page. It is placed inside the report root, which
+      is the copy that script prefers.
+
+  ---------------------------------------------------------------------------
+  THE REPORT ROOT IS NOT COSMETIC
+  ---------------------------------------------------------------------------
+  The stylesheet declares NO bare element, class or identifier selector
+  outside its own namespace, so the content container inherits nothing at all
+  and the namespaced root element inside it is what hosts the status custom
+  properties, the type and the page shell. Without it the whole page renders
+  unstyled. That same element carries the behaviour script's single scope
+  hook, so filtering and expand-all resolve to this document's own scope.
+
+  NO STATE IS EVER SERVER-RENDERED. None of the three boolean state
+  attributes the stylesheet reads, and none of the three state classes the
+  behaviour script sets at run time, appears in this output. The stylesheet
+  reads their absence as expanded, visible and closed, and the script writes
+  its ARIA mirrors to match that authored state behind its own idempotence
+  guard. This single file is often read with scripting effectively idle - from
+  an archive, an e-mail attachment or a workspace - so THE SERVER-RENDERED,
+  FULLY EXPANDED, UNFILTERED STATE IS WHAT MAKES IT USEFUL, and it is also
+  what makes it correct on paper.
+
+  ---------------------------------------------------------------------------
+  STANDING PROHIBITIONS - all of them honoured
+  ---------------------------------------------------------------------------
+  This document must open from a filesystem with no network at all, so, with
+  no exception: no absolute, protocol-relative or content-delivery-network
+  address; no stylesheet, behaviour-script, image, font or sibling-page
+  reference; no source-map annotation; no application endpoint address and no
+  call to the framework's address builder, since this template is rendered to
+  a file rather than served; and THE ONLY ADDRESS PERMITTED ANYWHERE IS AN
+  INLINE DATA URI - the favicon below, and the failure screenshots the
+  screenshot partial emits. Those screenshots are inline base64 images taken
+  from the results' own attachment payload; capture is failure-only and a
+  failed capture is logged and suppressed, so A FAILED SCENARIO CARRYING NO
+  SCREENSHOT IS A WHOLLY NORMAL STATE and renders cleanly.
+
+  There is no skip-navigation link, and its absence is deliberate rather than
+  an omission: this document has no navigation to skip - no link of any kind -
+  and its header is a heading and a short metadata list, while the only
+  address form this page may carry is an inline data URI.
+
+  No path literal of any kind appears here. The output path is owned by
+  app/utils/paths.py, and a path string written into a template is exactly the
+  drift the dependency rules forbid.
+
+  No merge-conflict marker appears here or in this page's output. The
+  committed reference carries an unresolved block and is read for SHAPE ONLY;
+  no HTML golden fixture exists, the markers stay in the unmodified reference
+  checkout, and every writer in this port produces clean output.
+
+  ESCAPING - the engine's own default escaping of HTML templates is relied on
+  for every interpolated value, and NO VALUE IN THIS FOLDER IS EVER DECLARED
+  PRE-ESCAPED OR TRUSTED MARKUP. The distinction is deliberate: the stylesheet
+  and the script are trusted first-party text the writer inlines, and the
+  writer is what marks them as markup, IN PYTHON - whereas result data carries
+  assertion text, tracebacks and Selenium messages full of angle brackets,
+  quotes and braces, and is never marked trusted anywhere.
+
+  ---------------------------------------------------------------------------
+  VOCABULARY AND ACCESSIBILITY
+  ---------------------------------------------------------------------------
+  Classes from app/static/css/main.css and behaviour hooks from
+  app/static/js/report.js, with nothing invented in either namespace:
+      tqa-root, tqa-page, tqa-header, tqa-footer, tqa-filter, tqa-filter-btn,
+      tqa-empty
+      data-report-root, data-report-filter, data-report-toggle-all
+  The stylesheet's icon-button class is deliberately NOT among them; the note
+  beside the expand-all pair below gives the reason.
+  Status colour, monospaced failure text, expandable step detail, per-scenario
+  start timestamps rendered exactly as the model carries them, the responsive
+  layout and the print rules all arrive from that stylesheet and from the
+  templates this page composes. This file emits no colour of its own and no
+  inline style attribute, and writes no behaviour beyond inlining the one
+  script.
+
+  The page heading is the document's only first-level heading and matches the
+  title element, features are second-level headings and scenarios third, so
+  heading navigation reflects the report's structure with no level skipped.
+  Every control is a real, non-navigating button carrying its own text label,
+  which is what the behaviour script requires - it never suppresses an
+  authored default action - and what makes each control's purpose readable
+  without colour. The filter controls are authored UNPRESSED because the
+  unfiltered page is the authored state, and no expanded-state attribute is
+  authored on the expand-all pair: those two act on every detail region in
+  scope rather than on one, and the script owns the mirrors it manages.
+
+  Colour is never the sole carrier of meaning anywhere on this page: each
+  filter names its status in words, each badge spells its status out, and the
+  stylesheet pairs every status colour with a border style and a weight so a
+  status survives greyscale printing.
+
+  A RUN THAT SELECTED NOTHING renders as a deliberate empty state, not as a
+  gap: a tag expression matching no scenario is a legitimate outcome that
+  still writes every artifact and still exits zero.
+-#}
+{%- import "artifact/metadata.html" as meta -%}
+{%- import "artifact/feature.html" as feat -%}
+{%- import "partials/lightbox.html" as shots -%}
+{%- import "partials/status_badge.html" as badge -%}
+{#- ---- the feature list, made total before anything reads it ------------
+    The sequence tests answer false for an undefined name, a null, a string
+    and a mapping alike without iterating any of them, so a sparse or absent
+    context cannot raise here under the strict undefined policy the tests
+    enable. The unfiltered list is what the render loop walks, so an index is
+    always a feature's true position in the model; the mapping-only copy
+    exists solely to decide whether there is anything at all to show. -#}
+{%- set feature_list = features if (features is defined and features is sequence and features is not string and features is not mapping) else [] -%}
+{%- set renderable_features = feature_list|select('mapping')|list -%}
+{#- ---- the filter vocabulary ------------------------------------------
+    Every filterable element on this page - each feature, and each element
+    inside it - carries its own rolled-up status, and a filter button for a
+    status nothing carries could only ever blank the page. So the button set
+    is the set of statuses ACTUALLY PRESENT, read from the model and folded
+    through the badge partial's normaliser, which is also what puts an absent
+    status in the neutral state rather than dropping it. No count is claimed
+    beside a filter: the tally in the metadata block is the one place counts
+    are stated, and a second count computed here could disagree with it.
+
+    The order is fixed rather than sorted - the reading order the metadata
+    block uses, with the fallback last - so identical input yields identical
+    markup. The alphabetical sorting the pipeline's publisher is configured
+    with is a display option of that publisher and imposes nothing on the
+    artifacts, so nothing is ordered on its account. -#}
+{%- set status_order = ['passed', 'failed', 'skipped', 'pending', 'undefined', 'untested', 'ambiguous', 'unknown'] -%}
+{%- set present_statuses = [] -%}
+{%- for feature_item in renderable_features -%}
+    {%- set _ = present_statuses.append(badge.status_token(feature_item.get('status'))) -%}
+    {%- set element_items = feature_item.get('elements') -%}
+    {%- for element_item in (element_items if (element_items is sequence and element_items is not string and element_items is not mapping) else []) if element_item is mapping -%}
+        {%- set _ = present_statuses.append(badge.status_token(element_item.get('status'))) -%}
+    {%- endfor -%}
+{%- endfor -%}
+{%- set filter_tokens = status_order|select('in', present_statuses)|list -%}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<title>Cucumber</title>
+	<meta content="text/html;charset=utf-8" http-equiv="Content-Type">
+	<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20class%3D%22ml-3%20ml-md-0%22%20viewBox%3D%220%200%2040.59%2046.31%22%20width%3D%2240.59%22%20height%3D%2246.31%22%3E%0A%20%20%20%20%3Cg%3E%0A%20%20%20%20%20%20%20%20%3Cpath%20fill%3D%22%2323d96c%22%20fill-rule%3D%22evenodd%22%20d%3D%22M30.283%203.645q-.528-.317-1.08-.593a16.164%2016.164%200%2000-1.154-.518c-.124-.052-.247-.1-.372-.149-.343-.127-.689-.268-1.042-.371a19.427%2019.427%200%2010-9.792%2037.51v5.56c11.676-1.753%2022.016-10.979%2022.787-23.093.459-7.289-3.193-14.73-9.347-18.346z%22%2F%3E%0A%20%20%20%20%20%20%20%20%3Cpath%20fill%3D%22%23173647%22%20d%3D%22M15.787%2046.307v-5.935A20.472%2020.472%200%201126.959%201.015c.274.08.557.187.832.291l.248.093c.165.064.291.113.417.167.348.137.739.313%201.208.543q.589.295%201.153.633c6.393%203.756%2010.354%2011.518%209.857%2019.316-.763%2012-10.722%2022.122-23.679%2024.067zm4.8-44.214h-.026a18.366%2018.366%200%2000-3.524%2036.408l.85.165v5.18c11.392-2.224%2020.009-11.272%2020.686-21.922.448-7.033-3.1-14.018-8.83-17.383l-.008-.005A14.691%2014.691%200%200027.654%203.5a5.74%205.74%200%2000-.344-.138l-.27-.1a9.49%209.49%200%2000-.708-.249%2018.425%2018.425%200%2000-5.743-.92z%22%2F%3E%0A%20%20%20%20%20%20%20%20%3Cpath%20fill%3D%22%23173647%22%20fill-rule%3D%22evenodd%22%20d%3D%22M16.666%2010.58a1.8%201.8%200%20011.583.608%204.184%204.184%200%2001.728%201.107c.645%201.422%201.027%203.461.23%204.605a6.334%206.334%200%2001-3.981-3.087%203.236%203.236%200%2001-.347-1.339%201.957%201.957%200%20011.787-1.894zm-5.683%208.025a7.742%207.742%200%20001.218.737%205.789%205.789%200%20004.883-.138%206.116%206.116%200%2000-3.345-3.45%203.664%203.664%200%2000-1.442-.321%201.884%201.884%200%2000-.319%200%201.766%201.766%200%2000-.995%203.172zm6.1%203.433c-.777-.518-2.379-.309-3.312-.292a4.416%204.416%200%2000-1.666.352%203.5%203.5%200%2000-1.218.738%201.817%201.817%200%20001.409%203.171%203.3%203.3%200%20001.442-.321c1.436-.62%203.141-2.32%203.346-3.648zm2.61%202a6.556%206.556%200%2000-3.724%203.506%203.091%203.091%200%2000-.321%201.314%201.907%201.907%200%20003.3%201.346%207.422%207.422%200%2000.7-1.218c.621-1.333.866-3.72.046-4.948zm2.557-7.167a5.941%205.941%200%20003.7-3.167%203.243%203.243%200%2000.319-1.346%201.915%201.915%200%2000-1.794-1.954%201.832%201.832%200%2000-1.6.641%207.382%207.382%200%2000-.705%201.218c-.62%201.434-.842%203.48.081%204.603zm4.208%2012.115a3.244%203.244%200%2000-.321-1.345%205.869%205.869%200%2000-3.554-3.269%205.386%205.386%200%2000-.226%204.711%204.147%204.147%200%2000.7%201.121c1.133%201.23%203.505.32%203.402-1.218zm4.2-6.28a7.466%207.466%200%2000-1.217-.7%204.425%204.425%200%2000-1.666-.352%206.4%206.4%200%2000-3.188.555%205.959%205.959%200%20003.316%203.386%203.672%203.672%200%20001.442.32%201.8%201.8%200%20001.31-3.209z%22%2F%3E%0A%20%20%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E">
+	<style>
+{{ inline_css }}
+	</style>
+</head>
+<body>
+<div id="content">
+<div class="tqa-root" data-report-root>
+<div class="tqa-page">
+    <header class="tqa-header">
+        <h1>Cucumber</h1>
+        {{ meta.metadata_block(metadata, summary) }}
+    </header>
+    <p>
+        Every feature, scenario and step of this run is already in this page:
+        nothing on it is fetched, and no result is computed while you read it.
+        The controls below narrow the page to one status and collapse or expand
+        step detail; where scripting is unavailable they simply do nothing, and
+        the page stays fully expanded and unfiltered.
+    </p>
+    {%- if renderable_features %}
+    <div class="tqa-filter" role="group" aria-label="Filter results by status">
+        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="false">All results</button>
+        {%- for token in filter_tokens %}
+        <button type="button" class="tqa-filter-btn" data-report-filter="{{ token }}" aria-pressed="false">{{ token|capitalize }}</button>
+        {%- endfor %}
+    </div>
+    {#- These two carry the text-pill class rather than the icon class, which is
+        a considered choice and not an oversight. The icon class is built for the
+        ICON-ONLY control the element template emits beside a scenario heading -
+        a 28 by 28 box, transparent, its chevron generated content that the
+        stylesheet FLIPS from the control's own expanded state. Neither half of
+        that fits here: these act on every detail region in scope rather than on
+        one, so they carry no expanded state for the chevron to follow, and a
+        down-chevron frozen beside the words "Collapse all steps" would state
+        the opposite of what the control does. The pill class is the
+        stylesheet's text-button class, it makes both rows of page chrome read
+        as one control group, and the print rules hide it exactly as they hide
+        the icon class - so nothing is lost on paper either.
+
+        The trailing marker of this comment deliberately does NOT strip the
+        newline that follows it: stripping it would join this row's opening tag
+        onto the previous row's closing tag in the emitted source, and this
+        artifact is a document people read and diff. #}
+    <div class="tqa-filter" role="group" aria-label="Expand and collapse step detail">
+        <button type="button" class="tqa-filter-btn" data-report-toggle-all="expand">Expand all steps</button>
+        <button type="button" class="tqa-filter-btn" data-report-toggle-all="collapse">Collapse all steps</button>
+    </div>
+    {%- endif %}
+    <main>
+        {%- if renderable_features -%}
+            {%- for feature_item in feature_list %}
+        {{ feat.feature_block(feature_item, loop.index0) }}
+            {%- endfor %}
+        {%- else %}
+        <p class="tqa-empty">This run selected no feature, so the report carries no results. A tag expression that matches nothing is a legitimate outcome: every artifact is still written and the command still exits zero.</p>
+        {%- endif %}
+    </main>
+    <footer class="tqa-footer">
+        <p>This page is self-contained. The stylesheet and the behaviour script are inlined into it, every failure screenshot travels inside it as inline data, and nothing on it is fetched from a network - so it can be archived, attached to a message or opened straight from a build workspace, offline, and still read exactly as it does here.</p>
+    </footer>
+</div>
+{{ shots.lightbox_overlay() }}
+</div>
+</div>
+<script>
+{{ inline_js }}
+</script>
+</body>
+</html>
