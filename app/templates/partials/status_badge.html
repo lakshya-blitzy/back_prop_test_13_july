@@ -1,0 +1,180 @@
+{#-
+  ===========================================================================
+  partials/status_badge.html - one status token, rendered identically on each
+  of the three surfaces this project writes.
+  ===========================================================================
+
+  Two macros, both about the single concern "status". Callers import them and
+  never include this file, because the signatures below are the contract:
+
+      {% from 'partials/status_badge.html' import status_badge, status_token %}
+
+  The import is deliberately the plain form, without the calling context. No
+  partial may read an ambient template variable, and that restraint is exactly
+  what makes the output identical wherever it is rendered: every value a macro
+  needs arrives as an argument.
+
+  ---------------------------------------------------------------------------
+  MACRO 1 - status_token(status)
+  ---------------------------------------------------------------------------
+  Answers with the normalised token as text and emits no markup. This is the
+  single place status normalisation happens in the whole project. step_row.html
+  and the artifact, pretty and view template sets all call it instead of
+  re-implementing a lowercase fold of their own, so one reading of a status can
+  never disagree with another.
+
+      status   REQUIRED. Any value at all - the result model's status string,
+               a number, none, or the name of a variable the calling template
+               never defined.
+
+  The rule: coerce to text, strip the surrounding whitespace, fold to
+  lowercase, and answer with that token when it is one of the seven the result
+  model produces -
+
+      passed   failed   skipped   pending   undefined   untested   ambiguous
+
+  - and with "unknown" for anything else. So "Passed" answers "passed" and
+  " failed " answers "failed", while none, an empty string, a number, a
+  container and an undefined name all answer "unknown". The macro cannot
+  raise, and that is the point: a report is what a reader turns to when a run
+  has gone wrong, so a malformed status has to render rather than take the
+  whole page down with it.
+
+  Those seven are the enumeration app/static/css/main.css matches on, quoted
+  from it rather than chosen here. The stylesheet carries no rule for
+  "unknown", so a badge in that state resolves the neutral grey written as the
+  literal fallback of every one of its status custom properties - visibly a
+  status, and visibly not one of the seven.
+
+  Note the division of labour with the JSON writer. app/reporting/
+  cucumber_json.py owns the DATA status and folds a name it does not recognise
+  to "untested", because the Jenkins publisher parses those names and only the
+  Cucumber set means anything to it. This macro owns the PRESENTATION status
+  and folds to "unknown" instead, because a page must not claim a status it
+  never read. Applying this macro to its own answer changes nothing.
+
+  ---------------------------------------------------------------------------
+  MACRO 2 - status_badge(status, label=none, extra_classes='', title=none)
+  ---------------------------------------------------------------------------
+      status         REQUIRED. Handed straight to status_token, so every
+                     tolerance described above applies here too.
+
+      label          OPTIONAL, default none. The display text. Absent, none or
+                     blank renders the token with its first letter capitalised
+                     - Passed, Failed, Skipped, Pending, Undefined, Untested,
+                     Ambiguous, Unknown - which is the convention the
+                     reference generator uses in its own table headers. Blank
+                     falls back to that default rather than rendering an empty
+                     badge, because the text content is the accessible name
+                     and an empty one names nothing.
+
+      extra_classes  OPTIONAL, default the empty string. Further class tokens,
+                     appended after tqa-badge and separated from it by exactly
+                     one space; runs of whitespace between the caller's own
+                     tokens collapse to single spaces, and an empty value
+                     leaves no trailing space at all. This is how the pretty
+                     template set adds the reference generator's own bare
+                     status class - passed, failed, skipped, pending,
+                     undefined - which is what picks up the backgrounds the
+                     vendored generator stylesheet supplies inside the emitted
+                     report tree. No one surface's vocabulary is hard-coded
+                     into the markup; this parameter is the reason it does not
+                     have to be.
+
+      title          OPTIONAL, default none. Advisory text. The attribute is
+                     omitted entirely when the value is absent, none or blank,
+                     since an empty one is worse than none.
+
+  ---------------------------------------------------------------------------
+  THE THREE SURFACES, AND WHAT THEY FORBID
+  ---------------------------------------------------------------------------
+  This markup is rendered into three places whose asset rules do not agree:
+
+    1. The single self-contained page app/reporting/html_report.py writes to
+       the reports HTML artifact, which carries no external asset reference of
+       any kind.
+    2. The report tree app/reporting/pretty_reports.py writes, opened straight
+       from a Jenkins workspace, where every reference has to resolve inside
+       that tree.
+    3. The Flask views under view/, which extend base.html - and it is
+       base.html, never this file, that resolves the stylesheet and the
+       behaviour script for them.
+
+  So, with no exception: this partial builds no application endpoint URL,
+  references no stylesheet, behaviour script, image file or sibling page, and
+  contains no absolute or protocol-relative URL. Anything URL-shaped a caller
+  needs is passed in as text the calling template has already built; with none
+  passed in, the badge is plain text.
+
+  WHAT IT DELIBERATELY DOES NOT EMIT
+
+    - No icon markup, in any vocabulary. The icon fonts ship only inside the
+      emitted report tree and main.css declares no font face of its own, so a
+      glyph would be a blank box on two of the three surfaces. The
+      generator's own icon classes stay reachable through extra_classes.
+
+    - No behaviour-hook attribute from the namespace app/static/js/report.js
+      reads. Its filterable-and-status pairing belongs on the row that is
+      hidden as a unit - the step or scenario container, which step_row.html
+      emits it on - because hiding a filterable element hides its whole
+      subtree. A badge nested in such a row must not be independently
+      hideable and must not register a second time.
+
+    - None of the three boolean state attributes main.css reads, and none of
+      the three state classes report.js sets at run time. The stylesheet takes
+      the absence of those attributes to mean expanded, visible and closed, so
+      server output always describes the fully expanded, fully visible,
+      overlay-closed page. That is what keeps both artifacts legible with
+      scripting turned off and correct on paper.
+
+    - No widget role and no accessible-name override, and no duplicate
+      visually hidden text. The badge's own text content is its accessible
+      name; a live-region role here would have a screen reader announce a
+      static, already-finished result as though it had just changed.
+
+    - No block-level container. A span is valid in every position these three
+      surfaces put a badge in - inside the report tree's brief element, inside
+      a header cell or a data cell of tqa-table, and inline in a view's
+      scenario heading - where a block-level element would not be.
+
+  ESCAPING - this file leans on the engine's own default escaping of HTML
+  templates and never declares a value pre-escaped or trusted markup, not even
+  one that looks like a bare status word. Result data carries assertion text,
+  tracebacks and Selenium messages full of angle brackets, quotes, braces,
+  tabs and characters outside ASCII, and every one of them is escaped on the
+  way out; main.css handles the wrapping of what remains.
+
+  CLASS VOCABULARY - app/static/css/main.css, and nothing else. tqa-badge is
+  the only class this file names, and status travels as the data-tqa-status
+  attribute because the stylesheet declares no per-status badge class of its
+  own. No tqa- name is invented here.
+-#}
+
+{#- The presentation status vocabulary. Seven tokens plus the fallback, and
+    the fold that maps anything at all onto one of them. -#}
+{%- macro status_token(status) -%}
+    {#- Quoted from the data-tqa-status enumeration in app/static/css/main.css.
+        A token added to the result model has to be added there first, or the
+        badge would carry a hook the stylesheet cannot colour. -#}
+    {%- set known_tokens = ('passed', 'failed', 'skipped', 'pending', 'undefined', 'untested', 'ambiguous') -%}
+    {#- default(..., true) is what makes this total. It answers for an
+        undefined name without ever reading it - so a strict undefined policy
+        raises nothing - and folds none, the empty string and every other
+        falsy value onto the same empty candidate. |string then accepts a
+        number or a container without complaint. -#}
+    {%- set candidate = status|default('', true)|string|trim|lower -%}
+    {{- candidate if candidate in known_tokens else 'unknown' -}}
+{%- endmacro -%}
+
+{#- One status token as a badge: a single inline element, its status on the
+    attribute hook, its text content its accessible name. -#}
+{%- macro status_badge(status, label=none, extra_classes='', title=none) -%}
+    {%- set token = status_token(status) -%}
+    {#- Split and rejoin rather than trim: it normalises the caller's own
+        separators as well as the outer edges, so a class list assembled
+        across several template lines cannot land newlines in the attribute. -#}
+    {%- set extra = (extra_classes|default('', true)|string).split()|join(' ') -%}
+    {%- set caption = label|default('', true)|string|trim -%}
+    {%- set tip = title|default('', true)|string|trim -%}
+    <span class="tqa-badge{% if extra %} {{ extra }}{% endif %}" data-tqa-status="{{ token }}"{% if tip %} title="{{ tip }}"{% endif %}>{{ caption if caption else token|capitalize }}</span>
+{%- endmacro -%}

@@ -565,13 +565,19 @@
     bottom: 0;
     left: 0;
     z-index: 1000;
+    /* Column, so the caption sits BELOW the enlarged image rather than beside
+       it. Measured in Chrome with the row default: the caption became a second
+       flex item on the image's right and pushed the image 249px off centre. */
+    flex-direction: column;
     align-items: center;
     justify-content: center;
+    gap: var(--tqa-gap, 8px);
     padding: 16px;
     background-color: rgba(31, 35, 40, 0.85);
 }
 
-.tqa-lightbox[data-tqa-open] {
+.tqa-lightbox[data-tqa-open],
+.tqa-lightbox.report-lightbox-is-open {
     display: flex;
 }
 
@@ -582,6 +588,22 @@
     height: auto;
     border: 2px solid #ffffff;
     background-color: #ffffff;
+}
+
+/* The overlay caption. The screenshot partial emits this element carrying only
+   its behaviour hook, because this file declares no class for it - so it is
+   selected here through that hook, namespaced under the overlay class exactly
+   as this file's selector discipline requires. Without a rule it inherits the
+   page's dark body text and renders near-invisibly on the dark scrim: measured
+   in Chrome as rgb(31,35,40) text on rgba(31,35,40,0.85). */
+.tqa-lightbox [data-report-lightbox-caption] {
+    max-width: min(94vw, 900px);
+    margin: 0;
+    color: #ffffff;
+    font-size: 14px;
+    line-height: 1.4;
+    text-align: center;
+    overflow-wrap: anywhere;
 }
 
 .tqa-lightbox-close {
@@ -707,6 +729,40 @@
 
 [data-tqa-filtered] {
     display: none;
+}
+
+/* The same three states, in the form the script actually produces.
+   ----------------------------------------------------------------------------
+   The rules above were written against boolean state attributes carried by the
+   enclosing element. app/static/js/report.js, which is the sole owner of
+   interactivity across all three surfaces, publishes a different vocabulary: it
+   toggles its own three state classes on the region ITSELF - report-is-collapsed
+   on the collapsible region, report-is-filtered-out on the filterable row and
+   report-lightbox-is-open on the overlay - and it never writes an attribute of
+   the form above. Measured in Chrome: after a thumbnail click the overlay's
+   class became "tqa-lightbox report-lightbox-is-open" with its image source and
+   caption correctly populated, yet no rule matched, so the overlay stayed
+   display:none and the lightbox could not be opened by a reader at all. The
+   mirrors below close that gap for all three states.
+
+   The authored default is unchanged and so is the contract at the top of this
+   file: absence of BOTH forms still means expanded, visible and closed, no
+   state is ever server-rendered, and a page with scripting disabled loses
+   interactivity without losing content. */
+
+.report-is-collapsed {
+    display: none;
+}
+
+.report-is-filtered-out {
+    display: none;
+}
+
+/* The collapsed glyph, from the accessible state the script maintains on the
+   control itself, since the class above sits on the region and not on an
+   ancestor of the control. */
+.tqa-toggle[aria-expanded="false"]::before {
+    content: "\25B8";
 }
 
 /* ---- artifact index and empty state -------------------------------------- */
@@ -841,7 +897,8 @@
     .tqa-step[data-tqa-collapsed] .tqa-step-detail,
     .tqa-scenario[data-tqa-collapsed] .tqa-steps,
     .tqa-feature[data-tqa-collapsed] .tqa-scenario:not([data-tqa-filtered]),
-    .tqa-feature[data-tqa-collapsed] .tqa-background {
+    .tqa-feature[data-tqa-collapsed] .tqa-background,
+    .report-is-collapsed:not(.report-is-filtered-out) {
         display: block !important;
     }
 

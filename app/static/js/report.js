@@ -737,7 +737,23 @@
         }
 
         setClass(overlay, CLASS_LIGHTBOX_OPEN, false);
-        writeAttribute(overlay, ATTR_ARIA_HIDDEN, 'true');
+        /* The mirror is REMOVED rather than set to "true". Once the class is
+         * gone the overlay is display:none, so it is already outside the
+         * accessibility tree and a "true" here would add nothing; removing the
+         * attribute also restores exactly the state the template authored,
+         * which emits no visibility attribute at all.
+         *
+         * Writing "true" at this point is what made Chrome report "Blocked
+         * aria-hidden on an element because its descendant retained focus":
+         * the close control inside the overlay still holds focus here, and the
+         * browser refuses to hide a focused element's ancestor from assistive
+         * technology. Removing an attribute can never trip that check, so this
+         * holds on every close path - the close control, the backdrop and the
+         * Escape key alike - rather than only where focus happens to have
+         * somewhere to go back to. */
+        if (typeof overlay.removeAttribute === 'function') {
+            overlay.removeAttribute(ATTR_ARIA_HIDDEN);
+        }
 
         var image = queryOne(overlay, SEL_LIGHTBOX_IMAGE);
         if (image) {

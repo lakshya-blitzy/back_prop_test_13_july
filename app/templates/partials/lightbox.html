@@ -1,0 +1,232 @@
+{#-
+  ===========================================================================
+  partials/lightbox.html - the failure-screenshot partial.
+  ===========================================================================
+
+  One of exactly three shared partials - the status badge, the step row and
+  this one. It renders a failure screenshot that is already carried in the
+  normalized result model as base64 text, together with the overlay that
+  shows that screenshot enlarged. Screenshot presentation is its whole
+  concern; nothing else belongs in this file.
+
+  THREE SURFACES, ONE OUTPUT
+  --------------------------
+  Every macro below is rendered into all three of the port's output surfaces,
+  whose asset rules are mutually incompatible:
+
+      artifact/*.html   inlined into the single self-contained page written to
+                        the reports HTML artifact, which carries no external
+                        asset reference of any kind - the reference artifact
+                        has exactly one reference in 1,440,365 bytes, and it
+                        is an inline data URI
+      pretty/*.html     written into the generated report tree and opened
+                        straight from a Jenkins workspace over the file
+                        protocol, where every reference must resolve inside
+                        that tree
+      view/*.html       served over HTTP by the read-only viewer, which
+                        resolves its own assets in base.html and not here
+
+  Exactly one image source satisfies all three at once, so the rule is
+  absolute: THE SCREENSHOT IS ALWAYS AN INLINE DATA URI. Never a file path,
+  never a route, never a URL produced by the framework's static-asset URL
+  builder, never a remote host. The base64 payload travels inside the markup
+  and is emitted verbatim - never truncated, rewrapped or reformatted, and
+  never broken across lines inside the attribute value.
+
+  THE INPUT MODEL
+  ---------------
+  One embedding mapping, as the result model carries it:
+
+      mime_type   the attached media type; only an image type is rendered
+      data        the base64 payload, already encoded
+      name        the scenario name, used as the caption and the alt text
+
+  Capture is failure-only, happens once per scenario and happens before the
+  driver is disposed of. A capture that fails is logged and suppressed, so a
+  FAILED SCENARIO CARRYING NO EMBEDDING IS A WHOLLY NORMAL STATE: every macro
+  here renders the empty string for it - no placeholder, no "unavailable"
+  message, no empty container element and above all no broken image.
+
+  THE API - three macros, imported without ambient context:
+
+      {% from 'partials/lightbox.html' import screenshot, screenshots,
+                                              lightbox_overlay %}
+
+  screenshot(embedding, caption=none, extra_classes='', thumb_classes='')
+      embedding      REQUIRED. One embedding mapping as described above.
+      caption        Optional, defaults to none. Overrides the embedding's
+                     own name for both the alt text and the caption.
+      extra_classes  Optional, defaults to ''. Appended to the figure.
+      thumb_classes  Optional, defaults to ''. Appended to the image.
+      Renders one figure holding the screenshot at its natural size, capped
+      by the stylesheet. Renders the EMPTY STRING when the embedding is
+      absent, undefined, not a mapping, carries no non-empty data, carries no
+      mime_type, or carries a mime_type that is not an image/ type - the same
+      check the report script applies before it will open an overlay.
+      With neither a caption nor a name the figure keeps an empty alt and no
+      caption element is emitted, which marks the image decorative rather
+      than inventing text for it.
+
+  screenshots(embeddings, caption=none, extra_classes='', thumb_classes='')
+      embeddings     REQUIRED. A list of embedding mappings. May also be the
+                     scenario's own after-hook list, whose entries each carry
+                     an embeddings list: one level of nesting is flattened,
+                     so callers may pass that list straight in.
+      caption, extra_classes, thumb_classes - as above, applied to each.
+      Renders zero or more figures and nothing else: no wrapper element, so
+      an empty input leaves no node behind at all. Renders the EMPTY STRING
+      when the input is absent, undefined, a string, a mapping or not
+      iterable, and skips a malformed entry individually rather than
+      abandoning the rest.
+
+  lightbox_overlay(label=none)
+      label          Optional, defaults to none. The accessible name of the
+                     close control; a sensible default is used when omitted.
+      Renders the single overlay a page needs. CALL IT EXACTLY ONCE PER PAGE,
+      and call screenshot or screenshots as many times as there are
+      screenshots: the report script finds the one overlay for the whole
+      document and reuses it for every thumbnail.
+
+  STATE, AND WHY NONE OF IT IS SERVER-RENDERED
+  --------------------------------------------
+  The overlay ships CLOSED and the page ships fully visible. The stylesheet
+  reads the absence of its three boolean state attributes as expanded,
+  visible and closed, and the report script sets its own three runtime state
+  classes when the reader acts; this file emits neither vocabulary, so server
+  output always describes the no-scripting state and stays correct with
+  scripting disabled and on paper. Nor does this file emit any attribute that
+  would keep the overlay out of the accessibility tree or out of the rendered
+  page: the report script manages the visibility mirror itself, and a second
+  mechanism here could leave an overlay that the script opens and the browser
+  still refuses to show.
+
+  The overlay image is deliberately emitted with NO source attribute at all -
+  not a placeholder, not a single-pixel image. The script writes the source
+  when it opens the overlay, copying it from the thumbnail that was clicked,
+  and removes it again on close.
+
+  WHAT THIS PARTIAL DELIBERATELY DOES NOT OFFER
+  ---------------------------------------------
+  No enable or disable affordance for screenshots, in any form. The project
+  documentation claims screenshots can be switched on, but no setting and no
+  branch in the teardown hook ever provided one, so the claim is aspirational
+  and the configuration surface stays at its six keys. No download control,
+  no open-in-a-new-tab control and no external image host: each would add a
+  link reference and break the self-contained artifact. No icon font for the
+  close control - the vendored icon fonts reach only the generated report
+  tree and would render as an empty box in the other two surfaces - so the
+  glyph is a character reference. No inline style attribute and no embedded
+  stylesheet block: presentation belongs to main.css, which one writer
+  inlines and the other copies. No class outside the set main.css declares,
+  which is why the caption and backdrop elements carry only their behaviour
+  hooks. And none of the vendored generator's own collapse attributes: the
+  report script is the single owner of interactivity across all three
+  surfaces.
+
+  ESCAPING
+  --------
+  Jinja's automatic HTML escaping is relied on for every interpolated value,
+  and no value is ever marked as trusted markup. Scenario names carry
+  apostrophes and quotation marks, and assertion text carries angle brackets,
+  so this matters in both the alt attribute and the caption. The base64
+  payload needs no escaping by construction: its alphabet is letters,
+  digits, plus, slash and the padding sign, none of which the escaper
+  rewrites, so the payload survives a round trip byte for byte.
+
+  VOCABULARY - classes from app/static/css/main.css, behaviour hooks from
+  app/static/js/report.js, and nothing invented in either namespace:
+      tqa-shot, tqa-shot-thumb, tqa-lightbox, tqa-lightbox-img,
+      tqa-lightbox-close
+      data-report-screenshot, data-report-screenshot-name,
+      data-report-lightbox and its image, caption, close and backdrop parts
+
+  ACCESSIBILITY - a real figure and caption, a real button for the close
+  control, and alt text taken from the scenario name. The thumbnail is the
+  screenshot itself, displayed at up to the full width of its column, so the
+  overlay is a zoom convenience and never the only way to see the image: a
+  reader who cannot reach the overlay loses no content. The close control is
+  reachable and operable from the keyboard, the report script moves focus to
+  it on open and restores focus on close, and the Escape key dismisses.
+-#}
+
+{#- Macro 1: one embedding. Every guard below is an isinstance-style test,
+    never a truth test, because a strict undefined policy raises on the
+    latter - which is exactly how an omitted argument reaches this macro. -#}
+{% macro screenshot(embedding, caption=none, extra_classes='', thumb_classes='') -%}
+{%- if embedding is mapping -%}
+    {%- set media_type = embedding.get('mime_type') -%}
+    {%- set payload = embedding.get('data') -%}
+    {#- A caption argument wins over the embedding's own name; a non-string
+        value of either counts as absent, so no value can ever surface as the
+        text "None" in the rendered page. -#}
+    {%- set offered = caption if (caption is not none and caption is not undefined) else embedding.get('name') -%}
+    {%- set label = offered if offered is string else '' -%}
+    {%- set titled = label|trim != '' -%}
+    {%- set figure_class = ['tqa-shot', extra_classes if extra_classes is string else '']|map('trim')|select|join(' ') -%}
+    {%- set thumb_class = ['tqa-shot-thumb', thumb_classes if thumb_classes is string else '']|map('trim')|select|join(' ') -%}
+    {#- The media type is compared case-insensitively, mirroring the report
+        script's own prefix check, and is emitted exactly as it arrived. -#}
+    {%- if media_type is string and media_type.lower().startswith('image/') and payload is string and payload|trim != '' -%}
+<figure class="{{ figure_class }}">
+    <img class="{{ thumb_class }}"
+         src="data:{{ media_type }};base64,{{ payload }}"
+         alt="{{ label if titled else '' }}"
+         loading="lazy"
+         decoding="async"
+         data-report-screenshot
+         {%- if titled %} data-report-screenshot-name="{{ label }}"{% endif %}>
+    {%- if titled %}
+    <figcaption>{{ label }}</figcaption>
+    {%- endif %}
+</figure>
+    {%- endif -%}
+{%- endif -%}
+{%- endmacro %}
+
+{#- Macro 2: zero or more embeddings, silent on everything it cannot use. A
+    mapping is rejected rather than iterated, so passing a single hook entry
+    yields nothing instead of walking its keys. -#}
+{% macro screenshots(embeddings, caption=none, extra_classes='', thumb_classes='') -%}
+{#- Order matters, and it is load-bearing: the iterable test tries to iterate
+    its subject and only forgives a plain type error, so a strict undefined -
+    an omitted argument - raises there. Ruling it out first, while the tests
+    short-circuit, is what keeps an omitted argument silent. -#}
+{%- if embeddings is not undefined and embeddings is not none and embeddings is iterable and embeddings is not string and embeddings is not mapping -%}
+    {%- for item in embeddings -%}
+        {#- The one level of flattening: an entry that itself carries an
+            embeddings list is an after-hook entry, so its list is rendered
+            in its place. An empty list there renders nothing, which is the
+            ordinary shape of a scenario that did not fail. -#}
+        {%- set nested = item.get('embeddings') if item is mapping else none -%}
+        {%- if nested is not none and nested is not undefined and nested is iterable and nested is not string and nested is not mapping -%}
+            {%- for inner in nested -%}
+                {{- screenshot(inner, caption, extra_classes, thumb_classes) -}}
+            {%- endfor -%}
+        {%- else -%}
+            {{- screenshot(item, caption, extra_classes, thumb_classes) -}}
+        {%- endif -%}
+    {%- endfor -%}
+{%- endif -%}
+{%- endmacro %}
+
+{#- Macro 3: the one overlay per page. The container itself is the backdrop
+    in the stylesheet, and the explicit backdrop element below gives the
+    report script a precise dismissal target; neither carries a class,
+    because main.css declares none for them. -#}
+{% macro lightbox_overlay(label=none) -%}
+{%- set close_label = label if (label is string and label|trim != '') else 'Close screenshot' -%}
+<div class="tqa-lightbox"
+     data-report-lightbox
+     role="dialog"
+     aria-modal="true"
+     tabindex="-1"
+     aria-label="Screenshot viewer">
+    <div data-report-lightbox-backdrop></div>
+    <img class="tqa-lightbox-img" data-report-lightbox-image alt="">
+    <p data-report-lightbox-caption></p>
+    <button type="button"
+            class="tqa-lightbox-close"
+            data-report-lightbox-close
+            aria-label="{{ close_label }}">&times;</button>
+</div>
+{%- endmacro %}
