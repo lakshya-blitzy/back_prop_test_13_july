@@ -1,0 +1,170 @@
+{#-
+  ===========================================================================
+  base.html - layout shell for the read-only report viewer served over HTTP.
+  ===========================================================================
+
+  WHAT EXTENDS THIS FILE - exactly six templates, and no others:
+
+      index.html                 GET /
+      view/overview.html         GET /reports
+      view/feature.html          GET /reports/features/<findex>
+      view/scenario.html         GET /reports/features/<findex>/scenarios/<sindex>
+      errors/404.html            rendered by app/errors.py
+      errors/500.html            rendered by app/errors.py
+
+  WHAT MUST NEVER EXTEND THIS FILE - artifact/*.html and pretty/*.html.
+
+  The two generated HTML artifacts are separate contracts with their own page
+  sets, layouts, assets and navigation, and each is self-contained in a
+  different way. artifact/ is inlined into one page written to the reports
+  HTML artifact and carries no external asset reference at all; pretty/
+  references vendored assets by relative name inside the emitted report tree
+  and opens straight from a Jenkins workspace over file://. This shell emits
+  url_for('static', ...) URLs, which resolve only while a Flask application is
+  serving, so extending it from either of those template sets would break both
+  artifacts. Nothing here may be "unified" with them. The only markup the
+  three surfaces share is the three partials under partials/ - the status
+  badge, the step row and the screenshot lightbox - because all three render
+  one normalized result model.
+
+  BLOCK CONTRACT - exactly these four, in this order of appearance:
+
+      title      Plain text. Used TWICE: as the document title (with the
+                 project-name suffix appended outside the block) and, via
+                 self.title(), as the page's single visible h1. Keep it short
+                 and free of markup.
+      head       Optional extra head content for one page.
+      content    The page body. The only block a child must override.
+      scripts    Optional page script tags, emitted after report.js so the
+                 shared behaviour is already bound.
+
+  HEADINGS - this shell renders the page's ONE h1, in the header, from the
+  title block. An extending template must therefore NOT emit a second h1: the
+  content block starts at h2 and descends without skipping a level. That rule
+  lives here rather than in each child because it is the only way one h1 per
+  page can be guaranteed across six independently written templates.
+
+  ACTIVE NAVIGATION - an extending template may mark the current view by
+  setting active_nav at its own top level, immediately after its extends tag:
+
+      {% extends "base.html" %}
+      {% set active_nav = "reports" %}
+
+  Recognised values are "index" and "reports"; anything else, or nothing at
+  all, simply marks no link. The reader below guards with default(''), so the
+  shell renders under a strict undefined policy and for a child - an error
+  page, typically - that sets nothing. A set inside a block is too late to be
+  seen and does nothing.
+
+  ENDPOINT CONTRACT - every URL here is built with url_for, never by hand.
+  The blueprint is named "web" and carries six endpoints: web.index,
+  web.reports_overview, web.report_feature, web.report_scenario,
+  web.reports_summary and web.artifact. app/web/__init__.py fixes the same
+  names, calling the blueprint name a contract rather than a preference; this
+  file is one of the callers that makes it so. The navigation needs only the
+  three endpoints that a reader can reach directly.
+
+  CLASS VOCABULARY - app/static/css/main.css, the tqa- namespace. This shell
+  owns the page furniture only: tqa-root (the custom-property host, on the
+  body element), tqa-page, tqa-header, tqa-nav, tqa-link and tqa-footer. The
+  result-rendering classes - tqa-feature*, tqa-scenario*, tqa-step*,
+  tqa-badge, tqa-error, tqa-shot*, tqa-meta*, tqa-summary, tqa-artifact*,
+  tqa-empty and the rest - belong to the partials and the view templates.
+  Status is expressed as data-tqa-status with a lowercase value taken straight
+  from the result model: passed, failed, skipped, pending, undefined, untested
+  or ambiguous.
+
+  Two placements follow that stylesheet rather than the page order alone.
+  tqa-page is the only rule in it that supplies a maximum width, centring and
+  horizontal padding, and both tqa-header (a bordered, rounded card with a
+  bottom margin) and tqa-footer (a rule above 13px muted text, with no
+  horizontal padding of its own) are written as members of that centred
+  column - so tqa-page sits on the shell wrapper below and the region order,
+  header then main then footer, is unchanged. And tqa-header h1 is the top of
+  the stylesheet's type scale, above tqa-feature-name and tqa-scenario-name,
+  which is where the single h1 described above is rendered.
+
+  BEHAVIOUR HOOKS - app/static/js/report.js, the data-report- namespace. This
+  shell emits exactly one of them, data-report-root on the main element, so
+  filtering and expand-all resolve against a single scope per page. report.js
+  is dependency-free vanilla script guarded by one namespaced global and every
+  hook it reads is optional, so loading it on a page with no report markup -
+  the index and both error pages - is a silent no-op rather than an error.
+
+  NO STATE HOOK IS EVER SERVER-RENDERED. main.css reads the absence of
+  data-tqa-collapsed, data-tqa-filtered and data-tqa-open as expanded, visible
+  and closed, and report.js sets its own three state classes at run time.
+  Server output therefore always describes the fully expanded, fully visible,
+  lightbox-closed page, which is what keeps these views usable with scripting
+  disabled and correct on paper.
+
+  STANDING PROHIBITIONS, for this file and every template that extends it: no
+  inline script and no inline style, because behaviour lives in report.js and
+  styling in main.css; no external, protocol-relative or content-delivery-
+  network URL, because these pages must render with no network at all; never
+  mark a value as pre-escaped and never turn the automatic escaping off,
+  because result data carries assertion text, tracebacks and Selenium
+  messages full of angle brackets and quotes - multi-line text and leading
+  indentation are preserved by the pre-wrap rules in main.css instead, which
+  need no such override; no filesystem path literal, since the path module
+  under app/utils owns every one of them and any path-like string reaches a
+  template through the render context instead; and
+  nothing that starts, or appears to start, a test run - no form, no POST, no
+  button that posts - because this surface is read-only. Runs start from the
+  command line.
+
+  ACCESSIBILITY - a language declaration, landmark regions for banner,
+  navigation, main and content information, one h1 per page and a focus-
+  visible outline carried by tqa-link. No skip-navigation link is emitted:
+  main.css ships no visually-hidden utility and an inline style rule is
+  prohibited, so such a link could only be permanent visible furniture the
+  styling contract does not describe. With navigation of three links, the
+  landmark regions are what let a reader bypass it.
+-#}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}Report viewer{% endblock %} &middot; testinium-qa</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/main.css') }}">
+    {% block head %}{% endblock %}
+</head>
+{# Read once, here, so a child that sets nothing renders correctly and no
+   lookup can fail under a strict undefined policy. #}
+{% set nav_current = active_nav|default('') %}
+<body class="tqa-root">
+    <div class="tqa-page">
+        <header class="tqa-header">
+            <h1>{{ self.title() }}</h1>
+            <nav aria-label="Report views">
+                <ul class="tqa-nav">
+                    <li>
+                        <a class="tqa-link" href="{{ url_for('web.index') }}"{% if nav_current == 'index' %} aria-current="page"{% endif %}>Artifacts</a>
+                    </li>
+                    <li>
+                        <a class="tqa-link" href="{{ url_for('web.reports_overview') }}"{% if nav_current == 'reports' %} aria-current="page"{% endif %}>Report overview</a>
+                    </li>
+                    <li>
+                        <a class="tqa-link" href="{{ url_for('web.reports_summary') }}">Summary (JSON)</a>
+                    </li>
+                </ul>
+            </nav>
+        </header>
+
+        <main data-report-root>
+            {% block content %}{% endblock %}
+        </main>
+
+        <footer class="tqa-footer">
+            <p>
+                Read-only view of the report artifacts already on disk. Test runs are
+                started from the command line with <code>run-tests</code>; this viewer
+                never starts one, and never writes.
+            </p>
+        </footer>
+    </div>
+    <script src="{{ url_for('static', filename='js/report.js') }}" defer></script>
+    {% block scripts %}{% endblock %}
+</body>
+</html>
