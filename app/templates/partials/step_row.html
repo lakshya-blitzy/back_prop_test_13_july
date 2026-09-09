@@ -1,0 +1,476 @@
+{#-
+  ===========================================================================
+  partials/step_row.html - one step of a scenario or a background, with its
+  detail, rendered identically on each of the three surfaces this project
+  writes.
+  ===========================================================================
+
+  The third and largest of exactly three shared partials - the status badge,
+  the screenshot lightbox and this one. "One step" is its whole concern. It
+  composes the other two rather than restating them: the badge markup comes
+  from partials/status_badge.html and the screenshot markup from
+  partials/lightbox.html, and neither is duplicated below.
+
+      {% from 'partials/step_row.html' import step_row, step_keyword %}
+
+  The import is deliberately the plain form, without the calling context. No
+  partial may read an ambient template variable, and that restraint is what
+  makes the output identical wherever it is rendered: every value a macro
+  needs arrives as an argument.
+
+  ---------------------------------------------------------------------------
+  MACRO 1 - step_keyword(step)
+  ---------------------------------------------------------------------------
+      step   REQUIRED. The step mapping. Anything else - none, a string, a
+             number, or the name of a variable the calling template never
+             defined - answers the empty string instead of raising.
+
+  Answers the step's keyword as text with its surrounding whitespace removed,
+  and emits no markup. The result model carries the keyword with the single
+  trailing space the JVM emits - "Given ", "When ", "And ", "Then " - and
+  this macro is THE ONE PLACE in the project where that space is removed for
+  display. app/reporting/events.py appends it in one function; this removes it
+  in one macro; the two are the whole story.
+
+  It is a macro rather than a private detail because the pretty template set
+  needs the same normalised token to build the reference generator's own
+  per-keyword class name, and re-implementing the trim there is how the two
+  would drift apart. Given, When, Then, And and But all work; But never
+  occurs in this suite but is not special-cased.
+
+  ---------------------------------------------------------------------------
+  MACRO 2 - step_row(step, uid=none, extra_classes={}, filterable=true,
+                     duration_fallback=none, inline_args=false,
+                     show_location=false, embeddings=none)
+  ---------------------------------------------------------------------------
+      step               REQUIRED. The step mapping described under THE INPUT
+                         MODEL below. A step that is not a mapping - none, a
+                         string, or an undefined name - renders the EMPTY
+                         STRING and raises nothing.
+
+      uid                OPTIONAL, default none. A caller-supplied token that
+                         makes the detail region's id unique across the page.
+                         See DETERMINISM below for the derivation and for what
+                         happens when it is omitted. Any type is accepted; it
+                         is read as text.
+
+      extra_classes      OPTIONAL, default an empty mapping. Extra class
+                         tokens per slot. See SLOTS below. A plain string is
+                         also accepted and means "apply these to the step
+                         container only", which is the common case.
+
+      filterable         OPTIONAL, default true. When true the step container
+                         carries the two behaviour hooks the report script
+                         filters on, so the step is the unit the status filter
+                         hides. A caller whose scenario container is already
+                         the filter unit passes false, because hiding an
+                         element hides its whole subtree and a nested second
+                         registration would be redundant.
+
+      duration_fallback  OPTIONAL, default none. What to render when the
+                         result carries no usable duration. The default
+                         renders NO duration element at all. The pretty
+                         template set passes '0.000', because its generator
+                         fabricates a zero there; that is a per-surface
+                         convention rather than a fact about the model, which
+                         is exactly why it is a parameter and not a constant.
+
+      inline_args        OPTIONAL, default false. When true the matched
+                         arguments are spliced into the step name at their
+                         recorded offsets, each wrapped for highlighting -
+                         the reference generator's own rendering, and what the
+                         pretty template set uses. When false they are listed
+                         after the name inside the detail region instead.
+
+      show_location      OPTIONAL, default false. When true the resolved step
+                         function's location is rendered inside the detail
+                         region as plain data, in an inline element that wraps
+                         - see the class note below, since a location is one
+                         unbreakable token and overflows a narrow viewport
+                         without it. Nothing is asserted about its shape: it
+                         is a dotted path here where the original carried a
+                         method signature, and an undefined step has no
+                         location at all.
+
+      embeddings         OPTIONAL, default none. Screenshot embeddings for the
+                         detail region, handed straight to the lightbox
+                         partial. Embeddings live on the SCENARIO's after-hook
+                         list, never on a step, so the calling template
+                         decides which step - if any - carries them; passing
+                         that list in unchanged is supported.
+
+  SLOTS - the keys extra_classes may carry, each a string of class tokens
+  appended after this project's own class on that element:
+
+      step keyword name badge duration detail error args arg
+
+  A missing slot, a blank slot and a non-string slot are all "no extra
+  classes". Runs of whitespace inside a caller's value collapse to single
+  spaces, so a class list assembled across several template lines cannot land
+  a newline inside an attribute. Two slots are worth naming:
+
+      arg     goes on each highlighted argument, and is the ONLY class those
+              elements carry. The stylesheet declares no per-argument class,
+              so the pretty template set passes the vendored generator's own
+              argument class here to pick up its styling. No class name is
+              invented for it.
+
+      badge   styles the status badge, and the one sentinel in this file: the
+              value boolean false - not the string, not none, not a blank -
+              suppresses the badge entirely. The signature above is fixed, so
+              a surface that does not want a badge says so here. Rendering it
+              is the default, deliberately: the reports artifact test requires
+              every step's status to appear in the page.
+
+  RENDER-NOTHING CONDITIONS
+
+    - A step that is not a mapping renders the empty string. An EMPTY mapping
+      does render, as a step with no keyword, no name and an unknown status,
+      because silently dropping a step would misreport the run - and a report
+      is what a reader turns to precisely when a run has gone wrong.
+    - The toggle and the detail region are emitted ONLY when the detail region
+      would have content: matched arguments to list, a location to show, an
+      error message, or a screenshot. An expander controlling nothing is an
+      accessibility defect and it pollutes the artifact page, so neither
+      element appears.
+    - The duration element is omitted when the result carries no usable
+      duration and no fallback was supplied.
+    - The argument list, the location and the error block are each omitted
+      when their own value is absent, blank or unusable.
+
+  THE INPUT MODEL - measured against the reference report, not assumed. Every
+  field is optional and every one is type-tested before use:
+
+      keyword   "Given " etc, with the trailing space. Trimmed for display.
+      line      the step's line in its feature file. Feeds the detail id when
+                no uid is supplied.
+      name      the step text, already substituted for an outline row.
+      match     { location, arguments }. Both optional: an undefined step's
+                match is an empty mapping and carries neither.
+                arguments is a list of { val, offset } where val INCLUDES its
+                surrounding quotation marks and offset is a zero-based
+                character offset into name.
+      result    { status, duration, error_message }.
+                status is lower case and is normalised by the badge partial,
+                never here.
+                duration is a NANOSECOND INTEGER and is INDEPENDENTLY OPTIONAL
+                FOR EVERY STATUS - the reference carries one skipped step with
+                a duration and another without, so its presence is never
+                inferred from the status. It is rendered as seconds to three
+                decimal places, never as a bare nanosecond count, with the
+                exact integer preserved in advisory text so a test can read
+                the model value back out of the page. Zero is a real value and
+                renders; a negative, a float, a boolean and a non-number
+                render nothing.
+                error_message appears only on a failure, spans many lines, and
+                carries assertion text and a traceback.
+
+  This macro reads ONLY step.* - never a scenario's id, tags or start
+  timestamp. That is not tidiness: in the reference the eight elements are
+  four backgrounds and four scenarios interleaved, so the same background is
+  rendered before each scenario, and a background element carries none of
+  those three keys. Reading only the step is what lets one macro serve both.
+  No partial in this folder renders a timestamp either; that belongs to the
+  templates that own a scenario or a feature.
+
+  Step docstrings and step-level data tables are deliberately absent, and this
+  is a settled exclusion rather than work left undone: the suite contains
+  neither - all ten feature files were searched - and the result model carries
+  neither, so rendering them would be an addition nobody asked for. Such a key
+  arriving anyway is ignored rather than treated as an error.
+
+  DETERMINISM - the emitted structure has to be identical for identical
+  input, so the detail region's id is derived, never generated. There is no
+  unpredictable source, no unique-value generator and no counter whose value
+  depends on the order pages happen to be rendered in. The id is this
+  project's own prefix followed by the uid when one is supplied, and by the step's line
+  otherwise; characters outside letters, digits, the hyphen and the underscore
+  become hyphens, and the prefix guarantees the result is a usable id. Two
+  consequences for callers: the same step with the same uid always yields
+  byte-identical ids, and PAGE-WIDE UNIQUENESS IS THE CALLER'S JOB - a page
+  rendering a step more than once, or rendering two features whose steps share
+  line numbers, must pass a uid that distinguishes them.
+
+  THE THREE SURFACES, AND WHAT THEY FORBID
+  ----------------------------------------
+  This markup is rendered into three places whose asset rules do not agree:
+
+    1. The single self-contained page app/reporting/html_report.py writes to
+       the reports HTML artifact, which carries no external asset reference of
+       any kind - the reference artifact has exactly one reference in
+       1,440,365 bytes, and it is an inline data URI.
+    2. The report tree app/reporting/pretty_reports.py writes, opened straight
+       from a Jenkins workspace, where every reference has to resolve inside
+       that tree.
+    3. The Flask views under view/, which extend base.html - and it is
+       base.html, never this file, that resolves the stylesheet and the
+       behaviour script for them.
+
+  So, with no exception: this partial builds no application endpoint URL,
+  calls no framework URL-building helper, references no stylesheet, behaviour
+  script, image file or sibling page, and contains no absolute or
+  protocol-relative web address. Anything link-shaped a caller needs is passed
+  in as text the calling template has already built; with none passed in, the
+  step name is plain text.
+
+  NO LINK DETECTION, ANYWHERE. No automatic link-detection filter is applied
+  to any value - not the error message, not the location, not the name. This
+  is not a preference. The reference failure text contains a literal web
+  address of its own, and the reference generator renders it as plain text
+  inside a preformatted block with no anchor to it anywhere on the page.
+  Detecting it would inject a genuine external reference into the
+  self-contained artifact FROM DATA, which no reading of this template would
+  ever reveal, and the artifact test that forbids exactly that would fail.
+
+  ESCAPING - this file leans on the engine's own default escaping of HTML
+  templates for every interpolated value and never declares a value
+  pre-escaped or trusted markup. Assertion text and Selenium messages carry
+  angle brackets, quotation marks, apostrophes, braces, tabs and characters
+  outside ASCII, and every one of them is escaped on the way out. The
+  stylesheet handles the wrapping and the monospacing of what remains.
+
+  WHAT IT DELIBERATELY DOES NOT EMIT
+
+    - No icon markup, in any vocabulary. The expander glyph is supplied by the
+      stylesheet as generated content, and the icon fonts ship only inside the
+      generated report tree, so a glyph element here would be a blank box on
+      two of the three surfaces. The generator's own icon class names stay
+      reachable through extra_classes.
+
+    - None of the three boolean state attributes the stylesheet reads, and
+      none of the three state classes the report script sets at run time. The
+      stylesheet reads the absence of those attributes as expanded, visible
+      and closed, so server output always describes the fully expanded page.
+      That is what keeps both artifacts legible with scripting turned off and
+      correct on paper, and it is why the toggle is authored expanded.
+
+    - None of the vendored generator's own collapse attributes, even though
+      the reference generator uses them. The report script is the single owner
+      of interactivity across all three surfaces, and the vendored behaviour
+      script is loaded on only one of them.
+
+    - No presentation attribute on any element and no embedded stylesheet
+      block: presentation belongs to main.css, which one writer inlines and
+      the other copies.
+
+    - No class outside the set main.css declares, and no new name invented in
+      its namespace. The location is a plain inline element carrying the
+      stylesheet's own metadata-value class, and deliberately not either of the
+      two elements that would suggest themselves for a dotted path: those are
+      styled bare by the vendored stylesheets inside the generated report tree,
+      which would give the location one appearance there and another on the two
+      surfaces that never load them. A class out of main.css has no such
+      asymmetry, because main.css reaches all three - inlined into one
+      artifact, copied into the other, linked by the views. It is also what
+      makes the location WRAP: a location is a single unbreakable token, and
+      measurement at a 480px viewport showed that without that class one such
+      token pushes the whole document into horizontal overflow.
+
+  ACCESSIBILITY - a real button for the toggle, non-navigating, carrying its
+  expanded state and the id of the region it controls, and named in words
+  because its glyph is generated content and therefore has no text of its own
+  to be named by. The error message is a preformatted block, which is both
+  what the plan requires for text carrying tracebacks and what preserves its
+  many lines without any bypass of escaping. Status is never carried by colour
+  alone: the badge spells the status out in words, and the stylesheet pairs
+  each status colour with a border style and a weight so it survives greyscale
+  printing.
+
+  VOCABULARY - classes from app/static/css/main.css and behaviour hooks from
+  app/static/js/report.js, with nothing invented in either namespace:
+      tqa-step, tqa-step-keyword, tqa-step-name, tqa-step-args,
+      tqa-step-detail, tqa-duration, tqa-error, tqa-toggle, tqa-meta-value
+      data-tqa-status, data-report-filterable, data-report-status,
+      data-report-toggle, data-report-detail
+-#}
+
+{%- from 'partials/status_badge.html' import status_badge, status_token -%}
+{%- from 'partials/lightbox.html' import screenshots -%}
+
+{#- The keyword, trimmed once for the whole project. Guarded with a type test
+    rather than a truth test, because a truth test on an undefined name is
+    what raises under a strict undefined policy - and an omitted argument is
+    exactly how an undefined name arrives here. -#}
+{%- macro step_keyword(step) -%}
+    {%- set keyword = step.get('keyword') if step is mapping else none -%}
+    {{- (keyword if keyword is string else '')|trim -}}
+{%- endmacro -%}
+
+{#- One step, with its detail. Every guard below is a type test rather than a
+    truth test, for the reason given above and for a second one that is easy
+    to get wrong: a skipped or undefined step's duration is the INTEGER ZERO,
+    which is falsy, so a truth test would silently drop a duration the model
+    really carries. -#}
+{%- macro step_row(step, uid=none, extra_classes={}, filterable=true, duration_fallback=none, inline_args=false, show_location=false, embeddings=none) -%}
+{%- if step is mapping -%}
+
+    {#- ---- extra classes, one slot at a time -----------------------------
+        A mapping addresses individual slots; a plain string is shorthand for
+        the step container alone; anything else contributes nothing. Splitting
+        and rejoining each value normalises the caller's own separators as
+        well as the outer edges, so a class list assembled across several
+        template lines cannot land a newline inside an attribute. -#}
+    {%- set slots = extra_classes if extra_classes is mapping else {} -%}
+    {%- set slot_step = extra_classes if extra_classes is string else slots.get('step') -%}
+    {%- set cls_step = (slot_step if slot_step is string else '').split()|join(' ') -%}
+    {%- set cls_keyword = (slots.get('keyword') if slots.get('keyword') is string else '').split()|join(' ') -%}
+    {%- set cls_name = (slots.get('name') if slots.get('name') is string else '').split()|join(' ') -%}
+    {%- set cls_badge = (slots.get('badge') if slots.get('badge') is string else '').split()|join(' ') -%}
+    {%- set cls_duration = (slots.get('duration') if slots.get('duration') is string else '').split()|join(' ') -%}
+    {%- set cls_detail = (slots.get('detail') if slots.get('detail') is string else '').split()|join(' ') -%}
+    {%- set cls_error = (slots.get('error') if slots.get('error') is string else '').split()|join(' ') -%}
+    {%- set cls_args = (slots.get('args') if slots.get('args') is string else '').split()|join(' ') -%}
+    {%- set cls_arg = (slots.get('arg') if slots.get('arg') is string else '').split()|join(' ') -%}
+    {#- The one sentinel in this file: boolean false, tested by identity so
+        that none, a blank string and a class list all still render a badge. -#}
+    {%- set show_badge = slots.get('badge') is not false -%}
+
+    {#- ---- the model ---------------------------------------------------- -#}
+    {%- set result = step.get('result') if step.get('result') is mapping else {} -%}
+    {%- set match = step.get('match') if step.get('match') is mapping else {} -%}
+    {%- set name = step.get('name') if step.get('name') is string else '' -%}
+    {%- set keyword_text = step_keyword(step) -%}
+    {%- set status = result.get('status') -%}
+    {#- Normalisation lives in the badge partial, never here, so one reading
+        of a status can never disagree with another. -#}
+    {%- set token = status_token(status) -%}
+
+    {#- ---- duration ------------------------------------------------------
+        A nanosecond integer becomes seconds to exactly three decimal places
+        by integer division, which is what the reference generator shows for
+        every one of its steps and is stable across runs and platforms in a
+        way that floating-point division is not. Zero is a real value and
+        renders as 0.000; a boolean, a float, a negative and a non-number all
+        count as no duration. -#}
+    {%- set duration = result.get('duration') -%}
+    {%- set has_duration = duration is integer and duration is not boolean and duration >= 0 -%}
+    {%- set duration_text = ('%d.%03d'|format(duration // 1000000000, (duration % 1000000000) // 1000000)) if has_duration else '' -%}
+    {%- set fallback_text = (duration_fallback|string|trim) if (duration_fallback is string or (duration_fallback is number and duration_fallback is not boolean)) else '' -%}
+    {%- set show_duration = has_duration or fallback_text != '' -%}
+
+    {#- ---- matched arguments ---------------------------------------------
+        The list is accepted only as a real sequence that is neither a string
+        nor a mapping, since both of those would otherwise iterate into
+        nonsense. Items with no usable value are dropped individually rather
+        than abandoning the rest. -#}
+    {%- set raw_arguments = match.get('arguments') -%}
+    {%- set arguments = raw_arguments if (raw_arguments is sequence and raw_arguments is not string and raw_arguments is not mapping) else [] -%}
+    {%- set usable_args = [] -%}
+    {%- for item in arguments -%}
+        {%- if item is mapping and item.get('val') is string and item.get('val')|length > 0 -%}
+            {%- set _ = usable_args.append(item) -%}
+        {%- endif -%}
+    {%- endfor -%}
+
+    {#- Splicing highlights into the name is only correct when the offsets tile
+        the name exactly, so every one is checked before a single character is
+        emitted: a real string value, a real non-negative integer offset, in
+        ascending order, never overlapping the previous value, inside the
+        name's length, and naming the very text that stands at that position.
+        The last check is what turns a stale or mis-computed offset into a
+        clean fallback instead of a garbled name. Any failure at all sends the
+        whole step to the list rendering, which needs no offsets. -#}
+    {%- set splice = namespace(valid=(usable_args|length == arguments|length and arguments|length > 0 and name != ''), cursor=0) -%}
+    {%- for item in arguments -%}
+        {%- if splice.valid -%}
+            {%- set val = item.get('val') if item is mapping else none -%}
+            {%- set offset = item.get('offset') if item is mapping else none -%}
+            {%- if val is string and val|length > 0
+                   and offset is integer and offset is not boolean
+                   and offset >= splice.cursor
+                   and offset + (val|length) <= name|length
+                   and name[offset:offset + (val|length)] == val -%}
+                {%- set splice.cursor = offset + (val|length) -%}
+            {%- else -%}
+                {%- set splice.valid = false -%}
+            {%- endif -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {%- set use_inline = inline_args and splice.valid -%}
+    {%- set show_args_block = (not use_inline) and usable_args|length > 0 -%}
+
+    {#- ---- location, error and screenshots ------------------------------- -#}
+    {%- set location = match.get('location') -%}
+    {%- set location_text = (location if location is string else '')|trim -%}
+    {%- set show_location_block = show_location and location_text != '' -%}
+    {%- set error_message = result.get('error_message') -%}
+    {#- Rendered verbatim, never trimmed: the line endings and the leading
+        indentation of a traceback are part of what a reader needs. -#}
+    {%- set error_text = error_message if error_message is string else '' -%}
+    {%- set show_error = error_text|trim != '' -%}
+    {#- Called once, and its own emptiness is the test. A failed scenario
+        carrying no screenshot is a wholly normal state, because a capture
+        that fails is logged and suppressed. -#}
+    {%- set shots = screenshots(embeddings) -%}
+    {%- set show_shots = shots|trim != '' -%}
+    {%- set has_detail = show_args_block or show_location_block or show_error or show_shots -%}
+
+    {#- ---- the detail region's id ----------------------------------------
+        Derived, never generated, so identical input yields identical output.
+        The prefix guarantees the result starts with a letter and is therefore
+        usable as an id whatever the caller supplied. -#}
+    {%- set line = step.get('line') -%}
+    {%- set uid_source = (uid|string) if (uid is not undefined and uid is not none) else ('line-' ~ (line|string if (line is integer and line is not boolean) else 'x')) -%}
+    {%- set id_chars = namespace(text='') -%}
+    {%- set id_alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_' -%}
+    {%- for character in uid_source -%}
+        {%- set id_chars.text = id_chars.text ~ (character if character in id_alphabet else '-') -%}
+    {%- endfor -%}
+    {%- set detail_id = 'tqa-step-detail-' ~ (id_chars.text if id_chars.text else 'x') -%}
+
+    {#- The toggle's glyph is generated content and so has no text of its own
+        to be named by; these words are its accessible name. -#}
+    {%- set step_label = (keyword_text ~ ' ' ~ name)|trim -%}
+    {%- set toggle_label = ('Toggle detail for step: ' ~ step_label) if step_label != '' else 'Toggle step detail' -%}
+
+<div class="tqa-step{% if cls_step %} {{ cls_step }}{% endif %}" data-tqa-status="{{ token }}"{% if filterable %} data-report-filterable data-report-status="{{ token }}"{% endif %}>
+    <span class="tqa-step-keyword{% if cls_keyword %} {{ cls_keyword }}{% endif %}">{{ keyword_text }}</span>
+    <span class="tqa-step-name{% if cls_name %} {{ cls_name }}{% endif %}">
+        {#- Sliced, never search-and-replaced: a value such as "2" occurs more
+            than once in its own step name, so replacement would corrupt it.
+            The text emitted between and inside the highlights is the name's
+            own, which is what makes the rendered name byte-identical to the
+            model's however the highlights fall. -#}
+        {%- if use_inline -%}
+            {%- set cursor = namespace(at=0) -%}
+            {%- for item in arguments -%}
+                {{- name[cursor.at:item.get('offset')] -}}
+                <span{% if cls_arg %} class="{{ cls_arg }}"{% endif %}>{{ name[item.get('offset'):item.get('offset') + (item.get('val')|length)] }}</span>
+                {%- set cursor.at = item.get('offset') + (item.get('val')|length) -%}
+            {%- endfor -%}
+            {{- name[cursor.at:] -}}
+        {%- else -%}
+            {{- name -}}
+        {%- endif -%}
+    </span>
+    {%- if show_badge %}
+    {{ status_badge(status, extra_classes=cls_badge) }}
+    {%- endif -%}
+    {%- if show_duration %}
+    <span class="tqa-duration{% if cls_duration %} {{ cls_duration }}{% endif %}"{% if has_duration %} title="{{ duration }}ns"{% endif %}>{{ duration_text if has_duration else fallback_text }}</span>
+    {%- endif -%}
+    {%- if has_detail %}
+    <button type="button"
+            class="tqa-toggle"
+            data-report-toggle="{{ detail_id }}"
+            aria-controls="{{ detail_id }}"
+            aria-expanded="true"
+            aria-label="{{ toggle_label }}"></button>
+    <div id="{{ detail_id }}" class="tqa-step-detail{% if cls_detail %} {{ cls_detail }}{% endif %}" data-report-detail>
+        {%- if show_args_block %}
+        <span class="tqa-step-args{% if cls_args %} {{ cls_args }}{% endif %}">{% for item in usable_args %}{% if not loop.first %} {% endif %}<span{% if cls_arg %} class="{{ cls_arg }}"{% endif %}>{{ item.get('val') }}</span>{% endfor %}</span>
+        {%- endif -%}
+        {%- if show_location_block %}
+        <span class="tqa-meta-value">{{ location_text }}</span>
+        {%- endif -%}
+        {%- if show_error %}
+        <pre class="tqa-error{% if cls_error %} {{ cls_error }}{% endif %}">{{ error_text }}</pre>
+        {%- endif -%}
+        {%- if show_shots %}
+        {{ shots }}
+        {%- endif %}
+    </div>
+    {%- endif %}
+</div>
+{%- endif -%}
+{%- endmacro -%}

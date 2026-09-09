@@ -1,0 +1,343 @@
+{#-
+  ---------------------------------------------------------------------------
+  pretty/_macros.html - the single owner of duration, count-cell, percentage,
+  status-label and timestamp formatting for the emitted report tree.
+  ---------------------------------------------------------------------------
+
+  A macro-only template. It renders no page, is never rendered standalone and
+  is never a target of app/reporting/pretty_reports.py, which renders only the
+  six page templates in this folder - overview_features, overview_failures,
+  overview_steps, overview_tags, feature and tag. The underscore prefix is the
+  folder's convention for a helper.
+
+  Consumers import it; they never include it:
+
+      {% import 'pretty/_macros.html' as fmt %}
+
+  and then call fmt.duration_cell(...), fmt.count_cell(...) and the rest. The
+  plain import form is deliberate. No macro here reads an ambient template
+  variable - every value a macro needs arrives as an argument - and that
+  restraint is what lets the same call render identically from a page template,
+  from _stats_table.html and from _element_tree.html.
+
+  WHY THIS FILE EXISTS
+
+  The duration rule below has two structurally different consumers: the sorted
+  duration cell in a statistics table, which carries the raw nanosecond count
+  on a sort attribute, and the inline duration span in the element tree, which
+  carries no such attribute. A report whose table disagrees with its own tree
+  is wrong in a way no reader can diagnose, so the rule lives in exactly one
+  place. This is the same discipline app/utils/paths.py applies to artifact
+  paths and app/templates/partials/status_badge.html applies to status
+  normalisation.
+
+  ---------------------------------------------------------------------------
+  THE DURATION RULE - MEASURED, NOT DOCUMENTED
+  ---------------------------------------------------------------------------
+  Every pair below was read out of the committed report tree at the pinned
+  reference revision. The four detail pages are free of merge markers and are
+  the trustworthy source; the overview pages splice two different runs, so
+  their structure is readable but their arithmetic is not.
+
+      nanoseconds     rendered
+      0               0.000
+      1000000         0.001
+      67000000        0.067
+      85000000        0.085
+      1648750000      1.648
+      5668000000      5.668
+      9533750000      9.533
+      15841000000     15.841
+      20400000000     20.400
+      24654000000     24.654
+      62051000000     1:2.051
+      100186000000    1:40.186
+
+  Three rules follow, each with its proof in that table:
+
+    1. MILLISECONDS TRUNCATE. They never round. 1648750000 ns is 1.64875 s and
+       renders 1.648, not 1.649; 9533750000 ns is 9.53375 s and renders 9.533,
+       not 9.534. Two independent witnesses, so this is the rule and not an
+       artefact of one sample. The floor division below is what implements it,
+       and it must not be "improved" into rounding.
+
+    2. UNDER ONE MINUTE - S.mmm. Exactly three decimal places always, and no
+       padding on the seconds: 0.001, 0.067, 20.400.
+
+    3. AT OR OVER ONE MINUTE - M:S.mmm, and the seconds field is NOT padded.
+       62051000000 renders 1:2.051, not 1:02.051. This is unusual, it is
+       measured twice over, and it is the single easiest thing in this file to
+       get wrong.
+
+  Note the asymmetry with percentages, which DO round: 2 of 19 steps renders
+  10.53% in the reference footer, where truncation would give 10.52%. Duration
+  truncates, percentage rounds. Neither is a typo and they must not be
+  unified.
+
+  An hours-scale value extends the same pattern as H:MM:SS.mmm, with minutes
+  and seconds padded to two digits because a bare colon-separated triple is
+  ambiguous otherwise. That branch is DERIVED, NOT MEASURED - the reference
+  suite contains no run of an hour, so no sample pins it - and it should be
+  confirmed against a regenerated clean baseline if one is ever produced.
+
+  ---------------------------------------------------------------------------
+  WHICH FORMS CARRY THE SORT ATTRIBUTE, AND WHICH MUST NOT
+  ---------------------------------------------------------------------------
+  The raw nanosecond count travels on the data-value attribute of a statistics
+  cell, and only there. The vendored table-sorting script reads that attribute
+  instead of the cell text, which is the only reason 1:40.186 sorts above
+  24.654 rather than below it lexically. Three forms, three different answers:
+
+    duration_cell        carries data-value with the RAW nanosecond integer,
+                         never the human string.
+    duration_span        carries NO data-value. Measured: 27 inline duration
+                         spans in the reference feature page, not one with the
+                         attribute. The difference is intentional in the
+                         generator and is not tidied up here.
+    duration_total_cell  carries NO data-value, because a footer total is not
+                         a sortable row. It is a separate macro rather than a
+                         flag on duration_cell so that emitting the attribute
+                         there is not a mistake a caller can make - the string
+                         does not appear in it.
+
+  ---------------------------------------------------------------------------
+  THE MACROS
+  ---------------------------------------------------------------------------
+    duration_value(ns)
+        The canonical nanosecond count as text, or the empty string when there
+        is no usable duration. This is the coercion every other duration macro
+        shares, exported because duration_cell's sort attribute is exactly its
+        answer and because a test can then pin the coercion on its own.
+
+    duration_text(ns)
+        The human duration per the three rules above. The empty string when ns
+        is absent or none - not 0.000, which is a real and different reading.
+        A step that was skipped may legitimately carry no duration at all: in
+        the reference result set three steps are skipped and only one of them
+        has the key, so both shapes reach this macro and neither may raise.
+
+    duration_cell(ns, extra_classes='')
+        The sortable statistics cell. Omits the sort attribute entirely, rather
+        than emitting an empty one, when there is no duration.
+
+    duration_span(ns)
+        The inline duration in the element tree.
+
+    duration_total_cell(ns, extra_classes='')
+        The footer total.
+
+    count_cell(value, status_class='')
+        A numeric statistics cell. The status class is applied ONLY when the
+        count is non-zero: the reference emits a bare cell for a zero, fourteen
+        times over, so a coloured zero would be a visible parity break. A blank
+        status class also yields a bare cell, and none or absent counts as
+        zero.
+
+    total_cell(value)
+        The Total column, which always carries its class - including for zero,
+        where count_cell deliberately does not.
+
+    percent_text(part, whole)
+        A percentage to exactly two decimals, rounded. A zero or missing whole
+        answers 0.00% rather than failing: the reference footer carries 0.00%
+        cells, and a report is what a reader turns to when a run has gone
+        wrong, so arithmetic on an empty set must render rather than take the
+        page down.
+
+    status_label(status)
+        The capitalised label only - Passed, Failed, Skipped, Pending,
+        Undefined, and Untested, Ambiguous or Unknown for the tokens the
+        generator's own palette does not cover. It returns text and not a cell
+        because the reference puts the same label in cells whose class varies,
+        so the caller owns the cell and its class.
+
+    timestamp_text(value)
+        A scenario start timestamp, rendered exactly as the result model
+        carries it. The empty string when absent: a Background element carries
+        no start timestamp at all, along with no id and no tags.
+
+  STATUS NORMALISATION IS BORROWED, NEVER REIMPLEMENTED. status_label folds its
+  argument with status_token from partials/status_badge.html, which that file
+  documents as the single place normalisation happens project-wide. A second
+  fold here would be a second answer to the same question.
+
+  One mechanical consequence, so no sibling loses time to it: a name this file
+  imports is NOT re-exported through its own module namespace. Reaching for
+  status_token through this file's import alias fails; a consumer that needs
+  the token itself imports it straight from partials/status_badge.html, which
+  is the form that file already documents.
+
+  THE BUILD DATE IS NOT FORMATTED HERE. _layout.html receives it already
+  rendered from app/reporting/pretty_reports.py, which keeps timezone and
+  locale decisions in Python where they can be tested, rather than in a
+  template.
+
+  ---------------------------------------------------------------------------
+  CONSTRAINTS THIS FILE HOLDS TO
+  ---------------------------------------------------------------------------
+    - It formats values and nothing else. It contains no path, no file name,
+      no link and no application endpoint lookup, because these pages are
+      written to disk and opened from a file path or a build workspace where
+      an application route cannot resolve. Every name and destination the
+      report tree links to is a value its caller passes in, owned by
+      app/reporting/pretty_reports.py.
+
+    - It declares no value pre-trusted and marks no output as ready-made
+      markup, leaning on the engine's own escaping of HTML templates instead.
+      The reference generator escapes its own output too - quotes, angle
+      brackets and symbol entities all appear escaped in its pages - and the
+      values that reach these macros neighbour assertion text and step
+      arguments that must stay escaped.
+
+    - Every optional input is reached defensively, so the file renders under a
+      strict undefined policy. Note that the boolean form of the default
+      filter is deliberately NOT used on a numeric input: it treats zero as
+      absent, and zero is a measured duration that renders 0.000 and a
+      measured count that renders a bare cell. Absence is tested for
+      explicitly instead.
+
+    - It emits none of the boolean state attributes app/static/css/main.css
+      reads and none of the run-time state classes app/static/js/report.js
+      sets. The stylesheet takes their absence to mean expanded, visible and
+      closed, so server output always describes a fully expanded, fully
+      visible page - which is what keeps the emitted tree legible with
+      scripting off and correct on paper.
+
+    - It introduces no component library. The Bootstrap, jQuery, chart,
+      table-sorting, date and icon-font files inside the emitted tree are the
+      reference generator's own output, not a design system this port adopts,
+      so the only class names here are the ones measured in that output:
+      duration, lead-duration, total, and the bare status words.
+
+  CLASS VOCABULARY - the vendored generator stylesheet, and nothing else. It
+  declares the five status words passed, failed, skipped, pending and
+  undefined, plus duration, lead-duration and total. It carries no rule for
+  untested, ambiguous or unknown, so a label in one of those states renders
+  uncoloured inside the emitted tree; the port's own stylesheet covers them on
+  the surfaces it controls. No class is invented here.
+-#}
+
+{#- Status normalisation, borrowed from its single owner. -#}
+{%- from 'partials/status_badge.html' import status_token -%}
+
+
+{#- The shared coercion: answers with the canonical nanosecond count as text,
+    or with the empty string when the argument is no usable duration at all.
+
+    Ordering matters. The default filter is applied BEFORE the numeric one,
+    because coercing an undefined name directly would raise under a strict
+    undefined policy; applied first, the name is never read. The plain default
+    form is used rather than its boolean form so that a genuine zero survives.
+    A single test then rejects everything unusable at once - a non-numeric
+    string, a container, and a negative count, which no run produces and which
+    would otherwise render as a malformed negative field. -#}
+{%- macro duration_value(ns) -%}
+    {%- set raw = ns|default(none) -%}
+    {%- if raw is not none -%}
+        {%- set nanos = raw|int(-1) -%}
+        {%- if nanos >= 0 -%}{{- nanos -}}{%- endif -%}
+    {%- endif -%}
+{%- endmacro -%}
+
+
+{#- The human duration. Floor division on the millisecond count is the
+    truncation rule; every field but the milliseconds is left unpadded below
+    one hour, exactly as measured. -#}
+{%- macro duration_text(ns) -%}
+    {%- set value = duration_value(ns) -%}
+    {#- The empty string is falsy and the string "0" is not, so a zero
+        duration renders while an absent one stays empty. -#}
+    {%- if value -%}
+        {%- set total_ms = value|int // 1000000 -%}
+        {%- set millis = total_ms % 1000 -%}
+        {%- set total_seconds = total_ms // 1000 -%}
+        {%- set seconds = total_seconds % 60 -%}
+        {%- set total_minutes = total_seconds // 60 -%}
+        {%- set minutes = total_minutes % 60 -%}
+        {%- set hours = total_minutes // 60 -%}
+        {%- if hours -%}
+            {#- DERIVED, NOT MEASURED: no reference sample reaches an hour. -#}
+            {{- hours }}:{{ '%02d'|format(minutes) }}:{{ '%02d'|format(seconds) }}.{{ '%03d'|format(millis) -}}
+        {%- elif total_minutes -%}
+            {#- Seconds unpadded: 62051000000 renders 1:2.051, not 1:02.051. -#}
+            {{- total_minutes }}:{{ seconds }}.{{ '%03d'|format(millis) -}}
+        {%- else -%}
+            {{- seconds }}.{{ '%03d'|format(millis) -}}
+        {%- endif -%}
+    {%- endif -%}
+{%- endmacro -%}
+
+
+{#- The sortable statistics cell. The sort attribute carries the raw count and
+    is omitted altogether when there is none, since an empty one would sort as
+    a value rather than as a gap. -#}
+{%- macro duration_cell(ns, extra_classes='') -%}
+    {%- set value = duration_value(ns) -%}
+    {%- set extra = (extra_classes|default('', true)|string).split()|join(' ') -%}
+    <td class="duration{% if extra %} {{ extra }}{% endif %}"{% if value %} data-value="{{ value }}"{% endif %}>{{ duration_text(ns) }}</td>
+{%- endmacro -%}
+
+
+{#- The inline duration in the element tree. No sort attribute: measured
+    absent on all 27 occurrences in the reference feature page. -#}
+{%- macro duration_span(ns) -%}
+    <span class="lead-duration duration">{{ duration_text(ns) }}</span>
+{%- endmacro -%}
+
+
+{#- The footer total. A footer row is not sorted, so no sort attribute exists
+    in this macro to emit by accident. -#}
+{%- macro duration_total_cell(ns, extra_classes='') -%}
+    {%- set extra = (extra_classes|default('', true)|string).split()|join(' ') -%}
+    <td class="duration{% if extra %} {{ extra }}{% endif %}">{{ duration_text(ns) }}</td>
+{%- endmacro -%}
+
+
+{#- A numeric statistics cell, classed only when it has something to report.
+    The count is coerced to an integer so that a missing or malformed value
+    renders as 0 rather than as the word for absence. -#}
+{%- macro count_cell(value, status_class='') -%}
+    {%- set raw = value|default(none) -%}
+    {%- set count = 0 if raw is none else raw|int(0) -%}
+    {%- set token = (status_class|default('', true)|string).split()|join(' ') -%}
+    <td{% if count and token %} class="{{ token }}"{% endif %}>{{ count }}</td>
+{%- endmacro -%}
+
+
+{#- The Total column, always classed - including for zero, which is where it
+    parts company with count_cell. -#}
+{%- macro total_cell(value) -%}
+    {%- set raw = value|default(none) -%}
+    {%- set count = 0 if raw is none else raw|int(0) -%}
+    <td class="total">{{ count }}</td>
+{%- endmacro -%}
+
+
+{#- A percentage to two decimals, ROUNDED - the one place in this file that
+    rounds. An empty or missing whole answers 0.00% instead of dividing. -#}
+{%- macro percent_text(part, whole) -%}
+    {%- set raw_part = part|default(none) -%}
+    {%- set raw_whole = whole|default(none) -%}
+    {%- set numerator = 0.0 if raw_part is none else raw_part|float(0.0) -%}
+    {%- set denominator = 0.0 if raw_whole is none else raw_whole|float(0.0) -%}
+    {%- if denominator > 0.0 -%}
+        {{- '%.2f'|format(numerator * 100.0 / denominator) ~ '%' -}}
+    {%- else -%}
+        {{- '0.00%' -}}
+    {%- endif -%}
+{%- endmacro -%}
+
+
+{#- The capitalised status label, text only, over the borrowed fold. -#}
+{%- macro status_label(status) -%}
+    {{- status_token(status)|capitalize -}}
+{%- endmacro -%}
+
+
+{#- A scenario start timestamp, exactly as the result model carries it. The
+    model's form is already the one the reference emits, so nothing is
+    reformatted and nothing is lost; absence renders as nothing at all. -#}
+{%- macro timestamp_text(value) -%}
+    {%- set raw = value|default(none) -%}
+    {%- if raw is not none -%}{{- raw|string|trim -}}{%- endif -%}
+{%- endmacro -%}

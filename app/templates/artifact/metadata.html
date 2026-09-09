@@ -1,0 +1,292 @@
+{#-
+  ---------------------------------------------------------------------------
+  artifact/metadata.html - the page-header metadata block of the single,
+  self-contained HTML report artifact.
+  ---------------------------------------------------------------------------
+  Dividers here are dash rules throughout, deliberately: a run of equals signs
+  is the middle marker of an unresolved merge, the committed reference report
+  carries such a block, and no token that a marker scan looks for belongs in a
+  file this project writes - not even inside a comment the engine discards.
+
+  WHICH ARTIFACT, AND WHICH GENERATOR. This file belongs to the first of the
+  project's two HTML contracts and the two are never collapsed into one.
+  cucumber-java 7.2.3 (pom.xml, retained as historical reference) pulls
+  html-formatter 17.0.0, which produced target/cucumber-reports.html - one
+  self-contained page, carrying no external asset reference of any kind. That
+  page is what app/reporting/html_report.py writes and what the templates in
+  this folder describe. The report tree under target/cucumber/ comes from a
+  different generator - cucumber-reporting 5.6.1 over Velocity - and has its
+  own page set, layout, assets and navigation in app/templates/pretty/.
+  Nothing here is shared with that folder except the partials named below.
+
+  WHAT IT RENDERS. Two halves of the report header, in this order:
+
+    1. the run's provenance - what produced the report, on what runtime, on
+       what machine, when it was generated and when the run started;
+    2. the run's tally - how many features, scenarios and steps there were and
+       how they came out, with the earliest scenario start as the anchor.
+
+  Both are read straight from the normalised result model. This template
+  computes nothing: it counts nothing, derives no status, formats no timestamp
+  and holds no path literal. Every number and every string arrives in the two
+  arguments below, already computed by the writer that owns them.
+
+  ---------------------------------------------------------------------------
+  THE MACRO, AND THE CONTEXT CONTRACT IT FIXES
+  ---------------------------------------------------------------------------
+      {% from "artifact/metadata.html" import metadata_block %}
+      {{ metadata_block(metadata, summary) }}
+
+  metadata   A mapping. The vocabulary is the one measured from the reference
+             artifact's own payload - protocolVersion, implementation{name,
+             version}, runtime{name,version}, os{name}, cpu{name} - carrying
+             this port's values (behave, CPython, the host platform) in place
+             of the JVM's, which is the same four-key vocabulary
+             app/reporting/events.py fixes and documents against this file.
+             Two run-level timestamps join them, both in the model's own
+             format: generated_at, when the document was written, and
+             started_at, the earliest scenario start.
+
+  summary    A mapping of three count groups plus the earliest start:
+
+                 {"features":  {"total": 4, "passed": 3, "failed": 1},
+                  "scenarios": {"total": 10, "passed": 6, "failed": 2,
+                                "undefined": 1, "skipped": 1},
+                  "steps":     {"total": 30, "passed": 24, ...},
+                  "started_at": "2022-09-07T13:37:26.297Z"}
+
+             Counts of features, scenarios and steps by status plus the run's
+             earliest start timestamp - deliberately the same shape the
+             summary route answers with, because the artifacts and the HTTP
+             views read one normalised model precisely so that no view can
+             contradict an artifact. A group may also be a bare number, read
+             as that group's total. start_timestamp is accepted as a spelling
+             of started_at. Every status key present is rendered, in the fixed
+             order below; a status the writer did not count is simply absent,
+             and a key outside the model's vocabulary is still rendered - in
+             sorted position, in the neutral unknown state - because a count
+             that reaches this template is never silently dropped.
+
+  extra_classes  Optional, a string, default empty. Further class tokens for
+             the block's single root element. Runs of whitespace collapse and
+             an empty value leaves no class attribute at all.
+
+  Both mappings are optional in every part. A missing argument, a null, a
+  non-mapping, a sparse mapping, a blank value or a count that is not a number
+  renders as though that item were absent, so this file cannot raise under a
+  strict undefined policy - which the tests enable - and cannot print the word
+  None into a report. A run that selected no scenario at all is a legitimate
+  outcome that still writes every artifact, so a zero tally renders as a
+  deliberate empty state rather than as a gap.
+
+  ---------------------------------------------------------------------------
+  STATUS, AND WHERE IT IS DECIDED
+  ---------------------------------------------------------------------------
+  Never here. partials/status_badge.html is the single place a status is
+  normalised in this project, so every value that lands in a data-tqa-status
+  attribute goes through status_token first - no lowercase fold, no mapping and
+  no derivation of a status is written in this file. The partial is imported
+  without the calling context, which is what keeps its output identical on
+  every surface it renders into. Its status_badge macro is deliberately not
+  called here: a tqa-count is itself a status-coloured container in the
+  stylesheet, and nesting a badge inside one would render a pill inside a pill
+  and state the same status twice.
+
+  Colour is never the sole carrier of meaning: every coloured count states its
+  group and its status in words, so the block reads the same in greyscale, on
+  paper and to a screen reader. That holds for an unrecognised key too - it
+  keeps its own spelling, which is the informative part, and gains the state
+  it was folded to in parentheses whenever the two differ, so a count reading
+  "Steps bogus (unknown)" says in text exactly what its neutral tint says in
+  colour. A key that differs only in case, folding onto a state it already
+  spells, gains nothing and stays as it was written. The stylesheet pairs each
+  status with a border style and a weight for the same reason, and it owns
+  every colour - this file emits the attribute hook and not one colour of its
+  own. Its print rules drop the tints and set one weight for every count, so
+  the words are what carry a status onto paper.
+
+  ORDERING is fixed rather than sorted: passed, failed, skipped, pending,
+  undefined, untested, ambiguous, unknown, with any unrecognised key after
+  them in sorted position - sorted case-sensitively, so that two keys
+  differing only in case cannot fall back on the order the writer happened to
+  insert them in. Identical input therefore yields identical structure,
+  which is the determinism the report contract requires. The
+  alphabetical sorting configured in the CI publisher is a display option of
+  that publisher and imposes nothing on the artifacts, so nothing is sorted on
+  its account.
+
+  ---------------------------------------------------------------------------
+  CLASS VOCABULARY - app/static/css/main.css, and nothing else
+  ---------------------------------------------------------------------------
+  tqa-meta and tqa-meta-item for the provenance grid, tqa-meta-label and
+  tqa-meta-value for the pair inside each item, tqa-summary and tqa-count for
+  the tally, tqa-timestamp for a time, tqa-empty for the empty state. No name
+  is invented: the stylesheet carries no selector outside that namespace, so an
+  invented class would render unstyled and silently.
+
+  Two markup choices follow that stylesheet rather than convention. The
+  provenance grid is a list, not a description list: tqa-meta-item is declared
+  as a flex container, which makes each item a flex box rather than a list item
+  and so generates no marker, while tqa-meta's own padding replaces the
+  browser's list indent - whereas a dd would keep its 40px browser margin,
+  which no rule in the stylesheet resets and which this file may not add. And
+  the count itself sits in a b element because the stylesheet sizes exactly
+  that element inside tqa-count and gives it tabular figures, so the digits of
+  adjacent counts line up.
+
+  WHITESPACE is cosmetic here and the block is written to tolerate whichever
+  trim settings the writer's engine carries: no rendered element depends on a
+  text node between two tags. The stylesheet separates a count from its label
+  with a gap on the flex container rather than with a space in the markup,
+  precisely because a whitespace-only text node between flex or grid items is
+  not rendered at all. So the structure is identical in either mode; only the
+  indentation of the emitted source differs.
+
+  TIMESTAMPS are rendered exactly as the model carries them - millisecond
+  precision, a literal trailing Z - as the machine-readable value of a time
+  element and as its text. Nothing is re-parsed, reformatted or localised
+  here, and no date library is reachable from this page.
+
+  ---------------------------------------------------------------------------
+  PROHIBITIONS, ALL OF THEM HONOURED
+  ---------------------------------------------------------------------------
+  This block is inlined into a page that must be readable from a filesystem
+  with no network at all, so: no absolute, protocol-relative or content-
+  delivery-network URL; no reference to a stylesheet, script, image, font or
+  sibling page; no application endpoint URL, because this page is written to
+  disk rather than served; and no icon glyph, because the icon fonts ship only
+  inside the other generator's tree and are unreachable from here. The one
+  style element and the scripts of the finished page belong to report.html,
+  so this file contains no inline style and no script of its own, and it
+  inherits no shell template - the page shell is not this block's to own.
+
+  Automatic escaping stays on and nothing is ever declared pre-escaped:
+  result data carries assertion text, tracebacks and Selenium messages full of
+  angle brackets and quotes, and the stylesheet handles the wrapping of what
+  remains. No behaviour hook from the report script's namespace is emitted -
+  the filterable containers and the page-level filter and expand-all controls
+  belong to the element, feature and report templates - and none of the three
+  state attributes the stylesheet reads is emitted either, since their absence
+  is what means expanded, visible and closed. Server output therefore always
+  describes the fully expanded, fully visible page, which is how this
+  single-file artifact is normally read.
+-#}
+{% import "partials/status_badge.html" as badge %}
+
+{%- macro metadata_block(metadata, summary, extra_classes='') -%}
+    {#- Both arguments are made total before anything reads them: the mapping
+        test answers false for an undefined name, a null and a non-mapping
+        alike, without ever reading the value, so a lookup below cannot fail
+        however the caller was written. -#}
+    {%- set meta = metadata if metadata is mapping else {} -%}
+    {%- set tally = summary if summary is mapping else {} -%}
+    {%- set root_classes = (extra_classes|default('', true)|string).split()|join(' ') -%}
+
+    {#- Provenance. Each nested object is guarded the same way, and a probe
+        that yielded nothing arrives as an empty string, so name and version
+        are joined only over the parts that are actually there. -#}
+    {%- set implementation = meta.get('implementation') if meta.get('implementation') is mapping else {} -%}
+    {%- set runtime = meta.get('runtime') if meta.get('runtime') is mapping else {} -%}
+    {%- set operating_system = meta.get('os') if meta.get('os') is mapping else {} -%}
+    {%- set processor = meta.get('cpu') if meta.get('cpu') is mapping else {} -%}
+    {%- set candidate_rows = [
+        {'label': 'Protocol version',
+         'value': (meta.get('protocolVersion') or meta.get('protocol_version'))|default('', true)|string|trim,
+         'time': false},
+        {'label': 'Implementation',
+         'value': [implementation.get('name')|default('', true)|string|trim,
+                   implementation.get('version')|default('', true)|string|trim]|select|join(' '),
+         'time': false},
+        {'label': 'Runtime',
+         'value': [runtime.get('name')|default('', true)|string|trim,
+                   runtime.get('version')|default('', true)|string|trim]|select|join(' '),
+         'time': false},
+        {'label': 'Operating system',
+         'value': operating_system.get('name')|default('', true)|string|trim,
+         'time': false},
+        {'label': 'CPU',
+         'value': processor.get('name')|default('', true)|string|trim,
+         'time': false},
+        {'label': 'Report generated',
+         'value': meta.get('generated_at')|default('', true)|string|trim,
+         'time': true},
+        {'label': 'Run started',
+         'value': meta.get('started_at')|default('', true)|string|trim,
+         'time': true}
+    ] -%}
+    {#- Filtering on the value is what guarantees no empty descriptor row: a
+        row survives only when it has something to describe. -#}
+    {%- set rows = candidate_rows|selectattr('value')|list -%}
+
+    {#- The tally. A group is a mapping of counts, or a bare number read as
+        that group's total; anything else counts as absent. -#}
+    {%- set features_given = tally.get('features') -%}
+    {%- set scenarios_given = tally.get('scenarios') -%}
+    {%- set steps_given = tally.get('steps') -%}
+    {%- set feature_counts = features_given if features_given is mapping else ({'total': features_given} if features_given is number and features_given is not boolean else {}) -%}
+    {%- set scenario_counts = scenarios_given if scenarios_given is mapping else ({'total': scenarios_given} if scenarios_given is number and scenarios_given is not boolean else {}) -%}
+    {%- set step_counts = steps_given if steps_given is mapping else ({'total': steps_given} if steps_given is number and steps_given is not boolean else {}) -%}
+    {%- set groups = [
+        {'label': 'Features', 'counts': feature_counts},
+        {'label': 'Scenarios', 'counts': scenario_counts},
+        {'label': 'Steps', 'counts': step_counts}
+    ]|selectattr('counts')|list -%}
+
+    {#- The presentation order, quoted from the status vocabulary the badge
+        partial normalises onto, with its fallback last. -#}
+    {%- set status_order = ['passed', 'failed', 'skipped', 'pending', 'undefined', 'untested', 'ambiguous', 'unknown'] -%}
+    {%- set named_keys = status_order + ['total'] -%}
+    {%- set earliest_start = (tally.get('started_at') or tally.get('start_timestamp'))|default('', true)|string|trim -%}
+    {#- Flatten every group's entries once, so the list wrapper is emitted
+        only when at least one count inside it will actually render. -#}
+    {%- set renderable = groups|map(attribute='counts')|map('dictsort')|sum(start=[])|selectattr('1', 'number')|rejectattr('1', 'boolean')|list -%}
+    {%- set scenario_total = scenario_counts.get('total') -%}
+<div{% if root_classes %} class="{{ root_classes }}"{% endif %}>
+    {%- if rows %}
+    <ul class="tqa-meta" aria-label="Run metadata">
+        {%- for row in rows %}
+        <li class="tqa-meta-item">
+            <span class="tqa-meta-label">{{ row['label'] }}</span>
+            {%- if row['time'] %}
+            <span class="tqa-meta-value tqa-timestamp"><time datetime="{{ row['value'] }}">{{ row['value'] }}</time></span>
+            {%- else %}
+            <span class="tqa-meta-value">{{ row['value'] }}</span>
+            {%- endif %}
+        </li>
+        {%- endfor %}
+    </ul>
+    {%- endif %}
+    {%- if renderable or earliest_start %}
+    <ul class="tqa-summary" aria-label="Run totals">
+        {%- for group in groups %}
+        {%- set counts = group['counts'] %}
+        {%- set total = counts.get('total') %}
+        {%- if total is number and total is not boolean %}
+        <li class="tqa-count"><b>{{ total }}</b> <span>{{ group['label'] }}</span></li>
+        {%- endif %}
+        {#- The named statuses in their fixed order, then anything else the
+            writer counted, sorted so that identical input stays identical. -#}
+        {%- for token in status_order %}
+        {%- set count = counts.get(token) %}
+        {%- if count is number and count is not boolean %}
+        <li class="tqa-count" data-tqa-status="{{ badge.status_token(token) }}"><b>{{ count }}</b> <span>{{ group['label'] }} {{ token }}</span></li>
+        {%- endif %}
+        {%- endfor %}
+        {%- for key in counts|list|reject('in', named_keys)|sort(case_sensitive=true) %}
+        {%- set count = counts.get(key) %}
+        {%- set token = badge.status_token(key) %}
+        {%- if count is number and count is not boolean %}
+        <li class="tqa-count" data-tqa-status="{{ token }}"><b>{{ count }}</b> <span>{{ group['label'] }} {{ key }}{% if (key|string|trim|lower) != token %} ({{ token }}){% endif %}</span></li>
+        {%- endif %}
+        {%- endfor %}
+        {%- endfor %}
+        {%- if earliest_start %}
+        <li class="tqa-count"><span class="tqa-timestamp">Earliest scenario start <time datetime="{{ earliest_start }}">{{ earliest_start }}</time></span></li>
+        {%- endif %}
+    </ul>
+    {%- endif %}
+    {%- if scenario_total is number and scenario_total is not boolean and scenario_total == 0 %}
+    <p class="tqa-empty">No scenario was selected, so this report carries no results. A run that selects nothing still writes every artifact.</p>
+    {%- endif %}
+</div>
+{%- endmacro -%}

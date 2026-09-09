@@ -1,0 +1,604 @@
+{#-
+  ===========================================================================
+  view/overview.html - the run overview, served read-only at GET /reports.
+  ===========================================================================
+
+  This page is the HTTP analogue of the "Features Statistics" overview page in
+  the generated report tree: one table of every feature in the results, with
+  its step tally, its scenario tally, its duration and its status, each feature
+  linking on to its own detail view. It reads what a run has already written
+  and nothing else - no form, no control that starts a run, no endpoint of its
+  own invention, and no write of any kind. Runs start from the command line.
+
+  ---------------------------------------------------------------------------
+  RENDER CONTEXT - the contract for app/web/routes.py
+  ---------------------------------------------------------------------------
+  REQUIRED
+
+      features   The top-level list parsed from the Cucumber results file, IN
+                 FILE ORDER, each entry the raw feature mapping exactly as the
+                 JSON writer produced it. Nothing is pre-processed and no
+                 aggregate is pre-computed: every count, status and total on
+                 this page is derived below, from that one list, so the page
+                 and the artifact it describes cannot drift apart.
+
+                 Its ZERO-BASED POSITIONS ARE THE ROUTE KEYS. The feature
+                 route is keyed by index and never by the feature's own id,
+                 because two pairs of features in this suite share an id slug -
+                 they share a title - and that collision is source behaviour
+                 this port preserves rather than disambiguates. An id rendered
+                 as displayed data is correct; an id used as a link key is a
+                 defect. Every URL here is built with url_for, so no route
+                 shape is written by hand in markup.
+
+  OPTIONAL
+
+      artifact_modified
+                 Modification time of the results file this page was built
+                 from, as millisecond-precision UTC ISO-8601 with a literal Z -
+                 the same shape the scenario start timestamps carry, so both
+                 render through the same machine-readable time element. Absent
+                 renders an em dash.
+
+  WHAT THE ROUTE MUST NOT DO - it must not hand this template an empty or
+  unusable result set as a 200. A results file that is absent, unreadable or
+  unparseable is a 404 for all three causes alike, because a run has not
+  produced usable results and telling those causes apart is not the viewer's
+  business. So there is deliberately no "no report yet" state here; that
+  belongs to the index view, which answers 200 always and owns the artifact
+  availability listing. The ONE empty state that is genuinely reachable is an
+  empty feature LIST: a run whose tag expression selected no scenario still
+  writes all four artifacts, so `features == []` renders cleanly, with the
+  tallies at zero and the table replaced by a short factual note.
+
+  ---------------------------------------------------------------------------
+  THE MODEL, AS MEASURED
+  ---------------------------------------------------------------------------
+  Every shape below was read off the reference results file, not assumed, and
+  each one is guarded for because each one occurs:
+
+    - A feature carries uri, id, keyword, line, name, description, tags and
+      elements. uri keeps its literal file: prefix and is displayed verbatim -
+      never stripped, rewritten or turned into a filesystem link.
+    - Feature tags and scenario tags have DIFFERENT shapes: a feature tag is a
+      mapping of name, type and location, a scenario tag carries name alone.
+      Only name is read, and the leading @ is kept.
+    - A scenario with no tags of its own and no feature tag OMITS the tags key
+      entirely rather than carrying an empty list, and five of the ten features
+      in this suite declare no feature-level tag, so that is the common case
+      and not an edge one.
+    - elements INTERLEAVES backgrounds and scenarios, and the background
+      REPEATS before each scenario. A background carries no id, no
+      start_timestamp and no tags. So a feature's scenario count is the number
+      of elements whose type is "scenario" and NEVER the element count.
+    - A step carries keyword (with its trailing space), line, name, match and
+      result.
+    - result OMITS fields rather than emitting zeros: a skipped step's result
+      is a status and no duration key at all. Durations are NANOSECOND
+      INTEGERS, which is why the raw value never reaches the page.
+
+  ---------------------------------------------------------------------------
+  AGGREGATION RULES - one definition, three consumers
+  ---------------------------------------------------------------------------
+  These same rules are what view/feature.html applies to one feature and what
+  GET /reports/summary MUST APPLY IN PYTHON. The JSON counts route and this
+  page are two presentations of one calculation, so a reader comparing them
+  can never be shown two different answers:
+
+    1. Step counts   Every step of every element is counted, backgrounds
+                     included, because a repeated background genuinely ran once
+                     per scenario. Each step's status is normalised through
+                     status_token, the project's single normalisation point.
+    2. Scenario      The worst status among that scenario's OWN steps, by the
+       status        precedence in STATUS_PRECEDENCE below, highest first:
+                     failed, undefined, ambiguous, pending, skipped, untested,
+                     passed. A scenario with no steps is unknown.
+    3. Feature       The same precedence applied across the steps of ALL that
+       status        feature's elements, backgrounds included.
+    4. Duration      The sum of the duration values that are PRESENT, in
+                     nanoseconds, rendered as seconds to three decimals. With
+                     no duration key present at all the total is unknown rather
+                     than zero, and renders an em dash.
+    5. Earliest      The lowest start_timestamp present across scenario
+       start         elements. These strings compare lexicographically because
+                     the format is fixed-width UTC. None present renders an em
+                     dash.
+
+  The table's step columns mirror the reference overview page exactly - passed,
+  failed, skipped, pending, undefined, total - so a step in one of the three
+  remaining states is inside its feature's total without a column of its own.
+  The run-level tallies above the table carry every non-zero state, including
+  those three, so nothing is dropped from the page.
+
+  ---------------------------------------------------------------------------
+  VOCABULARY AND PROHIBITIONS
+  ---------------------------------------------------------------------------
+  HEADINGS - base.html renders this page's single h1 from the title block, so
+  the content below opens at h2 and descends without skipping a level.
+
+  LAYOUT - the page carries each feature TWICE, and deliberately: once as a row
+  of the statistics table, which mirrors the reference overview page's columns,
+  and once as a block below it holding the values that describe a feature rather
+  than count it - its source, identifier, line, first start, tags and
+  description. Those values are not squeezed into the table, because the table
+  is wider than a phone viewport and scrolls inside its own wrapper: a cell
+  spanning its columns inherits that width, so a source path or a description
+  placed there is clipped until the reader scrolls sideways, whatever the cell
+  does internally. In page flow the same values reflow to the viewport. The two
+  elements of one feature carry the same status hooks and the same index-keyed
+  link, so they filter together and navigate alike.
+
+  CLASSES - app/static/css/main.css, the tqa- namespace, and only names that
+  stylesheet declares: tqa-meta and its item, label and value parts, tqa-
+  summary with tqa-count, tqa-filter with tqa-filter-btn, tqa-table-wrap with
+  tqa-table, tqa-feature with tqa-feature-name and tqa-feature-desc, tqa-tags
+  with tqa-tag, tqa-timestamp, tqa-duration, tqa-link and tqa-empty. Status
+  colour arrives only as the data-tqa-status attribute, which the stylesheet
+  matches case-insensitively; there is no per-status class to write. The page
+  shell classes belong to base.html and are not repeated here.
+
+  Two placements follow that stylesheet rather than the page order alone. The
+  metadata grid resolves to four columns at its widest, so a feature block
+  fills it with exactly four short fields and keeps its one long value - the
+  source path - at full width, where no fixed track can break it mid-word and
+  strand a character on a line of its own. And the fields whose own margins
+  space them are ordered so each has room: the flex heading, then the
+  description, then the grid, then the source line, which is last because it is
+  the only one with no bottom margin of its own.
+
+  BEHAVIOUR HOOKS - app/static/js/report.js, the data-report- namespace. This
+  page uses three: data-report-filter on each filter button, and the data-
+  report-filterable and data-report-status pair on each element the filter may
+  hide - one table row and one block per feature. Both carry the same status, so
+  a feature hides as one unit. The one per-page scope hook that script resolves
+  filtering against is emitted by base.html, on the main element, and is never
+  repeated here. Filtering is progressive enhancement: with no scripting the
+  buttons are inert and everything stays visible.
+
+  NO STATE HOOK IS SERVER-RENDERED. The stylesheet reads the absence of its
+  three boolean state attributes as expanded, visible and closed, and report.js
+  sets its own three state classes at run time, writing aria-pressed="false"
+  onto every filter control as it initialises. What is authored here is
+  therefore the fully visible, unfiltered page, which is exactly what it means
+  with scripting turned off and on paper.
+
+  Standing prohibitions, each with its reason: automatic escaping is never
+  turned off and no value is ever marked pre-escaped, because feature
+  descriptions, step names and assertion text in this data carry quotes,
+  apostrophes and angle brackets - the stylesheet's pre-wrap rules preserve
+  multi-line text and leading indentation without any such override. No inline
+  script, no inline style and no style attribute. No external, protocol-
+  relative or content-delivery-network URL, and none of the vendored generator
+  assets, which exist only inside the emitted report tree. No filesystem path
+  literal: the path module under app/utils owns every path, and the only
+  artifact identifier this page names is the allowlisted results-file key it
+  passes to the artifact endpoint as an argument.
+-#}
+{% extends "base.html" %}
+{% set active_nav = "reports" %}
+{% from "partials/status_badge.html" import status_badge, status_token %}
+
+{#- Rule 2 of the aggregation contract, as data. Highest severity first: the
+    first member of this sequence that occurs among a set of step statuses is
+    the status of the scenario or feature those steps belong to. It is declared
+    once, here, and reaches worst_token below as that macro's default argument
+    so the order cannot be restated - and therefore cannot be restated
+    differently - anywhere else in this file. -#}
+{% set STATUS_PRECEDENCE = ('failed', 'undefined', 'ambiguous', 'pending', 'skipped', 'untested', 'passed') %}
+
+{#- Reading order for the run-level tallies: the reference overview page's own
+    column order first - passed, failed, skipped, pending, undefined - then the
+    three remaining states that page has no column for, so a tally is never
+    silently dropped. Every token status_token can answer with appears exactly
+    once. -#}
+{% set STATUS_READING_ORDER = ('passed', 'failed', 'skipped', 'pending', 'undefined', 'untested', 'ambiguous', 'unknown') %}
+
+{#- The worst status in a collection of already-normalised tokens, by the
+    precedence above. Answers "unknown" for an empty collection, for a missing
+    one, and for a collection holding nothing the precedence names - a status
+    the model never produced must not be reported as a pass. -#}
+{%- macro worst_token(tokens, precedence=STATUS_PRECEDENCE) -%}
+    {%- set found = namespace(token='') -%}
+    {%- set candidates = tokens|default([], true) -%}
+    {%- for candidate in precedence -%}
+        {%- if not found.token and candidate in candidates -%}
+            {%- set found.token = candidate -%}
+        {%- endif -%}
+    {%- endfor -%}
+    {{- found.token if found.token else 'unknown' -}}
+{%- endmacro -%}
+
+{#- How many of one token a collection holds. Kept as a macro so the table
+    cells and the run-level tallies count the same way. -#}
+{%- macro count_of(tokens, token) -%}
+    {{- (tokens|default([], true))|select('equalto', token)|list|length -}}
+{%- endmacro -%}
+
+{#- The text that names one feature, in the table and again in its own block
+    below, so the two can never disagree. A blank name would leave a link with
+    no accessible name at all, so the source path stands in, and the feature's
+    own zero-based position behind that - both values the results file itself
+    carries, and neither of them a label invented for a product this plan
+    deliberately does not rename. -#}
+{%- macro feature_label(row) -%}
+    {%- set feature = row.feature|default({}, true) -%}
+    {{- (feature.name|default('', true)|string|trim)
+        or (feature.uri|default('', true)|string|trim)
+        or ('Feature ' ~ row.findex|default(0, true)) -}}
+{%- endmacro -%}
+
+{#- A nanosecond total as seconds to three decimals. samples is the number of
+    duration keys that were actually present, which is what separates a
+    genuinely zero total from a total of nothing at all: with no sample the
+    duration is unknown and renders an em dash. The raw nanosecond integer is
+    never rendered. -#}
+{%- macro duration_value(total_ns, samples) -%}
+    {%- if (samples|default(0, true)) > 0 and (total_ns|default(0, true)) is number -%}
+        <span class="tqa-duration">{{ '%.3f'|format(total_ns / 1000000000) }} s</span>
+    {%- else -%}
+        <span class="tqa-duration">&mdash;</span>
+    {%- endif -%}
+{%- endmacro -%}
+
+{#- One timestamp, machine-readable and human-readable from the same string:
+    the results file already carries fixed-width UTC ISO-8601, so reformatting
+    it would only invite the two forms to disagree. Blank or absent renders an
+    em dash. -#}
+{%- macro timestamp_value(iso) -%}
+    {%- set stamp = iso|default('', true)|string|trim -%}
+    {%- if stamp -%}
+        <time class="tqa-timestamp" datetime="{{ stamp }}">{{ stamp }}</time>
+    {%- else -%}
+        <span class="tqa-timestamp">&mdash;</span>
+    {%- endif -%}
+{%- endmacro -%}
+
+{% block title %}Report overview{% endblock %}
+
+{% block content %}
+    {#- ---------------------------------------------------------------------
+        Derivation. One pass over the input builds one row per feature, and
+        the run-level tallies accumulate as that pass goes, so the summary
+        above the table, the filter controls and the table itself are three
+        readings of a single calculation rather than three calculations.
+
+        Every lookup is guarded. A missing key answers a default and never
+        raises, including under a strict undefined policy, because a report is
+        what a reader turns to when a run has gone wrong: malformed input has
+        to render rather than take the page down.
+        --------------------------------------------------------------------- -#}
+    {%- set feature_list = features|default([], true) -%}
+    {%- set rows = [] -%}
+    {%- set run = namespace(steps=[], scenarios=[], duration_ns=0, samples=0, starts=[]) -%}
+
+    {%- for feature in feature_list -%}
+        {%- set tally = namespace(steps=[], scenarios=[], duration_ns=0, samples=0, starts=[]) -%}
+        {%- for element in feature.elements|default([], true) -%}
+            {#- The steps of this one element, kept apart from the feature's so
+                a scenario's status is decided by its own steps alone. -#}
+            {%- set element_steps = [] -%}
+            {%- for step in element.steps|default([], true) -%}
+                {%- set result = step.result|default({}, true) -%}
+                {%- set token = status_token(result.status|default('', true))|string|trim -%}
+                {%- set _ = element_steps.append(token) -%}
+                {%- set _ = tally.steps.append(token) -%}
+                {#- A skipped step carries no duration key at all, and a
+                    non-numeric one would poison the sum, so both are counted
+                    as no sample rather than as zero. -#}
+                {%- if result.duration is defined and result.duration is number -%}
+                    {%- set tally.duration_ns = tally.duration_ns + result.duration -%}
+                    {%- set tally.samples = tally.samples + 1 -%}
+                {%- endif -%}
+            {%- endfor -%}
+            {#- Scenario elements only. A background repeats before each
+                scenario, so counting elements would count every feature's
+                scenarios twice. -#}
+            {%- if (element.type|default('', true)|string|trim|lower) == 'scenario' -%}
+                {%- set _ = tally.scenarios.append(worst_token(element_steps)|string|trim) -%}
+                {%- set started = element.start_timestamp|default('', true)|string|trim -%}
+                {%- if started -%}
+                    {%- set _ = tally.starts.append(started) -%}
+                {%- endif -%}
+            {%- endif -%}
+        {%- endfor -%}
+        {%- set _ = rows.append({
+                'findex': loop.index0,
+                'feature': feature,
+                'steps': tally.steps,
+                'scenarios': tally.scenarios,
+                'duration_ns': tally.duration_ns,
+                'samples': tally.samples,
+                'started': (tally.starts|sort|first) if tally.starts else '',
+                'status': worst_token(tally.steps)|string|trim
+            }) -%}
+        {%- set _ = run.steps.extend(tally.steps) -%}
+        {%- set _ = run.scenarios.extend(tally.scenarios) -%}
+        {%- set _ = run.starts.extend(tally.starts) -%}
+        {%- set run.duration_ns = run.duration_ns + tally.duration_ns -%}
+        {%- set run.samples = run.samples + tally.samples -%}
+    {%- endfor -%}
+
+    {#- The statuses the table rows actually carry, in severity order, which is
+        what the filter controls offer. Offering a status no row carries would
+        give the reader a button that empties the table. -#}
+    {%- set row_statuses = [] -%}
+    {%- for token in STATUS_PRECEDENCE + ('unknown',) -%}
+        {%- if rows|selectattr('status', 'equalto', token)|list -%}
+            {%- set _ = row_statuses.append(token) -%}
+        {%- endif -%}
+    {%- endfor -%}
+
+    <h2>Run summary</h2>
+
+    <p>
+        Every count below is derived from the results file this page reads, and
+        from nothing else. Steps are counted across all elements of a feature,
+        backgrounds included, because a background genuinely runs once per
+        scenario; a feature's scenario count is its scenario elements alone. A
+        scenario or feature takes the worst status among its steps, so one
+        failure is never averaged away by the passes around it.
+    </p>
+
+    <dl class="tqa-meta">
+        <div class="tqa-meta-item">
+            <dt class="tqa-meta-label">Features</dt>
+            <dd class="tqa-meta-value">{{ rows|length }}</dd>
+        </div>
+        <div class="tqa-meta-item">
+            <dt class="tqa-meta-label">Scenarios</dt>
+            <dd class="tqa-meta-value">{{ run.scenarios|length }}</dd>
+        </div>
+        <div class="tqa-meta-item">
+            <dt class="tqa-meta-label">Steps</dt>
+            <dd class="tqa-meta-value">{{ run.steps|length }}</dd>
+        </div>
+        <div class="tqa-meta-item">
+            <dt class="tqa-meta-label">Total duration</dt>
+            <dd class="tqa-meta-value">{{ duration_value(run.duration_ns, run.samples) }}</dd>
+        </div>
+        <div class="tqa-meta-item">
+            <dt class="tqa-meta-label">First scenario started</dt>
+            <dd class="tqa-meta-value">{{ timestamp_value((run.starts|sort|first) if run.starts else '') }}</dd>
+        </div>
+        <div class="tqa-meta-item">
+            <dt class="tqa-meta-label">Results modified</dt>
+            <dd class="tqa-meta-value">{{ timestamp_value(artifact_modified|default('', true)) }}</dd>
+        </div>
+        <div class="tqa-meta-item">
+            <dt class="tqa-meta-label">Raw results</dt>
+            <dd class="tqa-meta-value">
+                <a class="tqa-link" href="{{ url_for('web.artifact', name='cucumber.json') }}">cucumber.json</a>
+            </dd>
+        </div>
+        <div class="tqa-meta-item">
+            <dt class="tqa-meta-label">Counts as JSON</dt>
+            <dd class="tqa-meta-value">
+                <a class="tqa-link" href="{{ url_for('web.reports_summary') }}">Summary</a>
+            </dd>
+        </div>
+    </dl>
+
+    <h3>Steps by status</h3>
+
+    <ul class="tqa-summary">
+        {%- for token in STATUS_READING_ORDER %}
+        {%- set counted = run.steps|select('equalto', token)|list|length %}
+        {%- if counted %}
+        <li class="tqa-count" data-tqa-status="{{ token }}">
+            {{ status_badge(token) }}
+            <strong>{{ counted }}</strong>
+        </li>
+        {%- endif %}
+        {%- endfor %}
+        <li class="tqa-count">
+            <span>All steps</span>
+            <strong>{{ run.steps|length }}</strong>
+        </li>
+    </ul>
+
+    <h3>Scenarios by status</h3>
+
+    <ul class="tqa-summary">
+        {%- for token in STATUS_READING_ORDER %}
+        {%- set counted = run.scenarios|select('equalto', token)|list|length %}
+        {%- if counted %}
+        <li class="tqa-count" data-tqa-status="{{ token }}">
+            {{ status_badge(token) }}
+            <strong>{{ counted }}</strong>
+        </li>
+        {%- endif %}
+        {%- endfor %}
+        <li class="tqa-count">
+            <span>All scenarios</span>
+            <strong>{{ run.scenarios|length }}</strong>
+        </li>
+    </ul>
+
+    <h2>Features</h2>
+
+    {%- if rows %}
+    <p>
+        Features appear in the order the results file carries them, which is
+        the order they were run in. Each name links to that feature's
+        scenarios and steps, and the tallies below are followed by each
+        feature's source, tags and description.
+    </p>
+
+    {#- Filter controls. Each button names a status the table rows and feature
+        blocks below actually carry; "all" is the reserved value that clears the
+        filter. Both of a feature's elements carry the same status, so one
+        filter hides its row and its block together. They are
+        non-navigating buttons because the behaviour script never suppresses
+        an authored default action, and they are authored unpressed because the
+        unfiltered page is the authored state. -#}
+    <div class="tqa-filter" role="group" aria-label="Filter features by status">
+        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="false">
+            All features ({{ rows|length }})
+        </button>
+        {%- for token in row_statuses %}
+        <button type="button" class="tqa-filter-btn" data-report-filter="{{ token }}" aria-pressed="false">
+            {{ token|capitalize }} ({{ rows|selectattr('status', 'equalto', token)|list|length }})
+        </button>
+        {%- endfor %}
+    </div>
+
+    <div class="tqa-table-wrap">
+        <table class="tqa-table">
+            <caption>
+                Step and scenario tallies for {{ rows|length }}
+                feature{{ '' if rows|length == 1 else 's' }}, in the order the
+                results file carries them. Each feature's source, tags and
+                description follow the table.
+            </caption>
+            <thead>
+                <tr>
+                    <th scope="col" rowspan="2">Feature</th>
+                    <th scope="colgroup" colspan="6">Steps</th>
+                    <th scope="colgroup" colspan="3">Scenarios</th>
+                    <th scope="col" rowspan="2">Duration</th>
+                    <th scope="col" rowspan="2">Status</th>
+                </tr>
+                <tr>
+                    <th scope="col">Passed</th>
+                    <th scope="col">Failed</th>
+                    <th scope="col">Skipped</th>
+                    <th scope="col">Pending</th>
+                    <th scope="col">Undefined</th>
+                    <th scope="col">Total</th>
+                    <th scope="col">Passed</th>
+                    <th scope="col">Failed</th>
+                    <th scope="col">Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                {%- for row in rows %}
+                {#- The link key is the row's zero-based position, never the
+                    feature's id: two pairs of features in this suite share an
+                    id because they share a title. -#}
+                <tr data-report-filterable data-report-status="{{ row.status }}">
+                    <th scope="row">
+                        <a class="tqa-link"
+                           href="{{ url_for('web.report_feature', findex=row.findex) }}">{{ feature_label(row) }}</a>
+                    </th>
+                    <td>{{ count_of(row.steps, 'passed') }}</td>
+                    <td>{{ count_of(row.steps, 'failed') }}</td>
+                    <td>{{ count_of(row.steps, 'skipped') }}</td>
+                    <td>{{ count_of(row.steps, 'pending') }}</td>
+                    <td>{{ count_of(row.steps, 'undefined') }}</td>
+                    <td>{{ row.steps|length }}</td>
+                    <td>{{ count_of(row.scenarios, 'passed') }}</td>
+                    <td>{{ count_of(row.scenarios, 'failed') }}</td>
+                    <td>{{ row.scenarios|length }}</td>
+                    <td>{{ duration_value(row.duration_ns, row.samples) }}</td>
+                    <td>{{ status_badge(row.status) }}</td>
+                </tr>
+                {%- endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <h3>Sources, tags and descriptions</h3>
+
+    {#- The values that describe a feature rather than count it, one block per
+        feature, BESIDE the table rather than in a row inside it. That placement
+        is measured rather than stylistic: the statistics table is wider than a
+        phone viewport and scrolls inside its own wrapper, and a cell spanning
+        its columns inherits that width - so a source path or a description put
+        there is clipped until the reader scrolls sideways, however the cell
+        lays its contents out. In page flow the same values reflow to whatever
+        width the viewport gives, which is why they live here.
+
+        Each block carries the same status hooks as its table row, so filtering
+        hides a feature's row and its block together, and each name links to
+        the same detail view keyed by the same zero-based index. -#}
+    {%- for row in rows %}
+    {%- set feature = row.feature %}
+    {%- set feature_uri = feature.uri|default('', true)|string|trim %}
+    {%- set feature_id = feature.id|default('', true)|string|trim %}
+    {%- set feature_line = feature.line|default('', true)|string|trim %}
+    {%- set feature_desc = feature.description|default('', true)|string %}
+    {#- Tag names are collected first, so a tags list holding nothing but blank
+        names reads as none rather than as an empty list. -#}
+    {%- set tag_names = [] -%}
+    {%- for tag in feature.tags|default([], true) -%}
+        {%- set tag_name = tag.name|default('', true)|string|trim -%}
+        {%- if tag_name -%}
+            {%- set _ = tag_names.append(tag_name) -%}
+        {%- endif -%}
+    {%- endfor -%}
+    <div class="tqa-feature" data-report-filterable data-report-status="{{ row.status }}">
+        <h4 class="tqa-feature-name">
+            <a class="tqa-link"
+               href="{{ url_for('web.report_feature', findex=row.findex) }}">{{ feature_label(row) }}</a>
+            {{ status_badge(row.status) }}
+        </h4>
+        {#- The description is prose, and the one value whose absence is its own
+            statement: the model records "no description" as an empty string, so
+            an empty paragraph or a dash would add furniture and no information.
+            It renders only when it has content, at the block's full width, in
+            the class whose pre-wrap rule keeps its own leading indentation. -#}
+        {%- if feature_desc|trim %}
+        <p class="tqa-feature-desc">{{ feature_desc }}</p>
+        {%- endif %}
+        {#- Four short labelled fields, which is exactly the column count this
+            grid resolves to at its widest, so the row fills rather than
+            stranding a lone field beside three empty tracks. Every one is
+            always rendered: an em dash is what tells a reader the value is
+            absent rather than that a field failed to render - and five of the
+            ten features in this suite declare no feature-level tag, so that is
+            the common case here and not an edge one. -#}
+        <dl class="tqa-meta">
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Identifier</dt>
+                <dd class="tqa-meta-value">
+                    {%- if feature_id %}<code>{{ feature_id }}</code>{% else %}&mdash;{% endif -%}
+                </dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Line</dt>
+                <dd class="tqa-meta-value">
+                    {%- if feature_line %}{{ feature_line }}{% else %}&mdash;{% endif -%}
+                </dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">First scenario started</dt>
+                <dd class="tqa-meta-value">{{ timestamp_value(row.started) }}</dd>
+            </div>
+            <div class="tqa-meta-item">
+                <dt class="tqa-meta-label">Tags</dt>
+                <dd class="tqa-meta-value">
+                    {%- if tag_names %}
+                    <ul class="tqa-tags">
+                        {%- for tag_name in tag_names %}
+                        <li class="tqa-tag">{{ tag_name }}</li>
+                        {%- endfor %}
+                    </ul>
+                    {%- else %}&mdash;{% endif -%}
+                </dd>
+            </div>
+        </dl>
+        {#- The source path last and at full width: it is the longest value on
+            the page, and a fixed grid track narrow enough to break it mid-word
+            leaves a character stranded on a line of its own. -#}
+        <div class="tqa-meta-item">
+            <span class="tqa-meta-label">Source</span>
+            <span class="tqa-meta-value">
+                {%- if feature_uri %}<code>{{ feature_uri }}</code>{% else %}&mdash;{% endif -%}
+            </span>
+        </div>
+    </div>
+    {%- endfor %}
+    {%- else %}
+    {#- The one empty state this page can reach on a 200: a run whose tag
+        expression selected no scenario still writes all four artifacts, so an
+        empty feature list is a complete report of an empty selection and not a
+        missing one. An absent, unreadable or unparseable results file never
+        gets here - the route answers 404 for all three alike. -#}
+    <p class="tqa-empty">
+        These results carry no feature, which is what a run that selected no
+        scenario produces: all four artifacts are still written, with nothing
+        in them. Artifact availability and modification times are on the
+        <a class="tqa-link" href="{{ url_for('web.index') }}">artifacts view</a>.
+    </p>
+    {%- endif %}
+{% endblock %}
