@@ -1,14 +1,19 @@
 """Tests for the internal result schema and the behave event collector.
 
-This module is the gate for ``app/reporting/events.py``, which is the single
-place where behave's event stream is observed and the single definition of the
-intermediate document all four artifact writers consume.  AAP 0.6 states the
-consequence plainly -- *"No mapping can recover a field that was never
-captured"* -- and names what this module has to prove: that *every field the
-four writers read is present for each of a passing scenario, a failing scenario
-with an attachment, a skipped step, an undefined step, a background and a
-two-row outline*.  Each of those six shapes therefore gets its own separately
-named test, so a failure names the shape rather than the suite.
+This module is the gate for ``app/reporting/events.py``, the single place where
+the engine's event stream is observed and the single definition of the
+intermediate document all four artifact writers consume.  AAP 0.6 fixes both
+the obligation -- every field those writers read is present for a passing
+scenario, a failing scenario with an attachment, a skipped step, an undefined
+step, a background and a two-row outline, each with its own named test so a
+failure names the shape -- and the port's departures from what the engine
+reports natively: ``match.location`` as the resolved step function's dotted
+Python path (deviation 8), nanosecond integer durations where behave reports
+float seconds, UTC timestamps in the JVM generator's millisecond form
+``YYYY-MM-DDTHH:MM:SS.mmmZ`` truncated rather than rounded, and the
+key-omission rules, asserted as explicit per-level key inventories so that a
+field a writer reads but the collector never records fails here rather than in
+an artifact.
 
 What is asserted here, and where each value comes from
 -----------------------------------------------------
@@ -29,7 +34,13 @@ internal schema) or measured from the installed behave 1.3.3, never assumed:
 * the key-presence rules are the measured ones: a Background occurrence carries
   none of ``id``, ``start_timestamp``, ``tags`` or ``after``; an untagged
   scenario **omits** ``tags`` rather than carrying ``[]``; a feature always
-  carries ``tags``, possibly empty.
+  carries ``tags``, possibly empty;
+* :func:`~app.reporting.events.run_metadata` obtains no value by executing a
+  program, measured against this interpreter: ``platform.processor()`` runs
+  ``uname -p`` through the inherited ``PATH`` on Python 3.14, while
+  ``platform.machine()`` reads the ``os.uname()`` fields already held, so the
+  probes are pinned to the second and every process-spawning entry point they
+  could reach is replaced with something that fails the test.
 
 The per-level key inventories are asserted as a loop over an explicit list of
 keys, so a field a writer starts reading that the collector never records fails
@@ -57,9 +68,12 @@ Boundaries this module keeps
 ----------------------------
 No network, no browser, no ``time.sleep`` and nothing written outside
 ``tmp_path``.  ``pytest.ini`` runs with ``--strict-config --strict-markers``, so
-no custom marker is used.  ``tests/conftest.py`` owns ``sys.path`` and the three
-pinned fixtures; this module reads them through their fixtures and edits
-nothing.
+only built-in markers are used.  ``tests/conftest.py`` owns ``sys.path`` and the
+three pinned fixtures; this module reads them through their fixtures and edits
+nothing.  One test does plant an executable ``uname`` -- a two-line shell script
+that echoes a marker -- inside its own ``tmp_path`` and prepend that directory
+to ``PATH`` for its duration, which is the only way to prove that a metadata
+probe cannot be steered by ``PATH``; nothing else in the module runs a program.
 """
 
 from __future__ import annotations
@@ -67,10 +81,15 @@ from __future__ import annotations
 import ast
 import base64
 import copy
+import io
 import itertools
 import json
 import logging
+import os
+import platform
 import re
+import stat
+import subprocess
 import warnings
 from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime, timedelta, timezone
@@ -85,7 +104,7 @@ from behave.matchers import Argument, Match, NoMatch
 from behave.model import Tag
 from behave.model_type import Status
 
-from app.reporting import events
+from app.reporting import aggregation, events
 from app.utils import paths
 
 # --------------------------------------------------------------------------
@@ -112,26 +131,37 @@ PUBLIC_SURFACE: Final[frozenset[str]] = frozenset(
         "FORMATTER_NAME",
         "FORMATTER_SCOPED_NAME",
         "HOOK_FAILURE_MESSAGE",
+        "MAX_FAILURE_TEXT_CHARS",
+        "MAX_RUN_RESULT_BYTES",
+        "MAX_RUN_RESULT_DOCUMENTS",
+        "MAX_RUN_RESULT_NODES",
         "RESULT_STATUSES",
         "SCHEMA_VERSION",
+        "TAG_TYPE",
+        "TIMESTAMP_PATTERN",
         "ResultCollectorFormatter",
         "ResultSetError",
+        "RunResultBudget",
         "attach_to_current_scenario",
         "convert_to_id",
         "dump_result_set",
+        "element_units",
         "feature_tag",
         "format_timestamp",
         "iter_scenarios",
         "load_result_set",
         "merge_result_sets",
         "nanos_from_seconds",
+        "parse_timestamp",
         "new_element",
         "new_feature",
         "new_hook_entry",
         "new_result_set",
         "new_step",
         "record_hook_result",
+        "redact_step_text",
         "run_metadata",
+        "sanitize_failure_text",
         "scenario_element_id",
         "scenario_tag",
         "step_keyword",
@@ -214,6 +244,29 @@ METADATA_KEYS: Final[dict[str, tuple[str, ...]]] = {
     "cpu": ("name",),
 }
 
+#: What a planted ``uname`` on ``PATH`` prints.  No probe that reads the
+#: interpreter's own data can produce this string, so a metadata value carrying
+#: it could only have come from executing a program.
+HOSTILE_UNAME_MARKER: Final[str] = "hostile-uname-marker-4b19d7"
+
+#: Every process-spawning entry point a metadata probe could reach, as
+#: ``(module, attribute)`` pairs so that a failure names the entry point.
+#: ``platform`` imports ``subprocess`` inside the function that needs it, and a
+#: lazy ``import subprocess`` resolves to this very module object, so patching
+#: these attributes is what such an import would find.
+SPAWN_ENTRY_POINTS: Final[tuple[tuple[Any, str], ...]] = (
+    (subprocess, "check_output"),
+    (subprocess, "run"),
+    (subprocess, "Popen"),
+    (os, "popen"),
+    (os, "system"),
+)
+
+#: Whether this host resolves a helper program through ``PATH`` at all, which
+#: is what decides if planting one can prove anything.  True everywhere this
+#: suite runs in CI.
+POSIX_PATH_LOOKUP: Final[bool] = os.name == "posix"
+
 # -- Measured values from the reference artifact ---------------------------
 
 #: Feature paths carried by :fixture:`sample_result_set`.  The directory
@@ -263,6 +316,100 @@ GOLDEN_STEP_NAME: Final[str] = (
 GOLDEN_BEHAVE_SPANS: Final[tuple[tuple[int, int], ...]] = ((45, 50), (55, 57), (64, 65))
 GOLDEN_ARGUMENT_VALUES: Final[tuple[str, ...]] = ('"Test2"', '"30"', '"2"')
 GOLDEN_ARGUMENT_OFFSETS: Final[tuple[int, ...]] = (44, 54, 63)
+
+# -- The redaction boundary: measured phrasings, synthetic values ---------
+#
+# The *phrasings* below are the suite's own, from ``Login.feature`` and
+# ``Contact.feature``, because the span classifier under test keys on the
+# words around a value.  The *values* are deliberately synthetic.
+# Review finding SEC2-F17 is that a credential belongs in the Gherkin fixture
+# data and nowhere else, so replicating the real ``Examples`` account here -
+# in a file that is neither a feature file nor covered by AAP 0.8's test-data
+# note - would recreate the very leak this module is asserting is closed.
+# What the assertions need is a value of the right *shape*, and
+# ``@example.test`` is the reserved-domain form of one.
+
+#: ``Login.feature:15``'s phrasing, with a synthetic account substituted as
+#: behave substitutes an ``Examples`` row.  The value is an address, so it is
+#: classified twice over: by the ``username`` that follows it and by its own
+#: shape.
+LOGIN_USERNAME_STEP_NAME: Final[str] = 'User enters "account7@example.test" username'
+
+#: ``Login.feature:16``'s phrasing, with a synthetic password.  This is the
+#: case that *only* adjacency can catch: the value's own text is
+#: indistinguishable from a product name, and the following ``password`` is
+#: the entire reason it is a secret.
+LOGIN_PASSWORD_STEP_NAME: Final[str] = 'User enters "not-a-real-secret" password'
+
+#: ``Contact.feature:12``'s phrasing with its two values substituted: a phone
+#: number, which the closed keyword set deliberately does not classify, and an
+#: address, which classifies on its own terms.  It is the module's
+#: one-position-sensitive case.
+CONTACT_TWO_ARGUMENT_STEP_NAME: Final[str] = (
+    'User enters "+99999999999" and "someone@example.test"'
+)
+
+#: The same phrasing with the two positions swapped, so that the *masked* span
+#: comes first and every later offset has to move.  A synthetic ordering, and
+#: labelled as one: no feature file writes it this way, and the offset shift is
+#: the rule being pinned rather than the phrasing.
+CONTACT_SWAPPED_ARGUMENT_STEP_NAME: Final[str] = (
+    'User enters "someone@example.test" and "+99999999999"'
+)
+
+#: A two-value phrase whose *second* value is the credential and whose first
+#: is ordinary business data.  Two things are measured on it: a partially
+#: indexed argument list must still classify the span no entry represents, and
+#: the ``password`` 18 characters to the right of ``"public"`` must not reach
+#: back over the value in between.  Synthetic phrasing, and labelled as one -
+#: no feature file writes a tag and a credential in one step - because what is
+#: pinned is the classifier's scope rather than a phrase.
+MIXED_VALUE_STEP_NAME: Final[str] = (
+    'User enters "public" tag and "not-a-real-secret" password'
+)
+
+#: The business value of that phrase, which must survive byte for byte.
+MIXED_VALUE_KEPT: Final[str] = '"public"'
+
+#: What a masked quoted argument looks like: the placeholder inside the quotes
+#: the JSON contract says ``val`` carries.
+REDACTED_QUOTED_VALUE: Final[str] = '"[redacted]"'
+
+#: A credential-shaped fragment for the failure-text assertions, in the
+#: ``key=value`` shape a Selenium or configuration error quotes.  Synthetic,
+#: for the reason given above.
+FAILURE_TEXT_SECRET: Final[str] = "password=not-a-real-secret"
+
+#: An absolute path that belongs to no checkout of this project, so the
+#: relativising rule cannot reach it and the shortening rule must.
+FOREIGN_ABSOLUTE_PATH: Final[str] = "/opt/toolchain/lib/python3.14/unittest/case.py"
+
+#: Traceback frame paths whose directories carry **spaces**, which is what a
+#: real CI workspace produces: a home directory holding a person's name, a
+#: Windows profile, an agent directory and a numbered job.  Each is paired with
+#: the frame the sanitizer must leave behind - two components behind the marker
+#: that says the path was cut, in the separator the frame carried.  A rule that
+#: matched a path by its characters rather than by the quotes around it stops
+#: at the first space, which published the account name and the layout while
+#: mangling the prefix in front of them.
+SPACED_FRAME_PATHS: Final[tuple[tuple[str, str], ...]] = (
+    (
+        "/home/jane doe/workspace/features/steps/login_steps.py",
+        ".../steps/login_steps.py",
+    ),
+    (
+        "C:\\Users\\Jane Doe\\workspace\\features\\steps\\login_steps.py",
+        "...\\steps\\login_steps.py",
+    ),
+    (
+        "D:\\CI Agent\\job 42\\features\\steps\\login_steps.py",
+        "...\\steps\\login_steps.py",
+    ),
+    (
+        "\\\\buildhost\\share\\job 42\\features\\steps\\login_steps.py",
+        "...\\steps\\login_steps.py",
+    ),
+)
 
 #: 30.202 seconds, as the reference carries it.
 GOLDEN_DURATION_NANOS: Final[int] = 30202000000
@@ -324,6 +471,23 @@ PNG_MIME_TYPE: Final[str] = "image/png"
 #: production; this module only needs *a* path under ``tmp_path``.
 WORKER_FILE_NAME: Final[str] = "worker-results.json"
 
+#: The directory components a worker's intermediate really sits under, taken
+#: from their owner rather than written out (AAP 0.4.2).  The write-route tests
+#: below put their output at this depth deliberately: ``target/`` and
+#: ``.workers/`` are the components the path authority creates and verifies,
+#: and a ``--no-clean`` run leaves them in place for a hostile entry to be
+#: planted in, which is the condition the refusal tests reproduce.
+WORKER_DIR_COMPONENTS: Final[tuple[str, ...]] = (
+    paths.TARGET_DIR_NAME,
+    paths.WORKERS_DIR_NAME,
+)
+
+#: Bytes of the file a hostile link points at.  Asserted byte-for-byte after
+#: every refusal, because the finding is not "an exception was raised" but "an
+#: external file was truncated": an implementation that refused *after* opening
+#: with ``O_TRUNC`` would satisfy the first and fail the second.
+VICTIM_TEXT: Final[str] = "an external file no report writer may touch\n"
+
 
 # --------------------------------------------------------------------------
 # behave model stand-ins
@@ -360,6 +524,36 @@ class StubConfig:
         self.dry_run = dry_run
         self.tags = [] if tags is None else tags
         self.default_tags = [] if default_tags is None else default_tags
+
+
+class StubUnsettableOpener:
+    """Stands in for a stream opener that will not hold a stream.
+
+    Carries the two attributes the collector reads off behave's
+    ``StreamOpener`` -- ``name`` and ``encoding`` -- and exposes ``stream`` as a
+    read-only property, so installing the verified handle on it raises
+    ``AttributeError``.  The real ``StreamOpener`` accepts that assignment;
+    this stand-in makes the branch that survives an opener which does not
+    deterministic, because behave's own ``close_stream`` cannot close a stream
+    the opener never held, leaving the collector to close it itself.
+    """
+
+    def __init__(self, filename: str) -> None:
+        """Carry the filename and the encoding, and nothing else.
+
+        :param filename: The ``-o`` path.
+        """
+        self.name = filename
+        self.encoding = "utf-8"
+        self.should_close_stream = False
+
+    @property
+    def stream(self) -> None:
+        """Answer that there is no stream, and refuse to hold one.
+
+        :returns: Always ``None``.
+        """
+        return None
 
 
 class StubStep:
@@ -840,6 +1034,103 @@ def assert_keys(mapping: dict[str, Any], keys: Sequence[str], label: str) -> Non
         assert key in mapping, f"{label} is missing the required key {key!r}"
 
 
+def worker_output_path(root: Path, name: str = WORKER_FILE_NAME) -> Path:
+    """Return ``root/target/.workers/<name>``, with nothing created.
+
+    The depth a worker's intermediate really has, so that a write-route
+    assertion covers the directory components the path authority creates and
+    verifies rather than only a file in a directory that already existed.
+
+    :param root: The per-test directory to build under.
+    :param name: File name to use.
+    :returns: The path, whose parents do not exist yet.
+    """
+    return root.joinpath(*WORKER_DIR_COMPONENTS, name)
+
+
+def assert_owner_only(path: Path, *, directory: bool) -> None:
+    """Assert ``path`` carries no group or other permission bits.
+
+    The mode policy the path authority applies, asserted through its own
+    constants rather than against octal literals: a worker's document carries
+    step arguments substituted from the Examples tables and the failure text of
+    every failed step, so a local reader must not be able to read it.
+
+    Directories are asserted on the mask alone while files are asserted on the
+    whole mode.  That asymmetry is measured, not a concession: the tightening
+    is applied per object through ``os.fchmod`` and clears group and other bits
+    while leaving the special bits as they were, so a directory created beneath
+    a set-group-id parent keeps that bit and is still owner-only.
+
+    :param path: The file or directory to check.
+    :param directory: Whether ``path`` is a directory.
+    """
+    mode = stat.S_IMODE(path.stat().st_mode)
+    assert mode & paths.ARTIFACT_MODE_MASK == 0, (
+        f"{path} is readable by the group or by others: {mode:#o}"
+    )
+    if directory:
+        assert mode & paths.ARTIFACT_DIR_MODE == paths.ARTIFACT_DIR_MODE, (
+            f"{path} is not usable by its owner: {mode:#o}"
+        )
+    else:
+        assert mode == paths.ARTIFACT_FILE_MODE, (
+            f"{path} was not created {paths.ARTIFACT_FILE_MODE:#o}: {mode:#o}"
+        )
+
+
+def plant_victim(path: Path) -> Path:
+    """Create the external file a hostile link will point at.
+
+    :param path: Where to create it.
+    :returns: ``path``, carrying :data:`VICTIM_TEXT`.
+    """
+    path.write_text(VICTIM_TEXT, encoding="utf-8")
+    return path
+
+
+def assert_victim_intact(path: Path) -> None:
+    """Assert the external file was neither truncated nor rewritten.
+
+    :param path: The file :func:`plant_victim` created.
+    """
+    assert path.read_text(encoding="utf-8") == VICTIM_TEXT, (
+        f"{path} was written through a link the writer should have refused"
+    )
+
+
+def called_names(source_path: Path) -> tuple[set[str], set[tuple[str, str]]]:
+    """Every function this module calls, split by how it is addressed.
+
+    Parsed out of the source with :mod:`ast` for the same reason
+    :func:`imported_module_names` is: the question is what the module's code
+    *says*, and no amount of interpreter state answers that.  The split
+    matters because ``open`` means two different things depending on how it is
+    written -- ``open(...)`` is the builtin that resolves a pathname, while
+    ``self.open()`` is behave's own formatter method -- and an assertion that
+    could not tell them apart would be unable to say anything about either.
+
+    :param source_path: The file to parse.
+    :returns: Bare-name calls (``f(...)``) as a set of names, and attribute
+        calls (``x.f(...)``) as a set of ``(receiver, attribute)`` pairs, where
+        the receiver of anything more complex than a plain name is recorded as
+        ``"?"``.
+    """
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    bare: set[str] = set()
+    attributes: set[tuple[str, str]] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            bare.add(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            receiver = node.func.value
+            name = receiver.id if isinstance(receiver, ast.Name) else "?"
+            attributes.add((name, node.func.attr))
+    return bare, attributes
+
+
 def imported_module_names(source_path: Path) -> set[str]:
     """Every module name imported by the Python file at ``source_path``.
 
@@ -884,14 +1175,14 @@ def _make_collector(
 
     The output stream is opened here and handed to the stream opener
     pre-opened, which is one of the two modes ``behave.formatter.base``
-    documents.  The reason is specific: behave 1.3.3's ``StreamOpener.open()``
-    calls ``codecs.open()``, which Python 3.13 deprecated, so letting behave
-    open the file would raise a ``DeprecationWarning`` from behave's code in
-    every test here.  One test -
-    :func:`test_collector_opens_its_stream_through_behaves_own_opener` -
-    exercises that route deliberately and contains the warning locally, so the
-    filename mode is still covered exactly once rather than suppressed
-    project-wide.
+    documents and the one that gives a test control of the stream: the
+    encoding-failure case below needs an ASCII stream, and
+    :func:`test_close_reports_a_stream_it_cannot_write_to` needs to close the
+    stream under the collector's feet.  A pre-opened stream resolves no
+    pathname, so the collector hands it straight back rather than opening
+    anything -- which is why the *production* mode, where behave supplies a
+    filename and the collector opens it through the path authority, is covered
+    by the write-route tests further down rather than here.
 
     :param tmp_path: pytest's per-test directory - the only place this module
         writes.
@@ -1137,6 +1428,17 @@ def test_module_imports_no_flask_no_selenium_and_no_service() -> None:
     process that never builds a Flask application; a stray import would make
     every worker pay for Flask and selenium, and would make the ordering of the
     port's layers unenforceable.
+
+    ``app.logging_config`` is the second permitted name, and it is here for one
+    reason: review finding SEC2-F03 requires the substituted step text and its
+    arguments to be redacted before they are serialized, and that module is the
+    port's single owner of the credential vocabulary, the redaction placeholder
+    and the truncation notice.  A private copy of those patterns inside
+    ``app/reporting`` would be a second authority that drifts from the first.
+    It costs the boundary nothing that matters: the module imports only
+    ``logging``, ``re``, ``sys`` and ``typing``, so a worker still pays for no
+    framework, and ``tests/test_app_factory.py`` continues to prove that
+    importing ``app.reporting.events`` pulls in no Flask.
     """
     imported = imported_module_names(EVENTS_SOURCE_PATH)
 
@@ -1157,7 +1459,48 @@ def test_module_imports_no_flask_no_selenium_and_no_service() -> None:
             )
 
     intra_package = {name for name in imported if name.split(".")[0] == "app"}
-    assert intra_package == {"app.utils.paths"}
+    assert intra_package == {"app.logging_config", "app.utils.paths"}
+
+
+def test_module_writes_only_through_the_path_authority() -> None:
+    """One write route, asserted against the source rather than inferred.
+
+    This is the regression gate for the shape the review found in three
+    writers at once: ``ensure_parent(path)`` -- which verifies a parent and
+    then *releases* it -- followed by the builtin ``open(path, "w")``, which
+    resolves the same name a second time.  Between those two calls the name can
+    be replaced by a link, so the write lands on, and truncates, whatever it
+    then points at (CWE-367/CWE-59/CWE-22).  A planted-link test cannot see
+    that window, because the old check refused a link that was *already* there;
+    what closes it is the absence of the second resolution, which is a property
+    of the source and is therefore asserted here.
+
+    Four statements, each with a reason:
+
+    * the builtin ``open`` is never called, so no pathname is resolved for a
+      write outside the path authority;
+    * ``ensure_parent`` is neither imported nor called, so the released-verification
+      half of the pair cannot come back;
+    * ``open_artifact_write`` *is* called, so the route exists rather than
+      merely being unused;
+    * exactly two receivers own an ``x.open()`` call, and both are named:
+      ``self.open()`` is behave's own formatter method, reached only for an
+      opener carrying a pre-opened stream and no filename, and ``os.open()`` is
+      the descriptor-level call ``load_result_set`` reads a shard through with
+      ``O_NOFOLLOW`` -- the read route, which has its own tests below.
+      ``codecs.open()``, ``Path.open()`` and any other by-name opener is a
+      third receiver and fails here.
+    """
+    bare, attributes = called_names(EVENTS_SOURCE_PATH)
+
+    assert "open" not in bare, "the builtin open resolves a pathname for a write"
+    assert "ensure_parent" not in bare
+    assert "ensure_parent" not in dir(events), (
+        "ensure_parent is still imported, so the check-then-open pair can return"
+    )
+    assert "open_artifact_write" in bare
+    openers = {receiver for receiver, attribute in attributes if attribute == "open"}
+    assert openers == {"self", "os"}, f"an unexpected opener is in use: {openers}"
 
 
 # ==========================================================================
@@ -1398,12 +1741,57 @@ def test_widen_quoted_span_tolerates_a_span_outside_the_name() -> None:
     assert events.widen_quoted_span("short", "a", 2) == ("", 0)  # type: ignore[arg-type]
 
 
+# ==========================================================================
+# Run metadata: the fixed vocabulary, and probes that execute nothing
+#
+# Every value this mapping carries is written verbatim into
+# target/cucumber-reports.html and into the target/cucumber tree, so a probe
+# that obtained one by running a program would hand whatever that program
+# printed to every artifact - and would resolve it through the PATH the run
+# inherited.  The vocabulary assertions and the no-subprocess assertions
+# therefore live together: both describe the same function's contract.
+# ==========================================================================
+
+
+class SpawnForbidden(BaseException):
+    """Raised by a stand-in that a metadata probe must never call.
+
+    Deliberately a :class:`BaseException` and not an :class:`Exception`:
+    ``events._safe_probe`` swallows every ``Exception`` so that a report cannot
+    fail a test run, and a sentinel it could swallow would turn the assertions
+    below into silent passes.  This one escapes that handler and fails the test
+    with the forbidden call in the traceback.
+    """
+
+
+def _forbidden_spawn(name: str, calls: list[str]) -> Callable[..., Any]:
+    """Build a stand-in that records a forbidden call and then aborts.
+
+    :param name: The entry point being replaced, for the recording and the
+        message -- ``"subprocess.check_output"``, for instance.
+    :param calls: Accumulator the stand-in appends *name* to, so a test can
+        assert on the calls even if something swallowed the exception.
+    :returns: A callable accepting any arguments and never returning.
+    """
+
+    def _spawn(*_args: Any, **_kwargs: Any) -> Any:
+        """Record the call and abort the test.
+
+        :returns: Never returns.
+        :raises SpawnForbidden: Always.
+        """
+        calls.append(name)
+        raise SpawnForbidden(f"run_metadata must not call {name}")
+
+    return _spawn
+
+
 def test_run_metadata_carries_the_four_fixed_keys_as_strings() -> None:
     """``artifact/metadata.html`` renders exactly this vocabulary.
 
-    Every value is a string and a probe that yields nothing yields ``""``:
-    ``platform.processor()`` is empty on many Linux builds, and a report must
-    not fail a run because the machine would not describe its own CPU.
+    Every value is a string and a probe that yields nothing yields ``""``: a
+    report must not fail a run, nor grow or lose a key, because the host
+    described itself sparsely.
     """
     metadata = events.run_metadata()
 
@@ -1413,6 +1801,156 @@ def test_run_metadata_carries_the_four_fixed_keys_as_strings() -> None:
         for key in keys:
             assert isinstance(metadata[section][key], str)
     assert metadata["implementation"]["name"] == "behave"
+
+
+def test_run_metadata_spawns_no_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No metadata value may be obtained by executing a program.
+
+    Every entry point in :data:`SPAWN_ENTRY_POINTS` is replaced with a
+    :class:`SpawnForbidden` stand-in, so a probe that shells out aborts this
+    test rather than quietly returning a value.  ``platform``'s own uname cache
+    is cleared first: a probe that spawns only on a cold cache would otherwise
+    be indistinguishable from one that never spawns at all.
+
+    :param monkeypatch: Replaces the spawn entry points and the uname cache.
+    """
+    calls: list[str] = []
+    for module, attribute in SPAWN_ENTRY_POINTS:
+        monkeypatch.setattr(
+            module,
+            attribute,
+            _forbidden_spawn(f"{module.__name__}.{attribute}", calls),
+        )
+    monkeypatch.setattr(platform, "_uname_cache", None)
+
+    metadata = events.run_metadata()
+
+    assert calls == []
+    assert set(metadata) == set(METADATA_KEYS)
+    for section, keys in METADATA_KEYS.items():
+        assert_keys(metadata[section], keys, f"metadata[{section!r}]")
+        for key in keys:
+            assert isinstance(metadata[section][key], str)
+
+
+def test_run_metadata_never_calls_platform_processor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``platform.processor`` is not reachable from this function at all.
+
+    It is the one probe in ``platform`` that resolves and runs ``uname -p``
+    through the inherited ``PATH``, so the contract is its absence rather than
+    a guard around it: the replacement records any call and aborts, and
+    ``cpu.name`` still carries the machine type.
+
+    :param monkeypatch: Replaces ``platform.processor``.
+    """
+    calls: list[str] = []
+    monkeypatch.setattr(
+        platform, "processor", _forbidden_spawn("platform.processor", calls)
+    )
+
+    metadata = events.run_metadata()
+
+    assert calls == []
+    assert metadata["cpu"]["name"] == platform.machine().strip()
+
+
+@pytest.mark.skipif(
+    not POSIX_PATH_LOOKUP,
+    reason="only a POSIX host resolves a helper program through PATH",
+)
+def test_run_metadata_ignores_a_hostile_uname_on_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A planted ``uname`` earlier on ``PATH`` reaches no report value.
+
+    The executable prints :data:`HOSTILE_UNAME_MARKER` instead of a machine
+    description, which is what makes the influence visible: any metadata value
+    carrying that string was produced by running it.  The closing assertion
+    arms the trap -- ``platform.processor()`` *does* return the marker on this
+    host -- so the test cannot pass because the plant was unreachable or not
+    executable, only because ``run_metadata`` never consults it.
+
+    :param tmp_path: Directory the executable is planted in.
+    :param monkeypatch: Prepends that directory to ``PATH`` and clears
+        ``platform``'s uname cache, so the probe is genuinely re-resolved.
+    """
+    planted = tmp_path / "uname"
+    planted.write_text(f'#!/bin/sh\necho "{HOSTILE_UNAME_MARKER}"\n', encoding="utf-8")
+    planted.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path), prepend=os.pathsep)
+    monkeypatch.setattr(platform, "_uname_cache", None)
+
+    metadata = events.run_metadata()
+
+    assert HOSTILE_UNAME_MARKER not in json.dumps(metadata)
+    assert metadata["cpu"]["name"] == os.uname().machine
+    assert platform.processor() == HOSTILE_UNAME_MARKER
+
+
+@pytest.mark.parametrize(
+    ("machine", "expected"),
+    [
+        ("x86_64", "x86_64"),
+        ("  aarch64  ", "aarch64"),
+        ("\tarm64\n", "arm64"),
+        ("", ""),
+        ("   ", ""),
+    ],
+)
+def test_run_metadata_cpu_name_is_the_normalized_machine_type(
+    machine: str, expected: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``cpu.name`` is ``platform.machine()``, trimmed, or ``""``.
+
+    The machine type comes from the ``os.uname()`` fields the interpreter
+    already holds -- on Windows, from the architecture environment values -- so
+    it is the whole of what this key can be.  A host that describes itself with
+    surrounding whitespace, or not at all, contributes a trimmed value or the
+    module's blank placeholder; it never contributes ``None``, which
+    ``artifact/metadata.html`` would render as a row reading "None".
+
+    :param machine: What ``platform.machine`` reports.
+    :param expected: The ``cpu.name`` that must reach the document.
+    :param monkeypatch: Replaces ``platform.machine``.
+    """
+    monkeypatch.setattr(platform, "machine", lambda: machine)
+
+    metadata = events.run_metadata()
+
+    assert metadata["cpu"]["name"] == expected
+    assert isinstance(metadata["cpu"]["name"], str)
+    if not machine.strip():
+        assert metadata["cpu"]["name"] == events._UNKNOWN_METADATA_VALUE
+
+
+def test_run_metadata_survives_a_machine_probe_that_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe that raises or answers with a non-string still yields a string.
+
+    ``_safe_probe``'s never-raise guarantee is what lets the writers treat this
+    mapping as total, and normalizing the machine type must not weaken it: a
+    ``platform.machine`` that raises, and one that returns something with no
+    ``strip``, both contribute the blank placeholder.
+
+    :param monkeypatch: Replaces ``platform.machine``.
+    """
+
+    def _failing_machine() -> str:
+        """Fail the way a stripped-down platform module can.
+
+        :returns: Never returns.
+        :raises OSError: Always.
+        """
+        raise OSError("this platform does not describe its machine type")
+
+    monkeypatch.setattr(platform, "machine", _failing_machine)
+    assert events.run_metadata()["cpu"]["name"] == events._UNKNOWN_METADATA_VALUE
+
+    monkeypatch.setattr(platform, "machine", lambda: None)
+    assert events.run_metadata()["cpu"]["name"] == events._UNKNOWN_METADATA_VALUE
 
 
 # ==========================================================================
@@ -1538,6 +2076,7 @@ def test_new_element_scenario_omits_tags_when_it_has_none() -> None:
             keyword="Scenario",
             line=SALES_UNDEFINED_SCENARIO_LINE,
             name="Verify that the user's search finds his name",
+            identifier="sales;verify-that-the-user-s-search-finds-his-name",
             tags=tags,
         )
         assert "tags" not in element
@@ -1553,7 +2092,14 @@ def test_new_element_records_an_unknown_type_as_a_scenario(
     """
     with caplog.at_level(logging.WARNING, logger=events.__name__):
         element = events.new_element(
-            element_type="rule", keyword="Rule", line=3, name="odd"
+            element_type="rule",
+            keyword="Rule",
+            line=3,
+            name="odd",
+            # Coerced to a scenario, so it needs a scenario's identifier: the
+            # id is what every artifact keys on, and new_element refuses to
+            # build a test case without one.
+            identifier="odd-feature;odd",
         )
 
     assert element["type"] == events.ELEMENT_TYPE_SCENARIO
@@ -2143,28 +2689,22 @@ def test_load_result_set_completes_an_abbreviated_envelope(tmp_path: Path) -> No
 def test_load_result_set_reports_a_version_mismatch_through_one_channel(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A foreign schema version is reported, and each outcome is exact.
+    """A foreign schema version is **refused**, through one typed channel.
 
-    Two outcomes are admissible and **both are fully pinned here**, because
-    the module's published contract and the revision it is under disagree about
-    which one applies.  The module documents today's: ``load_result_set``
-    *"warns - and does not fail - when it reads a different version, because a
-    stale worker file is a diagnosable condition rather than a crash"*.  Its
-    owner is making that validation stricter and versioned, which would turn
-    the same input into a typed rejection.  Neither the AAP nor the baseline
-    settles it, so this test asserts the whole of each branch rather than
-    choosing between them:
+    A document declaring a version this build does not read is a document this
+    build cannot read in full, and the only honest answer is to refuse it: a
+    reader that continued past it would merge whatever fields it happened to
+    recognise and publish the result as a complete run, losing the rest
+    silently.  So ``load_result_set`` raises, and what it raises is
+    ``ResultSetError`` and nothing else -
+    ``app/services/test_run_service.py`` catches exactly that to name the
+    offending shard on stderr and apply the plan's dead-worker row, and a
+    failure escaping as an ``OSError`` or a ``ValueError`` would bypass that
+    handling and surface as an undocumented exit.
 
-    * **Accepted** -- the returned envelope is complete, the version the file
-      declared is *not* silently adopted as this build's, and a warning naming
-      both versions was emitted.  A diagnosable condition that is not
-      diagnosed is the failure mode this branch has to exclude.
-    * **Rejected** -- the error is ``ResultSetError``, naming the source and
-      the offending version, and nothing untyped escapes.  That single failure
-      channel is what ``app/services/test_run_service.py`` needs in order to
-      name the offending shard on stderr and apply the exit table.
-
-    So a silent acceptance fails here whichever way the owner settles it.
+    The message names both versions, because "this shard is dead" is only
+    actionable if it says why: the version the file declared and the one this
+    build reads.
     """
     foreign = tmp_path / "foreign-version.json"
     foreign.write_text(
@@ -2173,26 +2713,18 @@ def test_load_result_set_reports_a_version_mismatch_through_one_channel(
         ),
         encoding="utf-8",
     )
-
-    with caplog.at_level(logging.WARNING, logger=events.__name__):
-        try:
-            document = events.load_result_set(foreign)
-        except events.ResultSetError as error:
-            assert str(foreign) in str(error)
-            assert str(FOREIGN_SCHEMA_VERSION) in str(error)
-            return
-        except (ValueError, OSError, KeyError) as error:  # pragma: no cover
-            pytest.fail(f"an untyped error escaped load_result_set: {error!r}")
-
-    assert isinstance(document, dict)
-    assert_keys(document, RESULT_SET_KEYS, "foreign-version document")
     assert events.SCHEMA_VERSION != FOREIGN_SCHEMA_VERSION
-    messages = [record.getMessage() for record in caplog.records]
-    assert any(
-        str(FOREIGN_SCHEMA_VERSION) in message
-        and str(events.SCHEMA_VERSION) in message
-        for message in messages
-    ), f"the version mismatch was accepted without being reported: {messages}"
+
+    with (
+        caplog.at_level(logging.WARNING, logger=events.__name__),
+        pytest.raises(events.ResultSetError) as raised,
+    ):
+        events.load_result_set(foreign)
+
+    message = str(raised.value)
+    assert str(foreign) in message
+    assert str(FOREIGN_SCHEMA_VERSION) in message
+    assert str(events.SCHEMA_VERSION) in message
 
 
 def test_dump_result_set_reports_a_destination_it_cannot_write(
@@ -2209,8 +2741,8 @@ def test_dump_result_set_reports_a_destination_it_cannot_write(
     non-zero exit class, rather than as a shard that merges to nothing.
 
     A regular file is put where the destination's parent directory would go, so
-    ``ensure_parent`` cannot succeed and the failure is a genuine filesystem
-    condition rather than a patched one.
+    the directory creation inside ``open_artifact_write`` cannot succeed and the
+    failure is a genuine filesystem condition rather than a patched one.
     """
     blocker = tmp_path / "blocked"
     blocker.write_text("not a directory", encoding="utf-8")
@@ -2244,6 +2776,131 @@ def test_dump_result_set_reports_an_unserialisable_document(
     assert any(
         "coerced" in record.getMessage() for record in caplog.records
     ), "the coercion was applied without being reported"
+
+
+def test_dump_result_set_writes_the_same_bytes_through_the_path_authority(
+    sample_result_set: dict[str, Any], tmp_path: Path
+) -> None:
+    """The write route changed; the bytes and the permissions did not.
+
+    ``dump_result_set`` used to call ``ensure_parent`` and then the builtin
+    ``open`` on the pathname it returned - a verified parent released before a
+    second resolution of the same name, which is the check/open pair a link
+    swap redirects (CWE-367/CWE-59) - and it inherited whatever the process
+    umask allowed, measured at ``0o644``.  It now performs one
+    descriptor-bound open through ``app.utils.paths.open_artifact_write``.
+
+    Three things are asserted together because the change has to be invisible
+    in two of them and visible in the third: the file holds exactly the
+    serialised document plus the trailing newline, the returned path is still
+    the destination the caller passed, and the file and both created directory
+    components are owner-only - a worker's intermediate carries step arguments
+    substituted from the Examples tables and the failure text of every failed
+    step, so the mode is part of the contract and not a detail.
+    """
+    destination = worker_output_path(tmp_path)
+
+    written = events.dump_result_set(sample_result_set, destination)
+
+    assert written == destination
+    assert destination.read_text(encoding="utf-8") == (
+        f"{events._serialize(sample_result_set)}\n"
+    )
+    assert_owner_only(destination, directory=False)
+    for depth in range(1, len(WORKER_DIR_COMPONENTS) + 1):
+        assert_owner_only(
+            tmp_path.joinpath(*WORKER_DIR_COMPONENTS[:depth]), directory=True
+        )
+
+
+def test_dump_result_set_refuses_a_symlinked_destination_and_keeps_the_victim(
+    tmp_path: Path,
+) -> None:
+    """A link at the shard's name must not become a write outside the tree.
+
+    The security report's proof of this shape was a link swapped in between
+    ``ensure_parent`` and the builtin ``open``, which overwrote an external
+    writable file.  ``target/.workers/`` survives a ``--no-clean`` run, so the
+    name is reachable, and the merge step's own error handling relies on the
+    refusal being an ``OSError``:
+    ``app.utils.paths.ArtifactPathError`` is one, so a refused shard is the
+    writer-failure exit class of AAP 0.4.1 rather than an unhandled crash.
+
+    The victim's bytes are the real assertion - the exception on its own would
+    also be raised by an implementation that had already truncated it.
+    """
+    victim = plant_victim(tmp_path / "victim.txt")
+    destination = worker_output_path(tmp_path)
+    destination.parent.mkdir(parents=True)
+    destination.symlink_to(victim)
+
+    with pytest.raises(paths.ArtifactPathError) as raised:
+        events.dump_result_set(events.new_result_set(), destination)
+
+    assert isinstance(raised.value, OSError)
+    assert "symbolic link" in str(raised.value)
+    assert_victim_intact(victim)
+    assert destination.is_symlink(), "the link itself must be left alone"
+
+
+def test_dump_result_set_writes_the_object_it_verified_not_the_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A name replaced *after* the open must not receive the document.
+
+    The deterministic half of the race the finding describes.  The destination
+    is turned into a link to an external file at the one moment the writer is
+    holding its verified descriptor and has not yet written -- the serialiser
+    is the seam that makes that instant addressable -- and the document has to
+    land on the object that was opened, leaving the link's target untouched.
+    Any implementation that re-resolved the pathname to write, or that reopened
+    it to truncate, would empty the victim here.
+    """
+    victim = plant_victim(tmp_path / "victim.txt")
+    destination = worker_output_path(tmp_path)
+    document = events.new_result_set()
+    real_serialize = events._serialize
+
+    def swapping_serialize(candidate: Any) -> str:
+        """Replace the destination with a hostile link, then serialise.
+
+        :param candidate: The document, passed straight through.
+        :returns: The serialised document.
+        """
+        destination.unlink()
+        destination.symlink_to(victim)
+        return real_serialize(candidate)
+
+    monkeypatch.setattr(events, "_serialize", swapping_serialize)
+
+    assert events.dump_result_set(document, destination) == destination
+
+    assert_victim_intact(victim)
+    assert destination.is_symlink(), "the swap is the point of this test"
+
+
+def test_dump_result_set_refuses_a_hard_linked_destination_and_keeps_the_victim(
+    tmp_path: Path,
+) -> None:
+    """The same refusal for the case no symlink check can see.
+
+    A shard's name hard-linked to a file elsewhere *is* that file: every byte
+    of the document would be written into it, with no link anywhere in the path
+    for a link check to find.  The path authority refuses it on the link count
+    of the object it opened, before the truncation, which is why both files are
+    still intact afterwards.
+    """
+    victim = plant_victim(tmp_path / "victim.txt")
+    destination = worker_output_path(tmp_path)
+    destination.parent.mkdir(parents=True)
+    os.link(victim, destination)
+
+    with pytest.raises(paths.ArtifactPathError) as raised:
+        events.dump_result_set(events.new_result_set(), destination)
+
+    assert "hard link" in str(raised.value)
+    assert_victim_intact(victim)
+    assert_victim_intact(destination)
 
 
 def test_a_malformed_worker_file_is_named_and_the_others_still_merge(
@@ -2683,6 +3340,1057 @@ def test_merge_warns_when_a_shard_declares_a_foreign_schema_version(
 
 
 # ==========================================================================
+# The value rules: what a field of the right type may not say
+#
+# The shape rules above establish that a document has the keys and the types
+# this schema documents.  These establish the rest of it: that a field of the
+# right type does not carry a value the writers cannot agree on.  Each rule is
+# asserted from both sides - the honest document still loads, the contradictory
+# one is refused with a message naming its path - because a rule that only
+# rejects is indistinguishable from a rule that rejects everything.
+# ==========================================================================
+
+
+def _loadable(
+    tmp_path: Path,
+    features: Sequence[dict[str, Any]],
+    *,
+    name: str = "shard.json",
+    **run_fields: Any,
+) -> Path:
+    """Write a one-shard document to ``tmp_path`` and return its path.
+
+    :param tmp_path: pytest's temporary directory.
+    :param features: The feature objects the document carries.
+    :param name: The file name, so one test can write several shards.
+    :param run_fields: Run-level overrides passed to ``new_result_set``.
+    :returns: The path written.
+    """
+    shard = tmp_path / name
+    events.dump_result_set(
+        events.new_result_set(metadata={}, features=list(features), **run_fields),
+        shard,
+    )
+    return shard
+
+
+def _refusal(path: Path) -> str:
+    """Load ``path``, requiring it to be refused, and return the message.
+
+    :param path: A document expected to violate the schema.
+    :returns: The text of the ``ResultSetError`` raised.
+    """
+    with pytest.raises(events.ResultSetError) as raised:
+        events.load_result_set(path)
+    message = str(raised.value)
+    assert str(path) in message
+    return message
+
+
+def _one_scenario_feature(
+    *,
+    element: dict[str, Any] | None = None,
+    path: str = CRM_PATH,
+    uri: str | None = None,
+    line: int = 2,
+    tags: Sequence[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build a feature carrying exactly one scenario element.
+
+    :param element: The scenario element; a plain passing one by default.
+    :param path: The feature's path.
+    :param uri: Its URI; ``file:`` plus ``path`` by default, which is what the
+        collector emits.
+    :param line: The ``Feature:`` line.
+    :param tags: Long-shape feature tags.
+    :returns: The feature object.
+    """
+    return events.new_feature(
+        uri=f"{paths.FILE_URI_SCHEME}{path}" if uri is None else uri,
+        path=path,
+        identifier=CRM_FEATURE_ID,
+        line=line,
+        name=CRM_FEATURE_NAME,
+        tags=tags,
+        elements=[_scenario(CRM_PASSING_SCENARIO_LINE) if element is None else element],
+    )
+
+
+def test_a_document_whose_values_are_all_honest_still_loads(tmp_path: Path) -> None:
+    """The accept side of every rule below, asserted once.
+
+    Every value rule is a way of refusing a document, so one document
+    exercising all of them at their honest values is what keeps the rules from
+    being vacuous: a positive line, a zero duration, a complete argument span,
+    a matched step naming its definition, a scenario with an id, agreeing
+    ``uri``/``path``, a long-shape feature tag beside a short-shape scenario
+    tag, a Background occurrence in front of its scenario, and contract
+    timestamps at both levels.
+    """
+    step = events.new_step(
+        keyword="Then",
+        line=CRM_PASSING_SCENARIO_LINE + 1,
+        name='User can see "Test2" in the dashboard',
+        matched=True,
+        match={
+            "location": "features.steps.crm_steps.user_can_see",
+            "arguments": [{"val": '"Test2"', "offset": 18}],
+        },
+        result={"status": "skipped", "duration": 0},
+    )
+    scenario = events.new_element(
+        element_type=events.ELEMENT_TYPE_SCENARIO,
+        keyword="Scenario",
+        line=CRM_PASSING_SCENARIO_LINE,
+        name="User can create pipeline",
+        identifier=f"{CRM_FEATURE_ID};user-can-create-pipeline",
+        start_timestamp=GOLDEN_TIMESTAMP,
+        tags=[events.scenario_tag("@Smoke")],
+        steps=[step],
+    )
+    feature = _one_scenario_feature(
+        element=scenario, tags=[events.feature_tag("@Smoke", 1, 1)]
+    )
+    feature["elements"].insert(0, _background())
+
+    document = events.load_result_set(
+        _loadable(
+            tmp_path,
+            [feature],
+            started_at=GOLDEN_TIMESTAMP,
+            generated_at=GOLDEN_TIMESTAMP,
+        )
+    )
+
+    assert document["features"][0]["elements"][1]["steps"][0]["match"]["arguments"] == [
+        {"val": '"Test2"', "offset": 18}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "expected"),
+    [
+        pytest.param(
+            lambda feature: feature.update(line=0),
+            "numbered from 1",
+            id="feature-line-zero",
+        ),
+        pytest.param(
+            lambda feature: feature["elements"][0].update(line=-3),
+            "numbered from 1",
+            id="element-line-negative",
+        ),
+        pytest.param(
+            lambda feature: feature["elements"][0]["steps"][0].update(line=0),
+            "numbered from 1",
+            id="step-line-zero",
+        ),
+        pytest.param(
+            lambda feature: feature["tags"][0]["location"].update(line=0),
+            "numbered from 1",
+            id="tag-line-zero",
+        ),
+        pytest.param(
+            lambda feature: feature["tags"][0]["location"].update(column=0),
+            "numbered from 1",
+            id="tag-column-zero",
+        ),
+        pytest.param(
+            lambda feature: feature["elements"][0]["steps"][0]["result"].update(
+                duration=-1
+            ),
+            "cannot be negative",
+            id="negative-step-duration",
+        ),
+        pytest.param(
+            lambda feature: feature["elements"][0]["after"].append(
+                events.new_hook_entry(status="passed", duration=0)
+                | {"result": {"status": "passed", "duration": -5}}
+            ),
+            "cannot be negative",
+            id="negative-hook-duration",
+        ),
+        pytest.param(
+            lambda feature: feature["elements"][0]["steps"][0]["match"].update(
+                arguments=[{"val": '"Test2"', "offset": -1}]
+            ),
+            "cannot be negative",
+            id="negative-argument-offset",
+        ),
+    ],
+)
+def test_a_source_position_or_a_measured_quantity_out_of_range_is_refused(
+    tmp_path: Path, mutate: Callable[[dict[str, Any]], None], expected: str
+) -> None:
+    """Type alone was never the rule: the range is part of the contract.
+
+    A line of ``0`` names no position in any feature file, and every consumer
+    reads these numbers for something different - the rerun manifest writes a
+    feature's failing lines as machine input to the next run, the JSON artifact
+    publishes them, the Pretty pages render them as source references a human
+    opens - so none of them can detect the gap alone.  A negative duration is
+    worse still: it is *emitted*, because the JSON writer emits the key
+    whenever the value is non-zero.
+
+    :param tmp_path: pytest's temporary directory.
+    :param mutate: Applies the one out-of-range value to an otherwise honest
+        feature.
+    :param expected: The fragment of the rejection that names the rule.
+    """
+    step = events.new_step(
+        keyword="Given",
+        line=CRM_PASSING_SCENARIO_LINE + 1,
+        name='a step taking "Test2"',
+        matched=True,
+        match={
+            "location": "features.steps.crm_steps.a_step",
+            "arguments": [{"val": '"Test2"', "offset": 14}],
+        },
+        result={"status": "passed", "duration": 1_000_000},
+    )
+    scenario = events.new_element(
+        element_type=events.ELEMENT_TYPE_SCENARIO,
+        keyword="Scenario",
+        line=CRM_PASSING_SCENARIO_LINE,
+        name="a scenario",
+        identifier=f"{CRM_FEATURE_ID};a-scenario",
+        start_timestamp=GOLDEN_TIMESTAMP,
+        steps=[step],
+    )
+    feature = _one_scenario_feature(
+        element=scenario, tags=[events.feature_tag("@Smoke", 1, 1)]
+    )
+    mutate(feature)
+
+    assert expected in _refusal(_loadable(tmp_path, [feature]))
+
+
+@pytest.mark.parametrize(
+    ("matched", "match", "expected"),
+    [
+        pytest.param(
+            True, {}, "must carry 'location'", id="matched-without-a-location"
+        ),
+        pytest.param(
+            True,
+            {"location": ""},
+            "is empty for a step whose 'matched' is true",
+            id="matched-with-an-empty-location",
+        ),
+        pytest.param(
+            False,
+            {"location": "features.steps.crm_steps.a_step"},
+            "must be empty for a step whose 'matched' is false",
+            id="unmatched-with-a-location",
+        ),
+        pytest.param(
+            False,
+            {"arguments": [{"val": "x", "offset": 0}]},
+            "must be empty for a step whose 'matched' is false",
+            id="unmatched-with-arguments",
+        ),
+    ],
+)
+def test_a_step_whose_match_contradicts_its_matched_flag_is_refused(
+    tmp_path: Path, matched: bool, match: dict[str, Any], expected: str
+) -> None:
+    """``matched`` and ``match.location`` state one fact, so they must agree.
+
+    They are read separately downstream, which is why the contradiction
+    mattered: ``app/reporting/cucumber_json.py`` maps a dry run's step status
+    from ``matched`` while ``app/templates/pretty/overview_steps.html`` groups
+    the Steps overview by ``match.location``.  A step claiming both states at
+    once was published as a passing step belonging to no definition, or as an
+    undefined step on a definition the overview still counted.
+
+    :param tmp_path: pytest's temporary directory.
+    :param matched: The flag the step carries.
+    :param match: The contradictory match mapping.
+    :param expected: The fragment of the rejection that names the rule.
+    """
+    step = events.new_step(
+        keyword="Given",
+        line=CRM_PASSING_SCENARIO_LINE + 1,
+        name="a step",
+        matched=matched,
+        match=match,
+        result={"status": "passed", "duration": 0},
+    )
+    scenario = events.new_element(
+        element_type=events.ELEMENT_TYPE_SCENARIO,
+        keyword="Scenario",
+        line=CRM_PASSING_SCENARIO_LINE,
+        name="a scenario",
+        identifier=f"{CRM_FEATURE_ID};a-scenario",
+        start_timestamp=GOLDEN_TIMESTAMP,
+        steps=[step],
+    )
+
+    message = _refusal(
+        _loadable(tmp_path, [_one_scenario_feature(element=scenario)])
+    )
+
+    assert expected in message
+    assert "steps[0].match" in message
+
+
+@pytest.mark.parametrize(
+    ("argument", "expected"),
+    [
+        pytest.param({"val": '"Test2"'}, "without offset", id="a-value-with-no-offset"),
+        pytest.param({"offset": 3}, "without val", id="an-offset-with-no-value"),
+        pytest.param(
+            {"val": '"Test2"', "offset": 99},
+            "past the end of the",
+            id="an-offset-past-the-step-name",
+        ),
+        pytest.param(
+            {"val": "x", "offset": len('a step taking "Test2"')},
+            "spans characters",
+            id="a-value-beginning-at-the-end-of-the-step-name",
+        ),
+        pytest.param(
+            {"val": '"Test2" and more', "offset": 14},
+            "spans characters",
+            id="a-span-beginning-inside-and-ending-past-the-step-name",
+        ),
+    ],
+)
+def test_an_incomplete_or_unlocatable_argument_span_is_refused(
+    tmp_path: Path, argument: dict[str, Any], expected: str
+) -> None:
+    """``val`` and ``offset`` are one datum, and the offset indexes the name.
+
+    A ``val`` with no ``offset`` cannot be located in the step text and an
+    ``offset`` with no ``val`` locates nothing, so half an argument is refused
+    rather than published to a consumer that would have to guess the other
+    half.  An empty mapping stays valid - it is the JVM's own shape for a
+    parameter that captured no value.
+
+    :param tmp_path: pytest's temporary directory.
+    :param argument: The malformed argument mapping.
+    :param expected: The fragment of the rejection that names the rule.
+    """
+    step = events.new_step(
+        keyword="Given",
+        line=CRM_PASSING_SCENARIO_LINE + 1,
+        name='a step taking "Test2"',
+        matched=True,
+        match={
+            "location": "features.steps.crm_steps.a_step",
+            "arguments": [argument],
+        },
+        result={"status": "passed", "duration": 0},
+    )
+    scenario = events.new_element(
+        element_type=events.ELEMENT_TYPE_SCENARIO,
+        keyword="Scenario",
+        line=CRM_PASSING_SCENARIO_LINE,
+        name="a scenario",
+        identifier=f"{CRM_FEATURE_ID};a-scenario",
+        start_timestamp=GOLDEN_TIMESTAMP,
+        steps=[step],
+    )
+
+    message = _refusal(
+        _loadable(tmp_path, [_one_scenario_feature(element=scenario)])
+    )
+
+    assert expected in message
+    assert "arguments[0]" in message
+
+
+def test_a_span_ending_exactly_at_the_end_of_the_step_name_is_accepted(
+    tmp_path: Path,
+) -> None:
+    """The span-end bound is inclusive, and the reference relies on it.
+
+    ``"Test2"`` is the last thing in the reference's parameterized step name,
+    so its span ends at exactly ``len(name)``.  The rule above refuses a span
+    that ends *past* the text; a span that ends flush with it is the common
+    case and must pass, or every trailing argument in the suite would be
+    refused.
+    """
+    step_name = 'a step taking "Test2"'
+    offset = step_name.index('"Test2"')
+    step = events.new_step(
+        keyword="Given",
+        line=CRM_PASSING_SCENARIO_LINE + 1,
+        name=step_name,
+        matched=True,
+        match={
+            "location": "features.steps.crm_steps.a_step",
+            "arguments": [{"val": '"Test2"', "offset": offset}],
+        },
+        result={"status": "passed", "duration": 0},
+    )
+    scenario = events.new_element(
+        element_type=events.ELEMENT_TYPE_SCENARIO,
+        keyword="Scenario",
+        line=CRM_PASSING_SCENARIO_LINE,
+        name="a scenario",
+        identifier=f"{CRM_FEATURE_ID};a-scenario",
+        start_timestamp=GOLDEN_TIMESTAMP,
+        steps=[step],
+    )
+
+    document = events.load_result_set(
+        _loadable(tmp_path, [_one_scenario_feature(element=scenario)])
+    )
+    argument = document["features"][0]["elements"][0]["steps"][0]["match"][
+        "arguments"
+    ][0]
+
+    assert argument == {"val": '"Test2"', "offset": offset}
+    assert argument["offset"] + len(argument["val"]) == len(step_name)
+
+
+def test_an_empty_argument_mapping_is_the_jvm_shape_and_is_accepted(
+    tmp_path: Path,
+) -> None:
+    """A parameter that captured no value is ``{}``, and stays ``{}``.
+
+    ``createMatchMap`` records an empty mapping for an argument without a
+    value rather than dropping the entry, so the count of arguments still
+    matches the definition's parameters.  The completeness rule above must not
+    refuse it.
+    """
+    step = events.new_step(
+        keyword="Given",
+        line=CRM_PASSING_SCENARIO_LINE + 1,
+        name="a step with a valueless parameter",
+        matched=True,
+        match={
+            "location": "features.steps.crm_steps.a_step",
+            "arguments": [{}],
+        },
+        result={"status": "passed", "duration": 0},
+    )
+    scenario = events.new_element(
+        element_type=events.ELEMENT_TYPE_SCENARIO,
+        keyword="Scenario",
+        line=CRM_PASSING_SCENARIO_LINE,
+        name="a scenario",
+        identifier=f"{CRM_FEATURE_ID};a-scenario",
+        start_timestamp=GOLDEN_TIMESTAMP,
+        steps=[step],
+    )
+
+    document = events.load_result_set(
+        _loadable(tmp_path, [_one_scenario_feature(element=scenario)])
+    )
+
+    element = document["features"][0]["elements"][0]
+    assert element["steps"][0]["match"]["arguments"] == [{}]
+
+
+def test_a_scenario_with_an_empty_id_is_refused(tmp_path: Path) -> None:
+    """The id is the identity every artifact keys on, so it must survive.
+
+    An empty one used to reach the JSON writer, which rebuilt it from the
+    feature and scenario names - correct for a plain scenario and **wrong for
+    an Examples row**, whose id carries the Examples block's slug and the
+    row's position, neither of which any other field of the element records.
+    The artifact then named a test case the suite does not contain.
+    """
+    scenario = _scenario(CRM_PASSING_SCENARIO_LINE)
+    scenario["id"] = ""
+
+    message = _refusal(
+        _loadable(tmp_path, [_one_scenario_feature(element=scenario)])
+    )
+
+    assert "elements[0].id" in message
+    assert "is empty" in message
+
+
+def test_new_element_refuses_to_build_a_scenario_without_an_id() -> None:
+    """The build side of the same rule, where the id can still be computed.
+
+    ``scenario_element_id`` is the one producer of a scenario id, and it always
+    returns a non-empty value.  A caller that supplies none is not building a
+    sparse element, it is building a test case with no identity, so the builder
+    refuses rather than emitting one for a consumer to invent.
+    """
+    with pytest.raises(ValueError, match="non-empty identifier"):
+        events.new_element(
+            element_type=events.ELEMENT_TYPE_SCENARIO,
+            keyword="Scenario",
+            line=CRM_PASSING_SCENARIO_LINE,
+            name="a scenario with no id",
+        )
+
+
+@pytest.mark.parametrize(
+    ("uri", "path", "expected"),
+    [
+        pytest.param("", CRM_PATH, "is empty", id="an-empty-uri"),
+        pytest.param(
+            f"{paths.FILE_URI_SCHEME}{CRM_PATH}", "", "is empty", id="an-empty-path"
+        ),
+        pytest.param(
+            f"{paths.FILE_URI_SCHEME}{CRM_PATH}",
+            f"{paths.NORMALIZED_FEATURES_PREFIX}Notes.feature",
+            "requires",
+            id="a-uri-and-path-that-name-different-files",
+        ),
+        pytest.param(
+            CRM_PATH, CRM_PATH, "requires", id="a-uri-with-no-scheme"
+        ),
+        pytest.param(
+            f"{paths.FILE_URI_SCHEME}{paths.FILE_URI_SCHEME}{CRM_PATH}",
+            f"{paths.FILE_URI_SCHEME}{CRM_PATH}",
+            "carries the 'file:' scheme",
+            id="a-scheme-on-the-path-and-two-on-the-uri",
+        ),
+        pytest.param(
+            f"{paths.FILE_URI_SCHEME}{paths.FILE_URI_SCHEME}{CRM_PATH}",
+            CRM_PATH,
+            "requires",
+            id="a-doubled-scheme-on-the-uri",
+        ),
+    ],
+)
+def test_a_feature_whose_uri_and_path_are_not_canonical_is_refused(
+    tmp_path: Path, uri: str, path: str, expected: str
+) -> None:
+    """One identity in two **fixed** spellings, read by different consumers.
+
+    The JSON writer copies ``uri``, PrettyReports hashes it to name each
+    feature's detail page, and the rerun manifest and the merge use ``path``.
+    So a feature carrying only one member, or two that name different files,
+    is published under one name, linked under a hash of another and re-run
+    from a third - and no single consumer can see it, because each reads one
+    member.
+
+    Agreement alone is not enough, which is why the last three cases are
+    here.  AAP 0.6 fixes the emitted ``uri`` as exactly one ``file:`` prefix
+    in front of a repository-relative path, and
+    ``app/reporting/rerun_report.py`` adds that prefix itself in front of
+    ``path`` - so a scheme-less ``uri`` publishes a shape the artifact's
+    schema does not describe, and a scheme *on* ``path`` is written twice into
+    the manifest the next ``--rerun`` reads.  A pair that agrees on the wrong
+    shape passes an equality-after-strip test and is refused here.
+
+    :param tmp_path: pytest's temporary directory.
+    :param uri: The feature's URI.
+    :param path: The feature's path.
+    :param expected: The fragment of the rejection that names the rule.
+    """
+    feature = _one_scenario_feature(path=path or CRM_PATH, uri=uri)
+    feature["path"] = path
+
+    assert expected in _refusal(_loadable(tmp_path, [feature]))
+
+
+def test_the_canonical_pair_is_what_the_collector_writes(tmp_path: Path) -> None:
+    """The accept side: ``uri`` is the scheme followed by ``path``, exactly.
+
+    This is what :meth:`ResultCollectorFormatter.feature` emits - it builds
+    the URI as ``FILE_URI_SCHEME`` plus the normalised path - so the rule
+    above refuses nothing a real shard contains.
+    """
+    document = events.load_result_set(
+        _loadable(tmp_path, [_one_scenario_feature()])
+    )
+    feature = document["features"][0]
+
+    assert feature["path"] == CRM_PATH
+    assert feature["uri"] == f"{paths.FILE_URI_SCHEME}{CRM_PATH}"
+
+
+@pytest.mark.parametrize(
+    ("elements", "expected"),
+    [
+        pytest.param(
+            ["background", "background", "scenario"],
+            "following the one at index 0",
+            id="two-backgrounds-in-a-row",
+        ),
+        pytest.param(
+            ["scenario", "background"],
+            "trailing background",
+            id="a-background-with-no-scenario-after-it",
+        ),
+    ],
+)
+def test_an_element_list_that_is_not_units_is_refused(
+    tmp_path: Path, elements: Sequence[str], expected: str
+) -> None:
+    """A Background occurrence is emitted *for* a scenario, so it precedes one.
+
+    Four consumers group the flat list back into units - the merge to order
+    them, the JSON writer to keep or drop one whole, the rerun writer to fold a
+    failing Background into its scenario, the aggregate to count the unit once
+    - and on a list that is not units they disagreed silently, one dropping a
+    stray occurrence, one attaching it to the next scenario, one counting it as
+    a test case.
+
+    :param tmp_path: pytest's temporary directory.
+    :param elements: The element kinds to lay out, in order.
+    :param expected: The fragment of the rejection that names the rule.
+    """
+    built: list[dict[str, Any]] = []
+    for index, kind in enumerate(elements):
+        if kind == "background":
+            built.append(_background())
+        else:
+            built.append(_scenario(CRM_PASSING_SCENARIO_LINE + index))
+    feature = _one_scenario_feature()
+    feature["elements"] = built
+
+    assert expected in _refusal(_loadable(tmp_path, [feature]))
+
+
+def test_a_background_that_does_not_share_its_scenarios_fate_is_refused(
+    tmp_path: Path,
+) -> None:
+    """An occurrence is kept or dropped with the scenario it ran for.
+
+    ``selected`` is what the JSON writer filters on, and it drops a unit whole:
+    a Background whose flag disagreed with its scenario's was either emitted
+    for a test case the artifact does not contain, or dropped from one it does.
+    """
+    background = _background()
+    background["selected"] = False
+    feature = _one_scenario_feature()
+    feature["elements"].insert(0, background)
+
+    message = _refusal(_loadable(tmp_path, [feature]))
+
+    assert "does not share the 'selected' value" in message
+
+
+@pytest.mark.parametrize(
+    ("tags", "expected"),
+    [
+        pytest.param(
+            [{"name": "@Smoke"}],
+            "must carry 'location'",
+            id="a-feature-tag-in-the-short-shape",
+        ),
+        pytest.param(
+            [{"name": "@Smoke", "type": "Tag", "location": {"line": 1}}],
+            "must carry 'column'",
+            id="a-feature-tag-with-half-a-location",
+        ),
+        pytest.param(
+            [{"name": "@Smoke", "type": "Annotation", "location": {"line": 1, "column": 1}}],
+            "is the literal 'Tag'",
+            id="a-feature-tag-with-another-type",
+        ),
+        pytest.param(
+            [{"name": "Smoke", "type": "Tag", "location": {"line": 1, "column": 1}}],
+            "carries the leading '@'",
+            id="a-tag-name-without-its-at-sign",
+        ),
+    ],
+)
+def test_a_feature_tag_must_carry_the_long_shape_exactly(
+    tmp_path: Path, tags: Sequence[dict[str, Any]], expected: str
+) -> None:
+    """The long shape is what lets the JSON writer copy rather than invent.
+
+    A feature tag arriving without its own ``location`` left that writer
+    nothing to copy but the feature's line - and the baseline's ``@Smoke`` sits
+    on line 1 while its ``Feature:`` keyword sits on line 2, so the synthesised
+    value was wrong for exactly the case the artifact pins.
+
+    :param tmp_path: pytest's temporary directory.
+    :param tags: The feature-level tags to carry.
+    :param expected: The fragment of the rejection that names the rule.
+    """
+    feature = _one_scenario_feature()
+    feature["tags"] = [dict(tag) for tag in tags]
+
+    assert expected in _refusal(_loadable(tmp_path, [feature]))
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        pytest.param(
+            {"name": "@Smoke", "type": "Tag", "location": {"line": 1, "column": 1}},
+            id="a-scenario-tag-in-the-long-shape",
+        ),
+        pytest.param(
+            {"name": "@Smoke", "location": {"line": 1, "column": 1}},
+            id="a-scenario-tag-with-a-location",
+        ),
+    ],
+)
+def test_a_scenario_tag_must_carry_the_short_shape_exactly(
+    tmp_path: Path, tag: dict[str, Any]
+) -> None:
+    """A scenario tag is ``{"name": ...}`` and nothing else.
+
+    The asymmetry with a feature tag is measured in the reference, where the
+    same ``@Smoke`` carries a type and a location at feature level and neither
+    on any of the four scenario elements.  A ``location`` accepted here would
+    reach an artifact whose scenario tags have never carried one.
+
+    :param tmp_path: pytest's temporary directory.
+    :param tag: The over-specified scenario tag.
+    """
+    scenario = _scenario(CRM_PASSING_SCENARIO_LINE)
+    scenario["tags"] = [tag]
+
+    message = _refusal(
+        _loadable(tmp_path, [_one_scenario_feature(element=scenario)])
+    )
+
+    assert "carries the unknown key" in message
+    assert "tags[0]" in message
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        pytest.param("2022-09-07T13:37:26.297123Z", id="microsecond-precision"),
+        pytest.param("2022-09-07T13:37:26.297+00:00", id="an-explicit-utc-offset"),
+        pytest.param("2022-09-07 13:37:26.297Z", id="a-space-instead-of-the-t"),
+        pytest.param("2022-09-07T13:37:26Z", id="no-fractional-digits"),
+        pytest.param("not a timestamp", id="free-text"),
+    ],
+)
+def test_a_timestamp_in_any_other_spelling_is_refused(
+    tmp_path: Path, spelling: str
+) -> None:
+    """One spelling, because three surfaces read these values differently.
+
+    ``app/templates/index.html`` and both HTML writers display the string,
+    ``app/reporting/aggregation.py`` parses it and drops what it cannot read,
+    and the merge orders by it - so a value only some of them understand
+    became a literal on one page and a missing run start on another, with
+    nothing left able to name the shard it came from.
+
+    :param tmp_path: pytest's temporary directory.
+    :param spelling: The timestamp spelling under test.
+    """
+    scenario = _scenario(CRM_PASSING_SCENARIO_LINE)
+    scenario["start_timestamp"] = spelling
+
+    message = _refusal(
+        _loadable(tmp_path, [_one_scenario_feature(element=scenario)])
+    )
+
+    assert "start_timestamp" in message
+    assert "YYYY-MM-DDTHH:MM:SS.mmmZ" in message
+
+
+@pytest.mark.parametrize("key", ["started_at", "generated_at"])
+def test_a_run_level_timestamp_in_any_other_spelling_is_refused(
+    tmp_path: Path, key: str
+) -> None:
+    """The same rule at run level, where the HTML metadata block reads it.
+
+    :param tmp_path: pytest's temporary directory.
+    :param key: The run-level timestamp under test.
+    """
+    shard = _loadable(tmp_path, [_one_scenario_feature()], **{key: None})
+    document = json.loads(shard.read_text(encoding="utf-8"))
+    document[key] = "07/09/2022 13:37"
+    shard.write_text(json.dumps(document), encoding="utf-8")
+
+    message = _refusal(shard)
+
+    assert key in message
+    assert "YYYY-MM-DDTHH:MM:SS.mmmZ" in message
+
+
+def test_a_null_timestamp_stays_admissible_at_both_levels(tmp_path: Path) -> None:
+    """``None`` is a state this schema has, so it is not a malformed value.
+
+    ``new_result_set`` starts both run-level stamps at ``None`` and a scenario
+    the tag expression excluded is announced without one, so the timestamp
+    rule refuses a *string* it cannot read rather than the absence of a value.
+    """
+    scenario = _scenario(CRM_PASSING_SCENARIO_LINE)
+    scenario["start_timestamp"] = None
+    scenario["selected"] = False
+
+    document = events.load_result_set(
+        _loadable(tmp_path, [_one_scenario_feature(element=scenario)])
+    )
+
+    assert document["started_at"] is None
+    assert document["generated_at"] is None
+    assert document["features"][0]["elements"][0]["start_timestamp"] is None
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            GOLDEN_TIMESTAMP,
+            GOLDEN_INSTANT.replace(microsecond=297_000),
+            id="the-contract-spelling",
+        ),
+        pytest.param("2022-09-07T13:37:26.297123Z", None, id="microseconds"),
+        pytest.param("2022-13-07T13:37:26.297Z", None, id="an-impossible-month"),
+        pytest.param("2022-02-31T13:37:26.297Z", None, id="an-impossible-day"),
+        pytest.param(None, None, id="none"),
+        pytest.param(1662557846, None, id="an-epoch-integer"),
+    ],
+)
+def test_parse_timestamp_accepts_the_contract_spelling_and_nothing_else(
+    text: Any, expected: datetime | None
+) -> None:
+    """The inverse of ``format_timestamp``, exact in both directions.
+
+    The pattern establishes the shape and ``strptime`` parses the fields, which
+    is what makes an impossible date fail rather than pass a shape check.
+
+    :param text: The value to parse.
+    :param expected: The instant it names, or ``None``.
+    """
+    assert events.parse_timestamp(text) == expected
+
+
+def test_a_run_start_ignores_a_scenario_the_filter_excluded(tmp_path: Path) -> None:
+    """The run's start is the first **selected** scenario's, not the first seen.
+
+    behave announces an excluded scenario at the point the run reached it, and
+    this document records it, but the JSON artifact omits it entirely and
+    ``app/reporting/aggregation.py`` computes its earliest start over what
+    survives selection.  Counting it here made the two disagree, and
+    ``app/reporting/html_report.py`` prefers this one - so one page showed a
+    run starting before the first scenario it lists.
+    """
+    excluded = _scenario(CRM_PASSING_SCENARIO_LINE)
+    excluded["selected"] = False
+    excluded["start_timestamp"] = events.format_timestamp(GOLDEN_INSTANT)
+    selected = _scenario(CRM_PASSING_SCENARIO_LINE + 10)
+    selected["start_timestamp"] = events.format_timestamp(
+        GOLDEN_INSTANT + timedelta(minutes=5)
+    )
+    feature = _one_scenario_feature()
+    feature["elements"] = [excluded, selected]
+
+    merged = events.merge_result_sets(
+        [events.load_result_set(_loadable(tmp_path, [feature]))]
+    )
+
+    assert merged["started_at"] == selected["start_timestamp"]
+
+
+def test_the_merge_orders_the_run_stamps_by_instant_and_keeps_the_spelling() -> None:
+    """Ordering is by parsed instant; the string comes back as it arrived.
+
+    The two agree for this fixed-width UTC spelling, which is why a string
+    comparison was defensible - and they stop agreeing the moment a hand-built
+    document carries anything else, which this function accepts.  A value no
+    consumer can parse must not be able to become the run's start.
+    """
+    early = "2022-09-07T13:37:26.297Z"
+    late = "2022-09-07T13:39:12.484Z"
+    merged = events.merge_result_sets(
+        [
+            {"features": [], "started_at": late, "generated_at": early},
+            {"features": [], "started_at": early, "generated_at": late},
+            {"features": [], "started_at": "yesterday", "generated_at": ""},
+        ]
+    )
+
+    assert merged["started_at"] == early
+    assert merged["generated_at"] == late
+
+
+def test_the_merge_reports_shards_recorded_under_different_tag_expressions(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``tag_expression``'s one consumer, and what it is retained for.
+
+    Every worker of a run is launched with the same recorded expression, so two
+    shards carrying different ones are shards from two different runs - a stale
+    intermediate, or two runs sharing an output directory.  The merge still
+    returns the first, because refusing would discard results the run did
+    produce, but it says so: a merged report describing two filters with no
+    trace of which scenarios came from which is the outcome the warning exists
+    to prevent.
+    """
+    with caplog.at_level(logging.WARNING, logger=events.__name__):
+        merged = events.merge_result_sets(
+            [
+                {"features": [], "tag_expression": "@Smoke"},
+                {"features": [], "tag_expression": "not @wip"},
+            ]
+        )
+
+    assert merged["tag_expression"] == "@Smoke"
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "@Smoke" in message and "not @wip" in message for message in messages
+    ), f"the disagreement was not reported: {messages}"
+
+
+def test_the_merge_says_nothing_when_every_shard_agrees(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A run whose shards agree is the normal case and must stay quiet.
+
+    A warning on every merge would be noise, and noise is what makes the real
+    one invisible.
+    """
+    with caplog.at_level(logging.WARNING, logger=events.__name__):
+        merged = events.merge_result_sets(
+            [
+                {"features": [], "tag_expression": "@Smoke"},
+                {"features": [], "tag_expression": "@Smoke"},
+                {"features": [], "tag_expression": None},
+            ]
+        )
+
+    assert merged["tag_expression"] == "@Smoke"
+    assert caplog.records == []
+
+
+def test_element_units_is_the_grouping_every_consumer_shares() -> None:
+    """One grouping, exported, so four consumers cannot disagree about it.
+
+    A Background occurrence belongs immediately in front of its scenario, and
+    the unit is what the merge orders, the JSON writer keeps or drops whole,
+    the rerun writer folds together and the aggregate counts once.  A
+    hand-built list that is not units keeps its odd occurrence as a unit of its
+    own rather than losing it.
+    """
+    background = _background()
+    first = _scenario(CRM_PASSING_SCENARIO_LINE)
+    second = _scenario(CRM_PASSING_SCENARIO_LINE + 7)
+
+    assert events.element_units([background, first, second]) == [
+        [background, first],
+        [second],
+    ]
+    assert events.element_units([]) == []
+    assert events.element_units([background, background]) == [
+        [background],
+        [background],
+    ]
+    assert events.element_units([first, background]) == [[first], [background]]
+    assert events.element_units(["not an element", first]) == [[first]]
+
+
+def test_every_grouping_consumer_agrees_with_the_exported_one() -> None:
+    """The seam: a second grouping must not disagree with this one.
+
+    :func:`app.reporting.events.element_units` is the shared rule and
+    ``app/reporting/cucumber_json.py`` consumes it directly.
+    ``app/reporting/aggregation.py`` still carries a grouping of its own, and
+    that file belongs to another work unit, so this asserts the property that
+    matters rather than the import: over every shape a validated document can
+    hold, the two groupings return the same units.  The ``getattr`` is
+    deliberate - when ``aggregation`` is changed to import the exported
+    function, this test keeps passing and compares it against itself.
+
+    The comparison is restricted to validated shapes on purpose.  Since
+    :func:`app.reporting.events._check_element_units` refuses a malformed list
+    at ingress, ``[background, scenario]`` and ``[scenario]`` are the only
+    unit shapes a loaded document can contain; the two implementations differ
+    only on a non-mapping element, which no loaded document can carry.
+    """
+    theirs = getattr(aggregation, "element_units", events.element_units)
+    background = _background()
+    first = _scenario(CRM_PASSING_SCENARIO_LINE)
+    second = _scenario(CRM_PASSING_SCENARIO_LINE + 7)
+    validated_shapes: list[list[dict[str, Any]]] = [
+        [],
+        [first],
+        [background, first],
+        [background, first, background, second],
+        [first, second],
+        [background, first, second],
+    ]
+
+    for elements in validated_shapes:
+        assert theirs(elements) == events.element_units(elements), elements
+
+
+def test_a_run_budget_refuses_the_shard_that_would_exceed_the_run(
+    tmp_path: Path,
+) -> None:
+    """Per-file limits bound a file; the parent holds every shard at once.
+
+    ``app/services/test_run_service.py`` collects each live shard's document
+    into a list before the merge reads any of it, so 87 files each just inside
+    the per-file cap would have the parent hold about 21.75 GiB - every file
+    individually valid, the sum fatal.  The budget refuses the shard that
+    crosses the line, with the same error the caller already treats as a dead
+    shard, so the run still publishes what the other shards produced.
+    """
+    first = _loadable(tmp_path, [_one_scenario_feature()], name="worker-0.json")
+    second = _loadable(tmp_path, [_one_scenario_feature()], name="worker-1.json")
+    budget = events.RunResultBudget(
+        max_bytes=first.stat().st_size + second.stat().st_size // 2
+    )
+
+    loaded = events.load_result_set(first, budget=budget)
+
+    assert budget.documents == 1
+    assert budget.total_bytes == first.stat().st_size
+    assert budget.total_nodes > 0
+    assert loaded["features"][0]["path"] == CRM_PATH
+
+    message = _refusal_with_budget(second, budget)
+
+    assert "MAX_RUN_RESULT_BYTES" in message
+    assert budget.documents == 1, "a refused shard must not be charged"
+
+
+def _refusal_with_budget(path: Path, budget: events.RunResultBudget) -> str:
+    """Load ``path`` under ``budget``, requiring it to be refused.
+
+    :param path: A shard expected to breach the run budget.
+    :param budget: The run's budget.
+    :returns: The text of the ``ResultSetError`` raised.
+    """
+    with pytest.raises(events.ResultSetError) as raised:
+        events.load_result_set(path, budget=budget)
+    return str(raised.value)
+
+
+def test_a_run_budget_bounds_the_shard_count_and_the_node_total(
+    tmp_path: Path,
+) -> None:
+    """Bytes are not the only way a run of valid shards exhausts the parent.
+
+    The node total is what the merge's ``copy.deepcopy`` of every feature
+    costs, and the document count is what a worker directory holding the
+    intermediates of many runs produces.  Each limit is charged separately and
+    each names itself, so the reason a shard was refused is diagnosable.
+    """
+    shard = _loadable(tmp_path, [_one_scenario_feature()])
+
+    assert "MAX_RUN_RESULT_DOCUMENTS" in _refusal_with_budget(
+        shard, events.RunResultBudget(max_documents=0)
+    )
+    assert "MAX_RUN_RESULT_NODES" in _refusal_with_budget(
+        shard, events.RunResultBudget(max_nodes=1)
+    )
+
+
+def test_the_default_run_budget_admits_the_whole_suite_in_one_shard(
+    sample_result_set: dict[str, Any], tmp_path: Path
+) -> None:
+    """The budget must not refuse honest work, so its defaults are asserted.
+
+    The sample is a four-feature merged document and the defaults are sized for
+    a run of the whole suite, so loading it under a default budget leaves the
+    run far below every limit.  A budget that rejected this would fail a real
+    run rather than a hostile one.
+    """
+    shard = tmp_path / "whole-suite.json"
+    events.dump_result_set(sample_result_set, shard)
+    budget = events.RunResultBudget()
+
+    events.load_result_set(shard, budget=budget)
+
+    assert budget.documents == 1
+    assert budget.total_bytes < events.MAX_RUN_RESULT_BYTES
+    assert budget.total_nodes < events.MAX_RUN_RESULT_NODES
+
+
+# ==========================================================================
 # Driving the real formatter through behave's callback protocol
 #
 # Everything below exercises ResultCollectorFormatter itself.  Nothing here
@@ -3050,17 +4758,29 @@ def test_match_arguments_carry_the_reference_offsets(
         )
 
 
-def test_match_arguments_keep_a_valueless_entry_and_recover_a_lost_span(
+def test_match_arguments_keep_a_valueless_entry_and_locate_a_lost_span(
     make_collector: Callable[..., events.ResultCollectorFormatter],
     crm_feature: StubFeature,
 ) -> None:
     """The JVM never drops an argument entry, and neither does the collector.
 
-    An argument with no value is recorded as an empty mapping - the JVM's
-    ``createMatchMap`` does the same - so the *position* of each parameter
-    survives.  An argument whose span does not index into the step name (a
-    type-converted parameter) is recorded from its original text rather than
-    discarded, because the matched text is still known.
+    Three shapes, and the *count* of arguments is the same in all three,
+    because ``createMatchMap`` records an entry per parameter of the
+    definition and the position of each one is what a consumer reads:
+
+    * an argument with **no value** is the empty mapping the JVM writes;
+    * an argument whose reported span does not index into the step name - a
+      type-converted parameter - is **located** in the name, because ``val``
+      and ``offset`` are read as the position of a value in the step text and
+      the schema requires the span to fit inside it, so the reported offset
+      cannot simply be carried;
+    * an argument whose text does not occur in the name at all has no span to
+      record, so it too becomes the empty mapping rather than a fabricated
+      position.
+
+    The middle case is the real one: behave's own offset is nonsense here and
+    the value *is* in the text, so recording it at the offset it actually
+    occupies is both truthful and what makes the emitted artifact usable.
     """
     collector = make_collector(source_lines=[])
     step_name = "User can find his name from search bar"
@@ -3076,6 +4796,7 @@ def test_match_arguments_keep_a_valueless_entry_and_recover_a_lost_span(
                 ),
                 arguments=[
                     Argument(0, 0, None, None),
+                    Argument(500, 505, "search", "search"),
                     Argument(500, 505, "Lucas", "Lucas"),
                 ],
             )
@@ -3086,8 +4807,17 @@ def test_match_arguments_keep_a_valueless_entry_and_recover_a_lost_span(
     feature = feature_by_path(read_document(collector), CRM_PATH)
     arguments = feature["elements"][-1]["steps"][0]["match"]["arguments"]
 
+    assert len(arguments) == 3
     assert arguments[0] == {}
-    assert arguments[1] == {"val": "Lucas", "offset": 500}
+    assert arguments[1] == {"val": "search", "offset": step_name.index("search")}
+    assert (
+        step_name[
+            arguments[1]["offset"] : arguments[1]["offset"]
+            + len(arguments[1]["val"])
+        ]
+        == arguments[1]["val"]
+    )
+    assert arguments[2] == {}
 
 
 def test_undefined_step_records_no_location_at_all(
@@ -3355,15 +5085,22 @@ def test_error_message_is_normalised_to_lf_and_keeps_the_assertion_text(
     make_collector: Callable[..., events.ResultCollectorFormatter],
     crm_feature: StubFeature,
 ) -> None:
-    """The failure text carries the assertion's own message, with LF endings.
+    """The failure text is the assertion's own message, with LF endings.
 
     AAP deviation 16: the reference's failure text is a JUnit message and a
     Java stack trace with ``\\r\\n`` endings, which Python cannot produce, so
-    the *subject and message* are parity and their formatting is not.  This
-    asserts only what is settled - the assertion's own text survives and no
-    carriage return does - and deliberately does not pin behave's
-    ``ASSERT FAILED:`` prefix either way, because the schema owner is changing
-    how the message is rebuilt from the exception and its traceback.
+    the *subject and message* are parity and their formatting is not.  What
+    this module builds is therefore pinned exactly: the assertion's own
+    message text, then the traceback, with every line ending normalised to
+    ``\\n``.
+
+    behave's own prefix is **stripped**, which is the assertion this test
+    exists for.  ``Step._process_error`` writes ``"ASSERT FAILED: <message>"``
+    - and ``"ERROR: <Class>: <message>"`` for anything else - which is
+    behave's formatting rather than the assertion's subject, and the JVM's
+    text carries neither.  A prefix that survived would reach the JSON
+    artifact, both HTML families and every failure overview as part of the
+    failure's identity.
     """
     collector = make_collector(source_lines=[])
     assertion_text = "The title is not same as the expected!"
@@ -3392,7 +5129,14 @@ def test_error_message_is_normalised_to_lf_and_keeps_the_assertion_text(
 
     assert "\r" not in message
     assert message.count("\n") == 3
-    assert assertion_text in message
+    assert message.startswith(assertion_text), (
+        "behave's own ASSERT FAILED prefix reached the document: "
+        f"{message!r}"
+    )
+    assert "ASSERT FAILED" not in message
+    assert message.endswith(
+        '  File "features/steps/crm_steps.py", line 61\n'
+    )
 
 
 def test_a_step_without_a_failure_message_carries_no_error_key(
@@ -3421,6 +5165,1018 @@ def test_a_step_without_a_failure_message_carries_no_error_key(
     feature = feature_by_path(read_document(collector), CRM_PATH)
 
     assert "error_message" not in feature["elements"][-1]["steps"][0]["result"]
+
+
+# ==========================================================================
+# The redaction boundary: what a report may keep (SEC2-F03 and SEC2-F20)
+#
+# Two fields are worker-controlled text a report then keeps for as long as the
+# build is archived: a step's ``name`` with its ``match.arguments[].val``, and
+# ``result.error_message``.  The suite's login phrases substitute an account
+# name and a password straight into the first pair, and a traceback puts
+# workspace paths and whatever an exception quoted into the second.  This
+# section pins both rules, in both directions: what must be masked, and what
+# must survive untouched - an over-redacted report is as useless as a leaky
+# one, and AAP 0.6 freezes the assertion subjects and the argument offsets.
+# ==========================================================================
+
+
+def quoted_arguments(step_name: str) -> list[Argument]:
+    """behave ``Argument`` instances for every quoted run of ``step_name``.
+
+    behave reports a ``{}``-placeholder span *inside* the quotes - the port's
+    step phrases carry the quotes in the phrase literal - which is what
+    :func:`app.reporting.events.widen_quoted_span` then widens.  Building the
+    spans that way rather than by hand is what keeps these tests measuring the
+    collector's own arithmetic.
+
+    :param step_name: The substituted step text.
+    :returns: One argument per quoted run, left to right.
+    """
+    return [
+        Argument(
+            match.start() + 1,
+            match.end() - 1,
+            step_name[match.start() + 1 : match.end() - 1],
+            step_name[match.start() + 1 : match.end() - 1],
+        )
+        for match in re.finditer(r'"[^"]*"', step_name)
+    ]
+
+
+def collect_one_step(
+    make_collector: Callable[..., events.ResultCollectorFormatter],
+    feature: StubFeature,
+    step: StubStep,
+) -> tuple[dict[str, Any], str]:
+    """Run one step through the collector and return its record and the file.
+
+    :param make_collector: The collector factory fixture.
+    :param feature: The feature to announce it under.
+    :param step: The step to announce.
+    :returns: The step object from the written document, and the document's
+        whole text - which is what a "this value is nowhere in the artifact"
+        assertion needs.
+    """
+    collector = make_collector(source_lines=[])
+    scenario = StubScenario(
+        "User logs in", CRM_PASSING_SCENARIO_LINE, steps=[step]
+    )
+    run_feature(collector, feature, [scenario])
+    document = read_document(collector)
+    text = Path(collector.stream_opener.name).read_text(encoding="utf-8")
+    return feature_by_path(document, CRM_PATH)["elements"][-1]["steps"][0], text
+
+
+def assert_offsets_index_into_the_name(step: dict[str, Any]) -> None:
+    """Assert the contract ``name[offset:offset + len(val)] == val``.
+
+    Applied to a *redacted* step, this is the assertion that the masking
+    preserved the one invariant ``match.arguments`` has: a consumer -- the
+    Jenkins publisher among them -- slices the emitted name with the emitted
+    offset, so a mask that moved the text without moving the offsets would
+    hand it a different value than the one recorded.
+
+    :param step: A step object carrying ``name`` and ``match``.
+    """
+    name = step["name"]
+    for argument in step["match"].get("arguments", ()):
+        if not argument:
+            continue
+        offset, value = argument["offset"], argument["val"]
+        assert name[offset : offset + len(value)] == value, (
+            f"{value!r} at {offset} does not index into {name!r}"
+        )
+
+
+def test_a_credential_bearing_step_is_stored_redacted(
+    make_collector: Callable[..., events.ResultCollectorFormatter],
+    crm_feature: StubFeature,
+) -> None:
+    """``User enters "<username>" username`` reaches no file in the clear.
+
+    Review finding SEC2-F03: behave hands the collector the *substituted* step
+    text, so for a Login or Logout ``Examples`` row that text is an account
+    name and ``match.arguments`` carries it a second time.  Both are masked
+    before they are serialized, the quotes survive because the contract says
+    ``val`` includes them, and the offset still indexes into the name.
+
+    The final assertion is the one that matters operationally: the value is
+    absent from the *whole written document*, not merely from the two fields
+    this test knows to look at.
+    """
+    step = StubStep(
+        "When", LOGIN_USERNAME_STEP_NAME, 15,
+        status=Status.passed, duration=1.0,
+        func=make_step_function(
+            "features/steps/login_steps.py", "user_enters_username"
+        ),
+        arguments=quoted_arguments(LOGIN_USERNAME_STEP_NAME),
+    )
+
+    record, document_text = collect_one_step(make_collector, crm_feature, step)
+
+    assert record["name"] == "User enters \"[redacted]\" username"
+    assert record["match"]["arguments"] == [
+        {"val": REDACTED_QUOTED_VALUE, "offset": 12}
+    ]
+    assert_offsets_index_into_the_name(record)
+    assert "account7@example.test" not in document_text
+
+
+def test_a_password_is_classified_by_the_words_around_it(
+    make_collector: Callable[..., events.ResultCollectorFormatter],
+    crm_feature: StubFeature,
+) -> None:
+    """The half of ``Login.feature`` that only adjacency can catch.
+
+    ``User enters "<password>" password`` [Login.feature:16] substitutes a
+    value whose own text is indistinguishable from a product name -- nothing
+    about it is credential-shaped -- so the following ``password`` is the whole
+    of the evidence.  A rule that classified values in isolation would publish
+    this one.
+    """
+    step = StubStep(
+        "And", LOGIN_PASSWORD_STEP_NAME, 16,
+        status=Status.passed, duration=1.0,
+        func=make_step_function(
+            "features/steps/login_steps.py", "user_enters_password"
+        ),
+        arguments=quoted_arguments(LOGIN_PASSWORD_STEP_NAME),
+    )
+
+    record, document_text = collect_one_step(make_collector, crm_feature, step)
+
+    assert record["name"] == "User enters \"[redacted]\" password"
+    assert record["match"]["arguments"][0]["val"] == REDACTED_QUOTED_VALUE
+    assert_offsets_index_into_the_name(record)
+    assert "not-a-real-secret" not in document_text
+
+
+def test_only_the_classified_argument_position_is_masked(
+    make_collector: Callable[..., events.ResultCollectorFormatter],
+    crm_feature: StubFeature,
+) -> None:
+    """``Contact.feature:12``'s two values are judged one at a time.
+
+    The phrase substitutes a phone number and an email address.  The address
+    is classified on its own terms; the phone number is not in the closed
+    keyword set and no keyword sits next to it, so it survives **byte for
+    byte** -- which is what keeps a contact-creation failure diagnosable.
+    """
+    step = StubStep(
+        "And", CONTACT_TWO_ARGUMENT_STEP_NAME, 12,
+        status=Status.passed, duration=1.0,
+        func=make_step_function(
+            "features/steps/contacts_steps.py", "user_enters_phone_and_email"
+        ),
+        arguments=quoted_arguments(CONTACT_TWO_ARGUMENT_STEP_NAME),
+    )
+
+    record, document_text = collect_one_step(make_collector, crm_feature, step)
+    arguments = record["match"]["arguments"]
+
+    assert arguments[0] == {"val": '"+99999999999"', "offset": 12}
+    assert arguments[1]["val"] == REDACTED_QUOTED_VALUE
+    assert_offsets_index_into_the_name(record)
+    assert '"+99999999999"' in record["name"]
+    assert "someone@example.test" not in document_text
+
+
+def test_an_offset_after_a_masked_span_is_shifted(
+    make_collector: Callable[..., events.ResultCollectorFormatter],
+    crm_feature: StubFeature,
+) -> None:
+    """The placeholder is not the length of what it replaces, so offsets move.
+
+    With the masked value *first*, the surviving value's offset has to move by
+    the length delta -- 12 characters of ``"[redacted]"`` for the 22 of the
+    address it replaced.  An implementation that masked the text and left the
+    offsets alone would still pass every assertion above and fail here, with
+    the publisher slicing the wrong substring out of the name it was given.
+    """
+    step = StubStep(
+        "And", CONTACT_SWAPPED_ARGUMENT_STEP_NAME, 12,
+        status=Status.passed, duration=1.0,
+        func=make_step_function(
+            "features/steps/contacts_steps.py", "user_enters_email_and_phone"
+        ),
+        arguments=quoted_arguments(CONTACT_SWAPPED_ARGUMENT_STEP_NAME),
+    )
+
+    record, _ = collect_one_step(make_collector, crm_feature, step)
+    arguments = record["match"]["arguments"]
+    delta = len(REDACTED_QUOTED_VALUE) - len('"someone@example.test"')
+
+    assert arguments[0] == {"val": REDACTED_QUOTED_VALUE, "offset": 12}
+    assert arguments[1]["val"] == '"+99999999999"'
+    assert arguments[1]["offset"] == (
+        CONTACT_SWAPPED_ARGUMENT_STEP_NAME.index('"+99999999999"') + delta
+    )
+    assert_offsets_index_into_the_name(record)
+
+
+def test_the_reference_outline_step_is_left_exactly_as_it_was(
+    make_collector: Callable[..., events.ResultCollectorFormatter],
+    crm_feature: StubFeature,
+) -> None:
+    """The over-redaction guard, on the one parameterised step in the baseline.
+
+    ``User can change any user's information like "Test2" , "30" and "2"``
+    carries the word ``user`` twice and three quoted values, none of them a
+    credential.  Its name and all three offsets are frozen by AAP 0.6 and are
+    asserted here against the *measured* reference values, so a widened
+    keyword set or an entropy heuristic fails this test rather than silently
+    emptying the artifact the Jenkins publisher reads.
+    """
+    step = StubStep(
+        "And", GOLDEN_STEP_NAME, 21,
+        status=Status.passed, duration=GOLDEN_DURATION_SECONDS,
+        func=make_step_function(
+            "features/steps/crm_steps.py", "user_can_change_any_user_s_information"
+        ),
+        arguments=golden_arguments(),
+    )
+
+    record, _ = collect_one_step(make_collector, crm_feature, step)
+    arguments = record["match"]["arguments"]
+
+    assert record["name"] == GOLDEN_STEP_NAME
+    assert [argument["val"] for argument in arguments] == list(GOLDEN_ARGUMENT_VALUES)
+    assert [argument["offset"] for argument in arguments] == list(
+        GOLDEN_ARGUMENT_OFFSETS
+    )
+    assert_offsets_index_into_the_name(record)
+
+
+def test_an_undefined_steps_name_is_redacted_too(
+    make_collector: Callable[..., events.ResultCollectorFormatter],
+    crm_feature: StubFeature,
+) -> None:
+    """``NoMatch`` means no arguments, and no reason to publish the text.
+
+    A step behave could not resolve still had its ``Examples`` row
+    substituted into it, and it reaches the document through
+    :func:`app.reporting.events.new_step` with an empty ``match``.  That is
+    why the boundary sits in the constructor as well as in the match handler:
+    with no argument spans to preserve, the whole text is put through the
+    sanitizer, which is what removes the quotes as well.
+    """
+    step = StubStep(
+        "When", LOGIN_USERNAME_STEP_NAME, 15,
+        status=Status.undefined, duration=0.0, func=None,
+    )
+
+    record, document_text = collect_one_step(make_collector, crm_feature, step)
+
+    assert record["match"] == {}
+    assert record["matched"] is False
+    assert record["name"] == "User enters [redacted] username"
+    assert "account7@example.test" not in document_text
+
+
+def test_redact_step_text_is_idempotent() -> None:
+    """The producer and the writer both apply it, so it must be a fixed point.
+
+    ``app/reporting/cucumber_json.py`` re-applies the rule at the publish
+    boundary because it treats a worker's JSON file as untrusted input.  That
+    is only safe if a second application changes nothing -- otherwise every
+    writer would mask the placeholder's own quotes again and the offsets would
+    drift one hop at a time.
+    """
+    for name in (
+        LOGIN_USERNAME_STEP_NAME,
+        LOGIN_PASSWORD_STEP_NAME,
+        CONTACT_TWO_ARGUMENT_STEP_NAME,
+        CONTACT_SWAPPED_ARGUMENT_STEP_NAME,
+        GOLDEN_STEP_NAME,
+    ):
+        arguments = [
+            {"val": value, "offset": offset}
+            for value, offset in (
+                events.widen_quoted_span(name, argument.start, argument.end)
+                for argument in quoted_arguments(name)
+            )
+        ]
+        once = events.redact_step_text(name, arguments)
+        twice = events.redact_step_text(*once)
+
+        assert twice == once, f"redaction is not a fixed point for {name!r}"
+        text_once = events.redact_step_text(name)
+        assert events.redact_step_text(text_once[0]) == text_once
+
+
+def test_redact_step_text_keeps_an_empty_argument_entry() -> None:
+    """Arity is part of the contract, so an empty entry stays an empty entry.
+
+    ``createMatchMap`` records ``{}`` for an argument with no value rather
+    than dropping it, and the collector already reproduced that; a redaction
+    that filtered the list would change a step's parameter count.
+    """
+    name = LOGIN_PASSWORD_STEP_NAME
+    redacted, arguments = events.redact_step_text(
+        name, [{}, {"val": '"not-a-real-secret"', "offset": 12}]
+    )
+
+    assert len(arguments) == 2
+    assert arguments[0] == {}
+    assert arguments[1] == {"val": REDACTED_QUOTED_VALUE, "offset": 12}
+    assert redacted == "User enters \"[redacted]\" password"
+
+
+def test_redact_step_text_masks_a_value_whose_span_was_lost() -> None:
+    """An argument the collector recovered from ``original`` is classified too.
+
+    When behave reports a span that does not index into the name -- a
+    type-converted parameter -- the collector records the matched text with
+    the best offset it has.  There is then no window to search, so the *step's
+    own text* decides: a step that names a credential field has no
+    unclassified argument values.
+    """
+    _, arguments = events.redact_step_text(
+        LOGIN_PASSWORD_STEP_NAME, [{"val": "not-a-real-secret", "offset": 500}]
+    )
+
+    assert arguments == [{"val": "[redacted]", "offset": 500}]
+
+
+def test_sanitize_failure_text_masks_a_secret_the_message_quoted() -> None:
+    """Review finding SEC2-F20: an exception's own words can carry a secret.
+
+    The assertion subject around it survives, because AAP 0.6 and 0.1.2 freeze
+    the message strings and deviation 16 covers only their formatting.
+    """
+    sanitized = events.sanitize_failure_text(
+        f"Login failed for {FAILURE_TEXT_SECRET} after 3 attempts"
+    )
+
+    assert "not-a-real-secret" not in sanitized
+    assert sanitized == "Login failed for password=[redacted] after 3 attempts"
+
+
+def test_sanitize_failure_text_relativises_this_repositorys_paths() -> None:
+    """A traceback frame inside the port becomes repository-relative.
+
+    An absolute frame path discloses the checkout location, the operating
+    account and the workspace layout (CWE-200) and says nothing a reader of a
+    test failure needs.  The frame stays identifiable, which is the whole
+    point: ``File "features/steps/login_steps.py", line 61`` is what the
+    reference's own failure text looks like.
+    """
+    repository_root = Path(events.__file__).resolve().parents[2]
+    source = repository_root / "features" / "steps" / "login_steps.py"
+    frame = f'  File "{source}", line 61'
+
+    sanitized = events.sanitize_failure_text(frame)
+
+    assert str(repository_root) not in sanitized
+    assert sanitized == '  File "features/steps/login_steps.py", line 61'
+
+
+def test_sanitize_failure_text_shortens_a_path_outside_the_repository() -> None:
+    """An engine or interpreter frame keeps its last two components.
+
+    Those frames live in a virtual environment or a system prefix, whose
+    leading components are pure topology.  Two components keep the frame
+    recognisable -- the file and the package it sits in -- behind a marker
+    that says the path was cut rather than relative.
+    """
+    sanitized = events.sanitize_failure_text(
+        f'  File "{FOREIGN_ABSOLUTE_PATH}", line 12'
+    )
+
+    assert sanitized == '  File ".../unittest/case.py", line 12'
+
+
+def test_sanitize_failure_text_leaves_a_selenium_selector_alone() -> None:
+    """An XPath is not a path, and a Selenium message is the diagnostic.
+
+    ``Message: no such element: ... {"method":"xpath","selector":"//input[...]"}``
+    is the commonest failure text this suite produces, and the selector is the
+    only part of it that says *what* was not found.  The path rules are
+    anchored so that a ``//`` selector, a URL and a relative path are all out
+    of their reach.
+    """
+    message = (
+        "Message: no such element: Unable to locate element: "
+        "{\"method\":\"xpath\",\"selector\":\"//input[@id='o_field_input_125']\"}\n"
+        "For documentation visit https://www.selenium.dev/exceptions/no_such_element/\n"
+        "  File \"features/steps/crm_steps.py\", line 88, in user_can_change\n"
+    )
+
+    assert events.sanitize_failure_text(message) == message
+
+
+def test_sanitize_failure_text_bounds_the_length_and_says_how_much_it_dropped(
+) -> None:
+    """A traceback cannot be allowed to be arbitrarily long, or silently cut.
+
+    An exception whose ``str()`` is a page-source dump would otherwise be
+    stored once per step, in every artifact.  The bound is
+    ``MAX_FAILURE_TEXT_CHARS``; what makes a truncated report honest is the
+    suffix, which carries the exact number of characters removed.
+    """
+    # Repeated prose rather than a repeated character: a long run of
+    # base64-like characters is itself one of the shapes the sanitizer masks,
+    # so it would measure redaction instead of truncation.
+    line = "diagnostic line of a traceback frame\n"
+    repetitions = (events.MAX_FAILURE_TEXT_CHARS // len(line)) + 10
+    message = line * repetitions
+    dropped = len(message) - events.MAX_FAILURE_TEXT_CHARS
+
+    sanitized = events.sanitize_failure_text(message)
+
+    assert dropped > 0
+    assert sanitized == (
+        f"{message[: events.MAX_FAILURE_TEXT_CHARS]}"
+        f"...[+{dropped} char(s) truncated]"
+    )
+    assert len(sanitized) < len(message)
+
+
+def test_sanitize_failure_text_still_normalises_line_endings() -> None:
+    """LF normalisation is unchanged, and stays the same function's job.
+
+    AAP deviation 16 makes the line endings the port's to choose and the
+    message text parity; :func:`app.reporting.events._normalize_newlines`
+    remains the owner of the first half, and this asserts the sanitizer did
+    not take it away.
+    """
+    sanitized = events.sanitize_failure_text("first\r\nsecond\rthird\nfourth")
+
+    assert sanitized == "first\nsecond\nthird\nfourth"
+    assert "\r" not in sanitized
+
+
+def test_sanitize_failure_text_is_idempotent_and_never_raises() -> None:
+    """Both properties the callers depend on, in one place.
+
+    The writer re-applies the rule to text the collector already sanitized, so
+    it has to be a fixed point.  And failure *reporting* must not be able to
+    fail a run: a value whose ``__str__`` raises yields the placeholder rather
+    than an exception, which is the fail-closed answer -- nothing unsanitized
+    is stored.
+    """
+    class Unprintable:
+        """A value whose text cannot be obtained."""
+
+        def __str__(self) -> str:
+            """Fail the way a broken model attribute does.
+
+            :raises RuntimeError: Always.
+            """
+            raise RuntimeError("__str__ is unavailable")
+
+    for message in (
+        f"Login failed for {FAILURE_TEXT_SECRET}",
+        f'  File "{FOREIGN_ABSOLUTE_PATH}", line 12',
+        "x" * (events.MAX_FAILURE_TEXT_CHARS + 1),
+        "The title is not same as the expected! ",
+        "",
+    ):
+        once = events.sanitize_failure_text(message)
+        assert events.sanitize_failure_text(once) == once
+
+    assert events.sanitize_failure_text(None) == ""
+    assert events.sanitize_failure_text(Unprintable()) == "[redacted]"
+
+
+def test_a_step_failures_traceback_is_stored_sanitized(
+    make_collector: Callable[..., events.ResultCollectorFormatter],
+    crm_feature: StubFeature,
+) -> None:
+    """End to end: a real exception, a real traceback, one stored message.
+
+    The exception is raised here so that the traceback is a genuine one with
+    this file's absolute path in every frame -- which is exactly the shape a
+    worker produces and the shape SEC2-F20 is about.  What the document keeps
+    is the assertion's own message, a relative frame path, and no secret.
+    """
+    try:
+        raise AssertionError(
+            f"The title is not same as the expected! {FAILURE_TEXT_SECRET}"
+        )
+    except AssertionError as error:
+        raised = error
+
+    repository_root = str(Path(events.__file__).resolve().parents[2])
+    step = StubStep(
+        "And", "User click on the crm dashboard", 18,
+        status=Status.failed, duration=4.211,
+        func=make_step_function(
+            "features/steps/crm_steps.py", "user_click_on_the_crm_dashboard"
+        ),
+    )
+    step.exception = raised
+    step.exc_traceback = raised.__traceback__
+
+    record, document_text = collect_one_step(make_collector, crm_feature, step)
+    message = record["result"]["error_message"]
+
+    assert message.startswith(
+        "The title is not same as the expected! password=[redacted]"
+    )
+    assert "not-a-real-secret" not in document_text
+    assert repository_root not in message
+    assert "tests/test_events.py" in message
+    assert "\r" not in message
+    assert len(message) <= events.MAX_FAILURE_TEXT_CHARS + 64
+
+
+def test_a_hook_failure_is_recorded_sanitized_too(
+    make_collector: Callable[..., events.ResultCollectorFormatter],
+    crm_feature: StubFeature,
+) -> None:
+    """The teardown hook's own failure text takes the same route.
+
+    ``features/environment.py`` owns the scenario lifecycle and reports what
+    only it knows through
+    :func:`app.reporting.events.record_hook_result`, which means a caller can
+    hand the document a message it built from an exception itself.  That is
+    the same class of text as a step's failure -- a screenshot path, a driver
+    error, whatever the exception quoted -- so it is held to the same rule
+    rather than to LF normalisation alone.
+    """
+    collector = make_collector(source_lines=[])
+    scenario = StubScenario(
+        "User can change the situation in progress", CRM_FAILING_SCENARIO_LINE
+    )
+    collector.uri(crm_feature.filename)
+    collector.feature(crm_feature)
+    collector.scenario(scenario)
+
+    collector.record_hook_result(
+        status="hook_error",
+        error_message=(
+            f"Teardown failed: {FAILURE_TEXT_SECRET}\r\n"
+            f'  File "{FOREIGN_ABSOLUTE_PATH}", line 12\r\n'
+        ),
+    )
+    collector.eof()
+    document = read_document(collector)
+    entry = feature_by_path(document, CRM_PATH)["elements"][-1]["after"][0]
+
+    assert entry["result"]["status"] == "hook_error"
+    assert entry["result"]["error_message"] == (
+        "Teardown failed: password=[redacted]\n"
+        '  File ".../unittest/case.py", line 12\n'
+    )
+
+
+def test_bounding_an_already_bounded_text_changes_nothing() -> None:
+    """Truncation is a fixed point, and its count is the total dropped.
+
+    Two layers sanitize this field -- the collector when it stores the text and
+    the Cucumber writer when it publishes a worker's -- so a bound that was not
+    idempotent would cut an already-cut message a second time, dropping another
+    notice-length of diagnostic and leaving a count that described only the
+    second cut.  Asserted on a message that genuinely exceeds
+    :data:`app.reporting.events.MAX_FAILURE_TEXT_CHARS` rather than one the
+    redaction rules shorten, because only the former reaches the bound.
+    """
+    message = "Odoo page dump with words and punctuation. " * 200
+    assert len(message) > events.MAX_FAILURE_TEXT_CHARS
+
+    once = events.sanitize_failure_text(message)
+    twice = events.sanitize_failure_text(once)
+
+    assert once == twice
+    assert events.sanitize_failure_text(twice) == once
+    assert once.startswith(message[:64])
+    dropped = len(message) - events.MAX_FAILURE_TEXT_CHARS
+    assert once == (
+        message[: events.MAX_FAILURE_TEXT_CHARS]
+        + events.TRUNCATION_SUFFIX_TEMPLATE.format(dropped=dropped)
+    )
+
+
+def test_a_fabricated_truncation_notice_buys_no_exemption_from_the_bound() -> None:
+    """A worker-supplied notice is read, not trusted.
+
+    The count is taken from a trailing notice so that re-bounding can add to
+    it, which means a hostile or hand-built message could arrive already
+    wearing one.  It still gets bounded: the body is measured on its own, the
+    declared count is carried into the new notice, and the result is inside the
+    cap.
+    """
+    body = "x " * 6000
+    text = f"{body}{events.TRUNCATION_SUFFIX_TEMPLATE.format(dropped=5)}"
+
+    bounded = events.sanitize_failure_text(text)
+
+    assert len(bounded) <= events.MAX_FAILURE_TEXT_CHARS + 64
+    assert bounded.startswith(body[:64])
+    notice = bounded[bounded.rindex("...[+") :]
+    assert int(notice.split("[+")[1].split(" ")[0]) == (
+        5 + len(body) - events.MAX_FAILURE_TEXT_CHARS
+    )
+    assert events.sanitize_failure_text(bounded) == bounded
+
+
+def test_a_keyword_in_front_of_the_value_masks_it_too() -> None:
+    """Adjacency is checked on both sides of the span, not only after it.
+
+    Every credential phrase this suite owns puts the field name *after* the
+    value -- ``User enters "<password>" password`` [Login.feature:16] -- so the
+    following-keyword direction is the one a real run exercises.  The other
+    direction is still a rule of the boundary rather than an accident of the
+    corpus: a phrase added later, or an engine diagnostic quoting one, can put
+    the field name in front, and a classifier that only looked forward would
+    publish that value.  Asserted here so the direction cannot be dropped as
+    dead code.
+    """
+    name = 'Sign-in uses password "not-a-real-secret" once'
+    arguments = [{"val": '"not-a-real-secret"', "offset": name.index('"')}]
+
+    redacted, built = events.redact_step_text(name, arguments)
+
+    assert redacted == 'Sign-in uses password "[redacted]" once'
+    assert [entry["val"] for entry in built] == ['"[redacted]"']
+    assert redacted[built[0]["offset"] :].startswith('"[redacted]"')
+
+
+def test_malformed_argument_entries_keep_their_position_and_their_arity() -> None:
+    """A document the collector did not build is still redacted, not rejected.
+
+    ``match.arguments`` arrives from a worker file or a hand-built fixture as
+    well as from the collector, and its length is the step's parameter arity,
+    which AAP 0.6 makes part of the contract: ``createMatchMap`` never drops an
+    entry.  So an entry this boundary cannot index -- a non-mapping, a ``val``
+    that is not a string, an ``offset`` that is not a usable index, and the
+    empty mapping the JVM writes for a parameter with no value -- is carried
+    through in place, and the one entry that *does* index the name is masked on
+    its own merits.  The count is what a consumer reads; losing an entry would
+    silently change the step's declared arity.
+    """
+    name = 'User enters "not-a-real-secret" password'
+    entries: list[Any] = [
+        {},
+        "not a mapping",
+        {"val": 17, "offset": 0},
+        {"val": '"not-a-real-secret"', "offset": -1},
+        {"val": '"not-a-real-secret"', "offset": True},
+        {"val": '"not-a-real-secret"', "offset": 12},
+    ]
+
+    redacted, built = events.redact_step_text(name, entries)
+
+    assert redacted == 'User enters "[redacted]" password'
+    assert len(built) == len(entries)
+    assert built[0] == {}
+    assert built[1] == "not a mapping"
+    assert built[2] == {"val": 17, "offset": 0}
+    assert built[-1] == {"val": '"[redacted]"', "offset": 12}
+    assert redacted[12:] == '"[redacted]" password'
+    # The two entries whose offset could not be indexed keep their recorded
+    # value masked rather than published - an unusable offset is a reason to
+    # distrust the offset, never a reason to disclose the value - and the mask
+    # keeps the quotes the contract says ``val`` carries.
+    for entry in built[3:5]:
+        assert entry["val"] == '"[redacted]"'
+
+
+def test_overlapping_argument_spans_do_not_corrupt_the_name() -> None:
+    """Two entries claiming the same characters are spliced once, not twice.
+
+    The collector's own spans never overlap, but a worker file is untrusted
+    input and a hand-built fixture is hand-built.  Splicing an overlapping span
+    a second time would duplicate or drop text, so the second claim is skipped:
+    the name keeps exactly one mask for those characters, and the entry that
+    could not be spliced is masked rather than published.
+    """
+    name = 'User enters "not-a-real-secret" password'
+    start = name.index('"')
+    entries = [
+        {"val": '"not-a-real-secret"', "offset": start},
+        {"val": "not-a-real-secret", "offset": start + 1},
+    ]
+
+    redacted, built = events.redact_step_text(name, entries)
+
+    assert redacted == 'User enters "[redacted]" password'
+    assert redacted.count("[redacted]") == 1
+    assert len(built) == 2
+    assert "not-a-real-secret" not in redacted
+    assert not any("not-a-real-secret" in str(entry) for entry in built)
+
+
+def test_a_classifier_that_fails_masks_the_whole_step_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fail closed: a boundary that cannot classify a value masks it anyway.
+
+    The classification is pure regex work over strings and has no failure mode
+    of its own, which is exactly why the behaviour on failure has to be pinned
+    rather than assumed.  With the sanitizer replaced by one that raises, the
+    span is treated as sensitive rather than as clean, so the value is still
+    masked, the name keeps its shape and the argument keeps its position and
+    its offset.  Masking on an unusable answer is the only safe default: the
+    alternative publishes a value nothing was able to look at.
+    """
+    def explode(_text: str) -> str:
+        raise RuntimeError("classification is unavailable")
+
+    monkeypatch.setattr(events, "redact_sensitive", explode)
+
+    name = 'User enters "not-a-real-secret" password'
+    redacted, built = events.redact_step_text(
+        name, [{"val": '"not-a-real-secret"', "offset": name.index('"')}]
+    )
+
+    assert "not-a-real-secret" not in redacted
+    assert redacted == 'User enters "[redacted]" password'
+    assert [entry["val"] for entry in built] == ['"[redacted]"']
+    assert redacted[built[0]["offset"] :].startswith('"[redacted]"')
+
+
+def test_an_exception_with_no_message_and_no_traceback_is_still_sanitized() -> None:
+    """The class-name fallback goes through the same boundary as the rest.
+
+    ``str(KeyboardInterrupt())`` is ``""``, which would leave the failure text
+    starting with a bare newline, so the class name is the only message there
+    is; and behave stores no traceback for an exception it never saw raised.
+    Both degenerate paths return through
+    :func:`app.reporting.events.sanitize_failure_text`, so no return statement
+    of ``_failure_text`` is a way around it.
+    """
+    assert events._failure_text(KeyboardInterrupt()) == "KeyboardInterrupt"
+    assert events._failure_text(AssertionError(FAILURE_TEXT_SECRET)) == (
+        "password=[redacted]"
+    )
+
+
+def test_behaves_own_error_string_is_sanitized_on_the_fallback_path() -> None:
+    """The no-exception path is a boundary too, prefixes and all.
+
+    With no exception object stored, behave's ``error_message`` is the only
+    record of the failure, and its measured shapes are ``"ASSERT FAILED: ..."``
+    and ``"ERROR: <Class>: ..."``.  The prefix stripping is unchanged -- it is
+    what makes the text the assertion's own message, which AAP 0.6 freezes --
+    and what survives it is masked, relativised and bounded like every other
+    failure text.
+    """
+    assert events._failure_text(
+        None, None, f"ASSERT FAILED: The title is not same! {FAILURE_TEXT_SECRET}"
+    ) == "The title is not same! password=[redacted]"
+    assert events._failure_text(
+        None, None, f"ERROR: ValueError: {FAILURE_TEXT_SECRET}"
+    ) == "password=[redacted]"
+    # ``"ERROR: <Class>"`` with nothing after it: the class name is the message.
+    assert events._failure_text(None, None, "ERROR: ValueError: ") == "ValueError"
+
+
+def test_a_partially_indexed_argument_list_still_classifies_every_span(
+    make_collector: Callable[..., events.ResultCollectorFormatter],
+    crm_feature: StubFeature,
+) -> None:
+    """A credential no argument entry represents is still a credential.
+
+    behave reports one argument per *captured* parameter, so a phrase can
+    carry two quoted values and an argument list that indexes only one of
+    them -- a definition that captured the first, a worker file written by
+    another build, a hand-built fixture.  A boundary that considered only the
+    indexed spans would publish the other value in the clear, which is review
+    finding SEC2-F03 with one argument instead of none.  Both directions are
+    asserted at once: the unrepresented credential span is masked, the
+    represented business value survives **byte for byte**, and the surviving
+    offset still indexes into the name the publisher is handed.
+    """
+    step = StubStep(
+        "And", MIXED_VALUE_STEP_NAME, 17,
+        status=Status.passed, duration=1.0,
+        func=make_step_function(
+            "features/steps/login_steps.py", "user_enters_tag_and_password"
+        ),
+        arguments=quoted_arguments(MIXED_VALUE_STEP_NAME)[:1],
+    )
+
+    record, document_text = collect_one_step(make_collector, crm_feature, step)
+    arguments = record["match"]["arguments"]
+
+    assert record["name"] == (
+        'User enters "public" tag and "[redacted]" password'
+    )
+    assert arguments == [{"val": MIXED_VALUE_KEPT, "offset": 12}]
+    assert_offsets_index_into_the_name(record)
+    assert "not-a-real-secret" not in document_text
+
+
+def test_a_keyword_classifies_the_value_it_governs_and_no_other() -> None:
+    """The adjacency scope, span by span, over the phrasings that pin it.
+
+    The classifier's reach on each side is the text between that span and its
+    neighbour, capped by the window constant -- not a flat character count.
+    The distinction is measurable and this is where it is measured: in
+    ``User enters "public" tag and "<password>" password`` the keyword sits 18
+    characters from ``"public"``, well inside the cap, and governs the value
+    after it.  A window-only rule masks both, which empties business data out
+    of the artifact the Jenkins publisher reads every time a phrase so much as
+    mentions a credential field -- over-redaction is a failure mode of its
+    own, and AAP 0.6 freezes the parameterized step at the end of this table.
+
+    Each case names the phrase and, per quoted run left to right, whether the
+    boundary must mask it.  Building the argument entries from the phrase
+    keeps the assertion about the classifier rather than about hand-counted
+    offsets.
+    """
+    cases: tuple[tuple[str, tuple[bool, ...]], ...] = (
+        (LOGIN_USERNAME_STEP_NAME, (True,)),
+        (LOGIN_PASSWORD_STEP_NAME, (True,)),
+        ('Sign-in uses password "not-a-real-secret" once', (True,)),
+        (MIXED_VALUE_STEP_NAME, (False, True)),
+        (CONTACT_TWO_ARGUMENT_STEP_NAME, (False, True)),
+        ("User can find his name \"Lucas\" from search bar", (False,)),
+        (GOLDEN_STEP_NAME, (False, False, False)),
+    )
+
+    for name, expectations in cases:
+        entries = [
+            {"val": value, "offset": offset}
+            for value, offset in (
+                events.widen_quoted_span(name, argument.start, argument.end)
+                for argument in quoted_arguments(name)
+            )
+        ]
+        redacted, built = events.redact_step_text(name, entries)
+
+        assert len(built) == len(expectations), name
+        for entry, original, masked in zip(built, entries, expectations):
+            assert (entry["val"] == REDACTED_QUOTED_VALUE) is masked, (
+                f"{original['val']!r} in {name!r} was "
+                f"{'published' if masked else 'masked'}"
+            )
+            if not masked:
+                assert entry["val"] == original["val"], name
+            assert redacted[entry["offset"] :].startswith(entry["val"]), name
+
+
+def test_a_business_value_beside_a_credential_field_survives() -> None:
+    """The over-redaction guard for the mixed phrase, stated on its own.
+
+    ``"public"`` is a tag name and nothing else: no keyword governs it, and
+    its own text is not credential-shaped.  It is asserted separately from the
+    table above because it is the case a regression would most plausibly
+    reintroduce -- widening the classifier to "anything near the word
+    password" closes the leak this phrase also demonstrates while quietly
+    emptying every phrase that names a field and a value in one breath.
+    """
+    redacted, built = events.redact_step_text(
+        MIXED_VALUE_STEP_NAME,
+        [{"val": MIXED_VALUE_KEPT, "offset": MIXED_VALUE_STEP_NAME.index('"')}],
+    )
+
+    assert built == [{"val": MIXED_VALUE_KEPT, "offset": 12}]
+    assert redacted == 'User enters "public" tag and "[redacted]" password'
+    assert "not-a-real-secret" not in redacted
+    assert redacted[12:] == '"public" tag and "[redacted]" password'
+
+
+def test_new_step_redacts_a_match_whose_arguments_are_not_a_list() -> None:
+    """``match.arguments`` is a sequence, and a tuple is one.
+
+    :func:`app.reporting.events.new_step` is the constructor a fixture, a
+    loader and a hand-assembled document all reach the schema through, and any
+    of them can hand it a tuple.  A type test that recognised only ``list``
+    took the no-arguments path, so the name was text-redacted while the
+    entries kept their raw ``val`` -- the credential published in the very
+    field the joint redaction exists to mask.  The stored list is also a
+    ``list`` afterwards, because that is what the document validator accepts
+    when the shard is read back.
+    """
+    step = events.new_step(
+        keyword="When",
+        line=16,
+        name=LOGIN_PASSWORD_STEP_NAME,
+        matched=True,
+        match={
+            "location": "features.steps.login_steps.user_enters_password",
+            "arguments": ({"val": '"not-a-real-secret"', "offset": 12},),
+        },
+    )
+
+    assert step["name"] == 'User enters "[redacted]" password'
+    assert isinstance(step["match"]["arguments"], list)
+    assert step["match"]["arguments"] == [
+        {"val": REDACTED_QUOTED_VALUE, "offset": 12}
+    ]
+    assert_offsets_index_into_the_name(step)
+    assert "not-a-real-secret" not in json.dumps(step)
+
+
+def test_new_step_sanitizes_the_failure_text_it_is_handed() -> None:
+    """Review finding SEC2-F20 says *before storage*, so the builder is a gate.
+
+    :func:`app.reporting.events.new_hook_entry` already sanitizes its own
+    ``error_message``; a step's result reached the document verbatim, so a
+    caller that built one from an exception -- a fixture, a merge of a shard
+    another build wrote -- could put a secret, an absolute path and an
+    unbounded traceback into a document :func:`dump_result_set` then
+    persists.  The other keys of the result are the caller's exactly as
+    before, which the status and duration assertions pin.
+    """
+    step = events.new_step(
+        keyword="Then",
+        line=18,
+        name="User click on the crm dashboard",
+        matched=True,
+        result={
+            "status": "failed",
+            "duration": 4_211_000_000,
+            "error_message": (
+                f"Login failed: {FAILURE_TEXT_SECRET}\r\n"
+                f'  File "{FOREIGN_ABSOLUTE_PATH}", line 12\r\n'
+            ),
+        },
+    )
+    result = step["result"]
+
+    assert result["error_message"] == (
+        "Login failed: password=[redacted]\n"
+        '  File ".../unittest/case.py", line 12\n'
+    )
+    assert result["status"] == "failed"
+    assert result["duration"] == 4_211_000_000
+    # A result that carries no failure text is still given none, and a result
+    # the builder already sanitized is a fixed point.
+    assert "error_message" not in events.new_step(
+        keyword="Then", line=18, name="n", result={"status": "passed"}
+    )["result"]
+    assert events.new_step(
+        keyword="Then", line=18, name="n", result=result
+    )["result"] == result
+
+
+def test_sanitize_failure_text_relativises_a_frame_path_with_spaces() -> None:
+    """A workspace path with a space is still a workspace path.
+
+    The rule that shortens an absolute path in ordinary message text has to
+    stop at the characters a path cannot contain, or a Selenium message would
+    have its prose swallowed; a space is one of them.  A traceback frame is
+    delimited instead: ``  File "<path>", line N, in <name>``, so the quoted
+    run is the whole path however many spaces it holds.  Before that
+    distinction existed, ``/home/jane doe/...`` kept the account name and the
+    entire layout after the space while the part in front of it was reduced to
+    ``.../home/jane`` -- worse than useless, since the frame was mangled *and*
+    the topology was published (review finding SEC2-F20, CWE-200).  The
+    Windows drive, agent-directory and UNC forms are the same rule on the
+    other separator.
+    """
+    for path, expected in SPACED_FRAME_PATHS:
+        sanitized = events.sanitize_failure_text(
+            f'  File "{path}", line 61, in user_enters_password'
+        )
+
+        assert sanitized == (
+            f'  File "{expected}", line 61, in user_enters_password'
+        ), path
+        assert "jane" not in sanitized.lower()
+        assert "job 42" not in sanitized
+        assert "buildhost" not in sanitized
+        assert events.sanitize_failure_text(sanitized) == sanitized, path
+
+
+def test_sanitize_failure_text_leaves_a_non_path_frame_position_alone() -> None:
+    """Not everything between ``File "`` and its closing quote is a path.
+
+    The interpreter writes ``File "<stdin>"`` and ``File "<string>"`` for a
+    frame with no source file, a relative frame is what rule 1 has just
+    produced, and a URL is not a filesystem path at all.  Each is left exactly
+    as it arrived: the frame rule shortens an absolute POSIX, drive-qualified
+    or UNC path and refuses everything else, which is also what keeps it clear
+    of the ``//``-leading XPath selector a Selenium message carries.
+    """
+    untouched = (
+        '  File "<stdin>", line 1, in <module>',
+        '  File "<string>", line 1',
+        '  File "features/steps/crm_steps.py", line 88, in user_can_change',
+        '  File "https://www.selenium.dev/a/b/c.py", line 1',
+        "Message: no such element: {\"method\":\"xpath\","
+        "\"selector\":\"//input[@id='o_field_input_125']\"}",
+    )
+
+    for text in untouched:
+        assert events.sanitize_failure_text(text) == text, text
+
+
+def test_a_hand_built_hook_entrys_failure_text_is_sanitized() -> None:
+    """The builder is a boundary as well, for the same reason.
+
+    :func:`app.reporting.events.new_hook_entry` is what a fixture and a
+    lifecycle caller use, and a document assembled through it is a document
+    the writers publish.  Applying the rule in the builder means no caller has
+    to remember it.
+    """
+    entry = events.new_hook_entry(
+        status="cleanup_error",
+        duration=412_000_000,
+        error_message=f"Quitting the driver failed: {FAILURE_TEXT_SECRET}\r\n",
+    )
+
+    assert entry["result"]["error_message"] == (
+        "Quitting the driver failed: password=[redacted]\n"
+    )
+    assert entry["result"]["status"] == "cleanup_error"
+    assert entry["result"]["duration"] == 412_000_000
 
 
 # ==========================================================================
@@ -4152,20 +6908,26 @@ def test_an_outline_row_whose_examples_block_is_not_in_the_model(
     assert element["id"] == GOLDEN_ROW_ELEMENT_ID
 
 
-def test_an_unnamed_examples_block_keeps_the_settled_id_segments(
+def test_an_unnamed_examples_block_doubles_the_separator(
     make_collector: Callable[..., events.ResultCollectorFormatter],
     crm_feature: StubFeature,
 ) -> None:
-    """What is settled about an unnamed block's id, and nothing more.
+    """An unnamed ``Examples:`` block contributes an **empty segment**.
 
-    AAP 0.6 states that an unnamed ``Examples:`` block "would produce an empty
-    segment and a doubled separator", that the slug rule "is not safe to
-    generalize", and that this cell must be fixed against the clean generated
-    baseline before the writer is trusted - and the schema owner is changing
-    it.  So this test pins only the parts both the current and the mandated
-    behaviour share: the feature slug leads, the outline slug follows, and the
-    row's one-based position - counting the header as 1 - trails.  The number
-    of separators is deliberately **not** pinned.
+    The id of an outline row is
+    ``<feature>;<outline>;<examples>;<position>``, and an unnamed block
+    slugs to ``""`` - the JVM's own ``convertToId("")`` - so the id carries a
+    doubled separator, ``...;;2``.  AAP 0.6 required that cell to be fixed
+    against the clean Cucumber-JVM baseline before the writer was trusted,
+    and it is: that baseline emits ``...;verify-that-the-user-can-create-a-
+    new-contact;;2`` for ``Contact.feature``'s unnamed blocks, and
+    ``tests/fixtures/sample_results.json`` carries the same ``;;2``/``;;3``
+    shape for ``Sales.feature``'s.
+
+    So the whole id is pinned here, separators included.  The JSON report is
+    machine-read and this is the key every artifact and detail page uses:
+    collapsing the empty segment, or substituting a placeholder for it,
+    would publish a test case neither authority names.
     """
     collector = make_collector(source_lines=[])
     row = _outline_row(
@@ -4175,13 +6937,17 @@ def test_an_unnamed_examples_block_keeps_the_settled_id_segments(
     run_feature(collector, crm_feature, [row])
     element = feature_by_path(read_document(collector), CRM_PATH)["elements"][-1]
 
-    segments = element["id"].split(";")
-    assert segments[0] == CRM_FEATURE_ID
-    assert segments[1] == events.convert_to_id(
-        "User can change information in dashboard"
+    outline_name = "User can change information in dashboard"
+    assert element["id"] == (
+        f"{CRM_FEATURE_ID};{events.convert_to_id(outline_name)};;2"
     )
-    assert element["id"].endswith(";2")
-    assert element["name"] == "User can change information in dashboard"
+    assert element["id"].split(";") == [
+        CRM_FEATURE_ID,
+        events.convert_to_id(outline_name),
+        "",
+        "2",
+    ]
+    assert element["name"] == outline_name
 
 
 # ==========================================================================
@@ -4489,50 +7255,448 @@ def test_a_stream_that_cannot_encode_the_document_escapes_it(
     )
 
 
-def test_collector_opens_its_stream_through_behaves_own_opener(
+def test_collector_opens_the_outfile_path_through_the_path_authority(
     tmp_path: Path, crm_feature: StubFeature
 ) -> None:
-    """The production route: behave opens the ``-o`` file, eagerly.
+    """The production route: the ``-o`` file is opened here, eagerly, verified.
 
-    Opening in the constructor is deliberate - an unwritable ``-o`` path is
-    then a startup failure rather than a surprise at the end of a run, and the
-    merge step can tell an empty shard (a worker that died) from an absent one
-    (a worker that never started).  Both halves are asserted here.
+    This is the mode ``app/services/test_run_service.py`` produces -
+    ``StreamOpener(outfile)``, a filename and no stream - and it used to be
+    handed to behave's own opener, which calls ``codecs.open()`` on that
+    pathname: the name is resolved afresh, a symbolic link standing in its
+    place is followed, and the target is truncated before anything can refuse
+    it.  The collector now opens it through
+    ``app.utils.paths.open_artifact_write`` instead, so what is asserted here
+    is the whole of that route's observable contract:
 
-    behave 1.3.3's ``StreamOpener.open()`` calls ``codecs.open()``, which
-    Python 3.13 deprecated, so this test - the only one that lets behave open
-    the file - contains that warning locally.  The suppression is scoped to
-    this block on purpose: ``pytest.ini`` deliberately carries no blanket
-    ``filterwarnings``, precisely so a deprecation in a pinned dependency stays
-    visible everywhere else.
+    * the file exists at the requested path after construction alone, with
+      both of its directory components created, because opening in the
+      constructor is what makes an unwritable ``-o`` path a startup failure
+      rather than a surprise at the end of a run, and what lets the merge step
+      tell an empty shard (a worker that died) from an absent one (a worker
+      that never started);
+    * the handle is installed on behave's stream opener with
+      ``should_close_stream`` set, which is not decoration:
+      ``Formatter.close_stream`` asserts ``self.stream is
+      self.stream_opener.stream`` and delegates the close to the opener, so
+      behave's own house-keeping only works while that identity holds;
+    * the document and every directory the route created are owner-only, per
+      the mode policy - the document carries substituted step arguments and
+      failure text;
+    * an unwritable path still raises out of the constructor.
+
+    This test used to *suppress* ``codecs.open()``'s ``DeprecationWarning``,
+    which was unavoidable on the old route.  It now turns that one warning into
+    an error for the duration of the block instead - narrowly, by message, so
+    no unrelated deprecation in a pinned dependency is caught up in it - which
+    is what makes "behave's pathname opener is no longer reached" an assertion
+    rather than a claim in a docstring.
     """
-    destination = tmp_path / WORKER_FILE_NAME
+    destination = worker_output_path(tmp_path)
+    opener = StreamOpener(filename=str(destination))
     with warnings.catch_warnings():
         warnings.filterwarnings(
-            "ignore", message="codecs.open", category=DeprecationWarning
+            "error", message="codecs.open", category=DeprecationWarning
         )
-        collector = events.ResultCollectorFormatter(
-            StreamOpener(filename=str(destination)), StubConfig()
+        collector = events.ResultCollectorFormatter(opener, StubConfig())
+    try:
+        assert destination.is_file(), "the stream must be opened eagerly"
+        assert collector.stream is not None
+        assert opener.stream is collector.stream, (
+            "behave's close_stream asserts this identity"
         )
-        try:
-            assert destination.exists(), "the stream must be opened eagerly"
-            assert collector.stream is not None
-            collector.clock = SteppedClock()
-            collector.read_source_lines = lambda _filename: []  # type: ignore[method-assign]
-            run_feature(collector, crm_feature, [StubScenario("scenario", 9)])
-        finally:
-            collector.close()
-
-        with pytest.raises(OSError):
-            # A directory is not a writable output file, and the failure has to
-            # happen here rather than after a run has already been paid for.
-            events.ResultCollectorFormatter(
-                StreamOpener(filename=str(tmp_path)), StubConfig()
+        assert opener.should_close_stream is True
+        assert_owner_only(destination, directory=False)
+        for depth in range(1, len(WORKER_DIR_COMPONENTS) + 1):
+            assert_owner_only(
+                tmp_path.joinpath(*WORKER_DIR_COMPONENTS[:depth]), directory=True
             )
+        collector.clock = SteppedClock()
+        collector.read_source_lines = lambda _filename: []  # type: ignore[method-assign]
+        run_feature(collector, crm_feature, [StubScenario("scenario", 9)])
+    finally:
+        collector.close()
+
+    with pytest.raises(OSError):
+        # A directory is not a writable output file, and the failure has to
+        # happen here rather than after a run has already been paid for.
+        events.ResultCollectorFormatter(
+            StreamOpener(filename=str(tmp_path)), StubConfig()
+        )
 
     document = json.loads(destination.read_text(encoding="utf-8"))
     assert collector not in events._ACTIVE_COLLECTORS
     assert feature_by_path(document, CRM_PATH)["elements"]
+    assert_owner_only(destination, directory=False)
+
+
+def test_collector_refuses_a_symlinked_outfile_and_leaves_the_victim_intact(
+    tmp_path: Path,
+) -> None:
+    """A link planted at the ``-o`` path must cost nothing outside the tree.
+
+    The finding this closes is a truncation, not an exception: behave's
+    ``codecs.open()`` on the ``-o`` pathname follows a symbolic link and empties
+    whatever it points at, and ``target/.workers/`` survives a ``--no-clean``
+    run, so the name is not under the worker's sole control.  Both halves are
+    asserted - the refusal is typed
+    ``app.utils.paths.ArtifactPathError``, which is an ``OSError`` and
+    therefore the writer-failure exit class of AAP 0.4.1, and the external file
+    is still byte-for-byte what it was.  An implementation that refused after
+    opening with ``O_TRUNC`` would pass the first assertion and fail the
+    second.
+
+    The collector must also not have registered itself: a constructor that
+    raised leaves no live formatter for ``attach_to_current_scenario`` to find.
+    """
+    victim = plant_victim(tmp_path / "victim.txt")
+    destination = worker_output_path(tmp_path)
+    destination.parent.mkdir(parents=True)
+    destination.symlink_to(victim)
+    live_before = list(events._ACTIVE_COLLECTORS)
+
+    with pytest.raises(paths.ArtifactPathError) as raised:
+        events.ResultCollectorFormatter(
+            StreamOpener(filename=str(destination)), StubConfig()
+        )
+
+    assert isinstance(raised.value, OSError)
+    assert "symbolic link" in str(raised.value)
+    assert_victim_intact(victim)
+    assert destination.is_symlink(), "the link itself must be left alone"
+    assert events._ACTIVE_COLLECTORS == live_before
+
+
+def test_collector_refuses_a_hard_linked_outfile_and_leaves_the_victim_intact(
+    tmp_path: Path,
+) -> None:
+    """A hard-linked ``-o`` destination is the same refusal with no symlink.
+
+    The case a symlink check cannot see: the entry at the ``-o`` path *is* the
+    external file, so every byte written to the shard would be written to that
+    file and nothing in the path is a link for a link check to find.  It is
+    reachable exactly as the symlink case is - a prepared ``target/.workers/``
+    that a ``--no-clean`` run did not empty - and the path authority refuses it
+    on the link count of the object it opened, before anything is truncated.
+    """
+    victim = plant_victim(tmp_path / "victim.txt")
+    destination = worker_output_path(tmp_path)
+    destination.parent.mkdir(parents=True)
+    os.link(victim, destination)
+
+    with pytest.raises(paths.ArtifactPathError) as raised:
+        events.ResultCollectorFormatter(
+            StreamOpener(filename=str(destination)), StubConfig()
+        )
+
+    assert "hard link" in str(raised.value)
+    assert_victim_intact(victim)
+    assert_victim_intact(destination)
+
+
+def test_a_pre_opened_stream_is_used_as_is_and_touches_no_path(
+    tmp_path: Path, crm_feature: StubFeature
+) -> None:
+    """behave's other construction must not be routed through the filesystem.
+
+    ``StreamOpener(stream=...)`` is what behave builds for a run with no
+    ``-o`` - it passes ``sys.stdout`` - and what every other test in this
+    module builds.  There is no pathname involved, so there is nothing for the
+    path authority to verify, and the collector hands the stream back
+    unchanged: the document lands in the caller's buffer and ``tmp_path`` stays
+    empty, which is what proves no pathname was invented for it.
+
+    The stream stays open afterwards, which is behave's documented rule rather
+    than an oversight: ``StreamOpener.close()`` closes only a stream it opened
+    itself, so a pre-opened one belongs to whoever opened it.
+    """
+    buffer = io.StringIO()
+    opener = StreamOpener(stream=buffer)
+    collector = events.ResultCollectorFormatter(opener, StubConfig())
+    try:
+        assert collector.stream is buffer
+        assert opener.should_close_stream is False
+        collector.clock = SteppedClock()
+        collector.read_source_lines = lambda _filename: []  # type: ignore[method-assign]
+        run_feature(collector, crm_feature, [StubScenario("scenario", 9)])
+    finally:
+        collector.close()
+
+    assert list(tmp_path.iterdir()) == [], "a pre-opened stream needs no file"
+    assert not buffer.closed, "a pre-opened stream is the caller's to close"
+    document = json.loads(buffer.getvalue())
+    assert feature_by_path(document, CRM_PATH)["elements"]
+    assert collector not in events._ACTIVE_COLLECTORS
+
+
+def test_close_closes_the_verified_stream_exactly_once(
+    tmp_path: Path, crm_feature: StubFeature, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One close, one document, and a second ``close`` that is still harmless.
+
+    The install-on-the-opener step is what keeps this true: behave closes the
+    stream through ``StreamOpener.close()``, and a handle the opener did not
+    know about would either be closed twice - once by the opener's
+    house-keeping and once by the collector's own release - or never closed at
+    all, with the document unflushed.  ``close`` is also called defensively by
+    ``app/services/test_run_service.py``, and a second write would append a
+    second JSON document and make the shard unparseable.
+
+    The count is measured by wrapping the handle the path authority returns,
+    which is the only way to observe it: closing an already-closed file object
+    is silently harmless, so an assertion on the file alone would not see a
+    double close.
+    """
+    closes: list[int] = []
+    real_open = paths.open_artifact_write
+
+    class CountingStream:
+        """The verified stream, counting the closes it is asked for.
+
+        A delegating wrapper rather than a ``TextIOWrapper`` subclass: wrapping
+        the verified descriptor in a *second* text layer would leave the first
+        one unreferenced, and its collection would close the buffer underneath
+        this object.
+        """
+
+        def __init__(self, handle: Any) -> None:
+            """Wrap ``handle``.
+
+            :param handle: The stream ``open_artifact_write`` returned.
+            """
+            self._handle = handle
+
+        def close(self) -> None:
+            """Record the close and perform it.
+
+            Recorded before the delegation, so a second close is counted even
+            though the underlying object would treat it as a no-op.
+            """
+            closes.append(1)
+            self._handle.close()
+
+        def __getattr__(self, name: str) -> Any:
+            """Forward everything else - ``write``, ``flush``, ``closed``.
+
+            :param name: The attribute the collector or behave asked for.
+            :returns: The wrapped stream's attribute.
+            """
+            return getattr(self._handle, name)
+
+    def counting_open(path: Any, **kwargs: Any) -> Any:
+        """Open through the real path authority, wrapped in the counter.
+
+        :param path: Destination, passed straight through.
+        :param kwargs: The keyword contract of ``open_artifact_write``.
+        :returns: The counting stream over the verified descriptor.
+        """
+        return CountingStream(real_open(path, **kwargs))
+
+    monkeypatch.setattr(events, "open_artifact_write", counting_open)
+    destination = worker_output_path(tmp_path)
+    collector = events.ResultCollectorFormatter(
+        StreamOpener(filename=str(destination)), StubConfig()
+    )
+    collector.clock = SteppedClock()
+    collector.read_source_lines = lambda _filename: []  # type: ignore[method-assign]
+    run_feature(collector, crm_feature, [StubScenario("scenario", 9)])
+
+    collector.close()
+
+    assert closes == [1], f"the verified stream was closed {len(closes)} times"
+    assert collector.stream is None
+    assert collector.stream_opener.stream is None
+
+    collector.close()
+
+    assert closes == [1], "a second close must not reach the stream again"
+    text = destination.read_text(encoding="utf-8")
+    assert text.count(f'"schema_version": {events.SCHEMA_VERSION}') == 1
+    assert feature_by_path(json.loads(text), CRM_PATH)["elements"]
+
+
+def test_an_opener_with_no_filename_and_no_stream_is_left_to_behave(
+    tmp_path: Path,
+) -> None:
+    """A nonsense opener must not be routed to the path authority.
+
+    ``StreamOpener`` allows a construction that carries neither a filename nor
+    a stream, and behave's own opener fails it with a ``TypeError`` from
+    ``os.path.dirname(None)``.  The collector keeps exactly that outcome
+    instead of passing the missing name to
+    ``app.utils.paths.open_artifact_write``, which is what would turn a
+    configuration mistake into a path built out of ``None``.
+
+    ``tmp_path`` is asserted empty afterwards for the same reason it is in the
+    pre-opened test: no filesystem entry may be invented for an opener that
+    named none.
+    """
+    collector_count = len(events._ACTIVE_COLLECTORS)
+
+    with pytest.raises(TypeError):
+        events.ResultCollectorFormatter(StreamOpener(), StubConfig())
+
+    assert list(tmp_path.iterdir()) == []
+    assert len(events._ACTIVE_COLLECTORS) == collector_count
+
+
+def test_an_opener_that_will_not_hold_the_stream_still_yields_a_document(
+    tmp_path: Path, crm_feature: StubFeature, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The verified stream is released even when behave's route cannot run.
+
+    Installing the handle on the stream opener is what lets behave close it,
+    and ``Formatter.close_stream`` asserts the identity before delegating.  An
+    opener that will not accept the handle therefore leaves behave unable to
+    close it - and an unclosed text stream means an unflushed document, which
+    is the shard the merge would read as truncated.  The collector reports the
+    condition and closes the stream itself, so the outcome is a complete
+    document either way.
+
+    :class:`StubUnsettableOpener` reproduces it deterministically; the real
+    ``StreamOpener`` accepts the assignment, which is why the normal route is
+    the one every other test here exercises.
+    """
+    destination = worker_output_path(tmp_path)
+    collector = events.ResultCollectorFormatter(
+        StubUnsettableOpener(str(destination)), StubConfig()
+    )
+    collector.clock = SteppedClock()
+    collector.read_source_lines = lambda _filename: []  # type: ignore[method-assign]
+    handle = collector.stream
+
+    with caplog.at_level(logging.DEBUG, logger=events.__name__):
+        run_feature(collector, crm_feature, [StubScenario("scenario", 9)])
+        collector.close()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("would not accept the verified output stream" in m for m in messages)
+    assert handle.closed, "the collector must close a stream behave cannot"
+    document = json.loads(destination.read_text(encoding="utf-8"))
+    assert feature_by_path(document, CRM_PATH)["elements"]
+    assert_owner_only(destination, directory=False)
+    assert collector not in events._ACTIVE_COLLECTORS
+
+
+def test_a_stream_whose_close_fails_does_not_fail_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The last act of a passed run must not raise.
+
+    ``close`` is called by behave at the very end of a run, so every one of its
+    stages is guarded - and the stream release is the final stage, reached when
+    behave's own house-keeping could not run.  A close that reports a failure
+    there (a full disk flushing the last buffer, a stream object someone
+    replaced) is logged and nothing more: an exception would fail a suite that
+    had already passed, for a report that has already been written.
+    """
+    real_open = paths.open_artifact_write
+
+    class FailingCloseStream:
+        """A verified stream whose ``close`` performs and then complains."""
+
+        def __init__(self, handle: Any) -> None:
+            """Wrap ``handle``.
+
+            :param handle: The stream ``open_artifact_write`` returned.
+            """
+            self._handle = handle
+
+        def close(self) -> None:
+            """Close the real stream, then report a failure.
+
+            Closing first keeps the descriptor from leaking into the rest of
+            the session; the raise is what the collector has to absorb.
+
+            :raises OSError: Always, after the close has happened.
+            """
+            self._handle.close()
+            raise OSError("the stream could not be closed")
+
+        def __getattr__(self, name: str) -> Any:
+            """Forward everything else to the wrapped stream.
+
+            :param name: The attribute asked for.
+            :returns: The wrapped stream's attribute.
+            """
+            return getattr(self._handle, name)
+
+    monkeypatch.setattr(
+        events,
+        "open_artifact_write",
+        lambda path, **kwargs: FailingCloseStream(real_open(path, **kwargs)),
+    )
+    destination = worker_output_path(tmp_path)
+    collector = events.ResultCollectorFormatter(
+        StubUnsettableOpener(str(destination)), StubConfig()
+    )
+    collector.clock = SteppedClock()
+
+    with caplog.at_level(logging.DEBUG, logger=events.__name__):
+        collector.close()
+
+    assert any(
+        "Closing the verified output stream failed" in record.getMessage()
+        for record in caplog.records
+    )
+    assert_keys(
+        json.loads(destination.read_text(encoding="utf-8")),
+        RESULT_SET_KEYS,
+        "document written before the failing close",
+    )
+    assert collector not in events._ACTIVE_COLLECTORS
+
+
+def test_the_minimal_document_replaces_a_partial_write_on_the_verified_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``_write_minimal_document``'s rewind has to work on the real stream.
+
+    The fallback documents that it rewinds and truncates *"when the stream
+    supports both"*, so that the parent reads a small well-formed incomplete
+    document instead of half-serialised bytes.  The stream the path authority
+    returns is asserted to support both here rather than assumed to: it is
+    opened write-only through a directory descriptor, which is precisely the
+    kind of construction that could have come back unseekable.
+
+    A partial write is planted first, because that is what the fallback exists
+    to replace - an assertion on the minimal document alone would pass even if
+    the rewind had silently been skipped.
+    """
+    destination = worker_output_path(tmp_path)
+    collector = events.ResultCollectorFormatter(
+        StreamOpener(filename=str(destination)), StubConfig()
+    )
+    collector.clock = SteppedClock()
+
+    def _unserialisable(_document: Any) -> str:
+        """Stand in for a serialisation that cannot complete.
+
+        :param _document: Ignored.
+        :returns: Never returns.
+        :raises RuntimeError: Always.
+        """
+        raise RuntimeError("the document could not be serialised")
+
+    assert collector.stream.seekable(), "the minimal document needs seek(0)"
+    collector.stream.write("PARTIALLY WRITTEN DOCUMENT")
+    monkeypatch.setattr(events, "_serialize", _unserialisable)
+
+    with caplog.at_level(logging.WARNING, logger=events.__name__):
+        collector.close()
+
+    text = destination.read_text(encoding="utf-8")
+    assert "PARTIALLY WRITTEN" not in text, "the partial write was not replaced"
+    document = json.loads(text)
+    assert document["complete"] is False
+    assert [entry["event"] for entry in document["collection_errors"]] == [
+        "close.write"
+    ]
+    assert_owner_only(destination, directory=False)
+    assert any(
+        "minimal incomplete result document" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_the_collected_document_round_trips_through_the_load_primitive(

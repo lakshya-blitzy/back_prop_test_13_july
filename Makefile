@@ -1,45 +1,8 @@
 # Makefile - Testinium-QA (Python 3.14 port)
 #
-# Developer command surface for the ported project: four targets wrapping the
-# `run-tests` console script and pytest. It stands in for the Maven command
-# surface of the Java build - pom.xml is retained as historical reference only
-# and is no longer a supported build configuration - so the semantics behind
-# two of these targets come from there:
-#   pom.xml:25     surefire testFailureIgnore=true  -> the runner exit contract
-#                                                      described under `test`,
-#                                                      which is reproduced by
-#                                                      the runner and never
-#                                                      suppressed here
-#   pom.xml:21-29  surefire parallel configuration  -> the runner --workers
-#                                                      default (CPU count)
-#   `clean test`   the lifecycle developers invoked -> `make clean` plus the
-#                                                      runner --clean default
-#
-# make is OPTIONAL developer convenience and must never become a CI
-# dependency. The pipeline (Jenkins, stage "Run tests") selects
-# scripts/run_tests.sh or scripts/run_tests.ps1 through its own isUnix()
-# branch and never invokes make. Those two scripts are self-bootstrapping, and
-# this file deliberately offers no bootstrap target for anything to depend on.
-#
-# Targets - EXACTLY these four, which is the whole public surface:
-#   test      run the Gherkin browser suite through the run-tests entry point
-#             (the default goal, mirroring what `mvn test` was)
-#   unit      run the pytest suite covering this port's own code
-#   coverage  run the four per-package coverage gates; first miss fails
-#   clean     remove generated output and caches
-#
-# Recipe lines are indented with a literal TAB, which make requires.
-#
-# Absent on purpose: no `help` target, because the four above are the whole
-# surface the specification defines and a fifth public target is surface this
-# file is not entitled to add; no bootstrap step the pipeline could come to
-# depend on; no target that rebuilds report artifacts from stored results,
-# which is not part of this port; no static-analysis or type-checking target,
-# since no such tool is a pinned dependency (requirements-test.txt pins pytest
-# and pytest-cov and nothing else); no container or deployment target; and no
-# report artifact path literal, because those paths have exactly one owner,
-# app/utils/paths.py. Removing the generated target/ directory wholesale is
-# both the correct and the sufficient form.
+# Optional developer convenience, and never a CI dependency: the pipeline
+# selects scripts/run_tests.sh or scripts/run_tests.ps1 itself and never
+# invokes make.
 
 # ---------------------------------------------------------------------------
 # Interpreter and entry points
@@ -59,25 +22,96 @@
 # in Scripts, so point the location at it on the command line:
 #     make unit VENV_BIN=.venv/Scripts
 # (on Windows the pipeline runs scripts/run_tests.ps1, not make). That
-# override, and any override of the three variables below, is still held to
-# the version check in the pre-flight - it selects WHICH environment is used,
-# it does not relax the pin.
+# override, and any override of the variables below, is still held to the
+# version check in the pre-flight - it selects WHICH environment is used, it
+# does not relax the pin.
+#
+# EVERY value here is caller-influenced: make imports the environment as
+# variables, so an ambient PYTHON is an override just as much as one written on
+# the command line, and both are accepted. So none of them is ever interpolated
+# into recipe text, where a quote-breaking value would become a second command
+# rather than a path. They are `export`ed instead and each recipe reads them as
+# quoted shell parameter expansions - "$${PYTHON}" and not $(PYTHON) - which
+# gives the shell one word whatever it contains, and each is validated against
+# a conservative allowlist before it is used at all. The only make-interpolated
+# text left in any recipe below is a literal from this file, a variable NAME
+# among them: $(1) in the canned recipes expands to a name this file wrote, and
+# only the VALUE comes from the caller.
+#
+# That is not enough on its own, and this is the reason each of the four is
+# settled the long way below rather than with `?=`. A caller's value is MAKE
+# SOURCE before it is ever shell text: `make unit PYTHON='$(shell ...)'` is
+# expanded by make itself when the value is exported for a recipe, which
+# happens before any recipe line runs and therefore before the shell-side
+# allowlist can see it. Measured on GNU Make 4.4.1: with `?=`, that override
+# ran its command for all four targets - `clean` included, which has no
+# pre-flight at all - and with VENV, VENV_BIN and RUN_TESTS as the carrier
+# just the same. ARGS was immune, and the mechanism that made it immune is
+# what every one of them now uses:
+#
+#   * `$(origin VAR)` distinguishes a value that came from the caller - the
+#     command line, or the environment - from this file's own default.
+#   * For a caller's value, `override VAR := $(value VAR)` stores the text
+#     VERBATIM: `$(value)` reads it unexpanded and `:=` keeps it that way, so
+#     make never evaluates a function, a variable reference or a `$(shell)`
+#     inside it, and `export` hands those literal characters to the recipe.
+#   * `override` also settles it: a command-line assignment beats a file
+#     assignment in make, so without it this capture could itself be bypassed.
+#   * The allowlist then sees the RAW text and refuses it - it rejects `$`,
+#     `(` and `)` - so a function reference becomes a refusal instead of an
+#     execution. A default derived from a refused value carries the same
+#     characters and is refused for the same reason.
 # ---------------------------------------------------------------------------
-VENV      ?= .venv
-VENV_BIN  ?= $(VENV)/bin
+
+# The sanctioned environment directory. Overridable, captured raw.
+ifneq ($(filter command line environment environment override,$(origin VENV)),)
+override VENV := $(value VENV)
+else
+override VENV := .venv
+endif
+
+# Where its executables live: bin on POSIX, Scripts on Windows. Derived from
+# VENV only when the caller did not name it directly.
+ifneq ($(filter command line environment environment override,$(origin VENV_BIN)),)
+override VENV_BIN := $(value VENV_BIN)
+else
+override VENV_BIN := $(VENV)/bin
+endif
 
 # The pinned interpreter version, exact, and the only place this file states
 # it. Its other homes are .python-version, pyproject.toml and the two runner
 # scripts. String equality is the test, so no other 3.14.x satisfies it.
-REQUIRED_PYTHON_VERSION := 3.14.6
+#
+# `override` because `:=` alone does not settle it: a command-line assignment
+# beats a file assignment in make, so `make unit REQUIRED_PYTHON_VERSION=3.13.7`
+# would otherwise relax the one check that cannot be relaxed. With `override`
+# neither the command line nor the environment can reach it.
+override REQUIRED_PYTHON_VERSION := 3.14.6
 
-PYTHON    ?= $(VENV_BIN)/python
-PYTEST    ?= $(PYTHON) -m pytest
-RUN_TESTS ?= $(VENV_BIN)/run-tests
+# The interpreter and the console script, the same way: the caller's text
+# verbatim, or this file's own default derived from the two above.
+ifneq ($(filter command line environment environment override,$(origin PYTHON)),)
+override PYTHON := $(value PYTHON)
+else
+override PYTHON := $(VENV_BIN)/python
+endif
+
+ifneq ($(filter command line environment environment override,$(origin RUN_TESTS)),)
+override RUN_TESTS := $(value RUN_TESTS)
+else
+override RUN_TESTS := $(VENV_BIN)/run-tests
+endif
+
+# The values recipes read as "$${NAME}". Exporting is what carries them to the
+# recipe shell as DATA; nothing below interpolates them as text.
+export VENV
+export VENV_BIN
+export PYTHON
+export RUN_TESTS
+export REQUIRED_PYTHON_VERSION
 
 # Extra options forwarded to the suite runner, e.g.
 #     make test ARGS=--dry-run
-#     make test ARGS='--workers 1 --dry-run'
 #     make test ARGS="--tags '@Smoke and not @Wip'"
 #
 # ARGS is caller-controlled text, so it is handled as DATA from end to end and
@@ -110,9 +144,10 @@ RUN_TESTS ?= $(VENV_BIN)/run-tests
 # An unbalanced quote is reported as a usage error rather than guessed at.
 #
 # The interpreter here is a quoting helper that builds argv and hands over; it
-# is NOT how the runner is reached. `$(RUN_TESTS)`, the console script from the
-# virtual environment, is still the only thing executed as the runner - never
-# the Flask CLI, never `python -m app.cli`.
+# is NOT how the runner is reached. RUN_TESTS, the console script from the
+# virtual environment, is still the only thing executed as the runner - reached
+# as "$${RUN_TESTS}" for the reason the variable block above gives - never the
+# Flask CLI, never `python -m app.cli`.
 override ARGS := $(value ARGS)
 export ARGS
 
@@ -125,13 +160,43 @@ export ARGS
 # neither, so it works on a checkout that has no environment at all.
 # ---------------------------------------------------------------------------
 
-# Fail unless $(1) exists and is executable, naming the bootstrap that creates
-# it. Messages avoid the apostrophe so the single-quoted forms below stay
-# valid POSIX shell.
-define require_executable
-if [ ! -x '$(1)' ]; then \
+# Fail unless the value of the variable NAMED in $(1) is a path this file will
+# use at all. The name is a literal from this file and the value never leaves
+# the shell's hands, so what make interpolates here cannot come from a caller.
+#
+# The allowlist is deliberately narrow - letters, digits, space and . _ - / + :
+# @ - because the values are paths to an interpreter and a console script, and
+# nothing else belongs in one. A value carrying a quote, a semicolon, a
+# backquote, a newline or any other control character is REFUSED rather than
+# printed or passed on, which is also why the refusal renders it through the
+# same bound-and-strip filter the runner scripts use for environment-derived
+# text: 200 characters, printable ASCII only.
+define require_safe_path
+make_value="$${$(1)}"; \
+make_rest=$$(printf '%s' "$$make_value" | tr -d 'A-Za-z0-9._/+:@ -'); \
+if [ -z "$$make_value" ] || [ -n "$$make_rest" ]; then \
     printf '%s\n' \
-        'make: $(1) is missing or not executable.' \
+        'make: the $(1) value is not a path this Makefile will use.' \
+        "  $(1) : $$(printf '%s' "$$make_value" | tr -d '\000' | tr -c '\040-\176' '[?*]' | cut -c1-200)" \
+        '' \
+        'A path here may hold letters, digits, space and . _ - / + : @ only,' \
+        'and may not be empty. Every value this file uses - PYTHON, RUN_TESTS,' \
+        'VENV and VENV_BIN - can be set by the caller or inherited from the' \
+        'environment, so each is checked before it is used and none of them is' \
+        'ever pasted into a command line.' >&2; \
+    exit 1; \
+fi
+endef
+
+# Fail unless the program the variable NAMED in $(1) points at exists and is
+# executable, naming the bootstrap that creates it. Messages avoid the
+# apostrophe so the single-quoted forms below stay valid POSIX shell, and the
+# value is read as a quoted shell expansion rather than interpolated.
+define require_executable
+if [ ! -x "$${$(1)}" ]; then \
+    printf '%s\n' \
+        'make: the $(1) program is missing or not executable.' \
+        "  $(1) : $$(printf '%s' "$${$(1)}" | tr -d '\000' | tr -c '\040-\176' '[?*]' | cut -c1-200)" \
         '' \
         'Every target here runs out of the project virtual environment and' \
         'never falls back to a PATH command, so this is a hard stop rather' \
@@ -142,35 +207,41 @@ if [ ! -x '$(1)' ]; then \
         '' \
         'or, to build it without starting a suite run:' \
         '' \
-        '    python3.14 -m venv $(VENV)' \
-        '    $(VENV_BIN)/python -m pip install -r requirements.txt -r requirements-test.txt' \
-        '    $(VENV_BIN)/python -m pip install -e .' \
+        '    python3.14 -m venv .venv' \
+        '    .venv/bin/python -m pip install -r requirements.txt -r requirements-test.txt' \
+        '    .venv/bin/python -m pip install -e .' \
         '' \
-        'The last install is what creates $(VENV_BIN)/run-tests, which' \
-        'pyproject.toml declares under [project.scripts].' >&2; \
+        'The last install is what creates .venv/bin/run-tests, which' \
+        'pyproject.toml declares under [project.scripts]. A VENV or VENV_BIN' \
+        'override puts the same three commands elsewhere.' >&2; \
     exit 1; \
 fi
 endef
 
-# Fail unless $(PYTHON) reports EXACTLY the pinned version. This is what makes
-# an override of PYTHON, PYTEST, VENV or VENV_BIN incapable of relaxing the
-# pin: it chooses which interpreter is used, and this check still applies.
+# Fail unless the interpreter PYTHON points at reports EXACTLY the pinned
+# version. This is what makes an override of PYTHON, VENV or VENV_BIN incapable
+# of relaxing the pin: it chooses which interpreter is used, and this check
+# still applies. The version literal is `override`-protected above, so the
+# comparison is against this file's own value and not against anything a caller
+# can reach; what the interpreter printed is compared EXACTLY and only the
+# printed copy of it is bound and stripped.
 define require_pinned_python
-make_pinned_version=$$('$(PYTHON)' -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null); \
-if [ "$$make_pinned_version" != '$(REQUIRED_PYTHON_VERSION)' ]; then \
+make_pinned_version=$$("$${PYTHON}" -I -S -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null); \
+if [ "$$make_pinned_version" != "$${REQUIRED_PYTHON_VERSION}" ]; then \
     printf '%s\n' \
         'make: the interpreter is not the pinned one.' \
-        '  required : $(REQUIRED_PYTHON_VERSION)' \
-        "  $(PYTHON) : $${make_pinned_version:-no version reported (missing or not runnable)}" \
+        "  required : $${REQUIRED_PYTHON_VERSION}" \
+        "  PYTHON   : $$(printf '%s' "$${PYTHON}" | tr -d '\000' | tr -c '\040-\176' '[?*]' | cut -c1-200)" \
+        "  reported : $$(printf '%s' "$${make_pinned_version:-no version reported (missing or not runnable)}" | tr -d '\000' | tr -c '\040-\176' '[?*]' | cut -c1-200)" \
         '' \
-        'This project is pinned to $(REQUIRED_PYTHON_VERSION) exactly by' \
+        "This project is pinned to $${REQUIRED_PYTHON_VERSION} exactly by" \
         '.python-version and by requires-python = "==3.14.*" in' \
         'pyproject.toml. An environment built on another interpreter is the' \
         'CI-versus-development drift the pin exists to prevent, so it is' \
         'refused rather than used, and it is deliberately not deleted for' \
-        'you. Remove $(VENV) and re-run the bootstrap:' \
+        'you. Remove the environment and re-run the bootstrap:' \
         '' \
-        '    rm -rf $(VENV)' \
+        '    rm -rf .venv' \
         '    sh scripts/run_tests.sh' >&2; \
     exit 1; \
 fi
@@ -180,27 +251,10 @@ endef
 
 .PHONY: test unit coverage clean
 
-# The Gherkin suite, through one entry point only: the `run-tests` console
-# script declared in pyproject.toml under [project.scripts], taken from the
-# virtual environment. Never the Flask CLI, never the BDD engine invoked
-# directly, never `python -m app.cli`.
-#
-# No option value is hard-coded, so the runner defaults stay in force, and no
-# status is suppressed - the recipe carries no leading dash and no fallback
-# command that would discard a failing status. The runner already guarantees
-# that a test outcome exits 0: scenario failures, errors, undefined or
-# skipped steps, a browser that fails to start, an unknown browser value, a
-# feature that fails to parse, a missing rerun manifest and an empty tag
-# selection all exit 0, reproducing surefire
-# testFailureIgnore=true (pom.xml:25) and the six -1 publisher thresholds in
-# Jenkins. Suppressing status here would add nothing and would hide the three
-# classes that must propagate: a usage error, a dead worker, and a merge or
-# writer failure.
-#
-# A real run needs a browser and a populated configuration.properties; the
-# repository supplies configuration.properties.example only.
 test:
-	@$(call require_executable,$(RUN_TESTS))
+	@$(call require_safe_path,PYTHON)
+	@$(call require_safe_path,RUN_TESTS)
+	@$(call require_executable,RUN_TESTS)
 	@$(call require_pinned_python)
 	printf '%s\n' \
 	    'import os, shlex, subprocess, sys' \
@@ -209,17 +263,28 @@ test:
 	    'except ValueError as exc:' \
 	    '    sys.exit("make: ARGS is not a valid quoted argument list: %s" % exc)' \
 	    'sys.exit(subprocess.call([sys.argv[1]] + argv))' \
-	    | '$(PYTHON)' - '$(RUN_TESTS)'
+	    | "$${PYTHON}" - "$${RUN_TESTS}"
 
 # This port's own unit suite. Plain and unmeasured: discovery, collection
 # patterns and options all come from pytest.ini (testpaths = tests), so no
 # path argument and no coverage flag is restated here. A non-zero status
 # propagates - this is a real quality gate, the same one both runner scripts
 # apply ahead of the browser run.
+#
+# The two pytest variables are removed from the recipe's environment first, and
+# that is part of the gate rather than tidiness: PYTEST_ADDOPTS is prepended to
+# the command line, so an ambient value can load a plugin with -p or move a
+# threshold, and PYTEST_PLUGINS names modules pytest imports at startup - which
+# it does even under the --disable-plugin-autoload pytest.ini sets, because that
+# switch governs entry-point discovery and not this variable. Both runner
+# scripts drop the same two before their own gates. `unset` leaves the status of
+# the pytest run as the status of the line, so nothing about propagation
+# changes.
 unit:
-	@$(call require_executable,$(PYTHON))
+	@$(call require_safe_path,PYTHON)
+	@$(call require_executable,PYTHON)
 	@$(call require_pinned_python)
-	$(PYTEST)
+	unset PYTEST_ADDOPTS PYTEST_PLUGINS; "$${PYTHON}" -m pytest
 
 # The coverage gates. A single --cov-fail-under cannot express four different
 # per-package thresholds, so pytest runs once per scope and each run measures
@@ -233,38 +298,25 @@ unit:
 # browser run, because CI must not depend on make being installed - so the
 # developer command and the CI command are the same command, and if a
 # threshold ever changes it changes in all three files together.
+# The two pytest variables are removed from each gate's environment for the
+# reason the `unit` target gives, and per line rather than once for the target
+# because every recipe line is its own shell.
 coverage:
-	@$(call require_executable,$(PYTHON))
+	@$(call require_safe_path,PYTHON)
+	@$(call require_executable,PYTHON)
 	@$(call require_pinned_python)
-	$(PYTEST) --cov=app/utils --cov-fail-under=90
-	$(PYTEST) --cov=app/pages --cov-fail-under=85
-	$(PYTEST) --cov=app/automation --cov-fail-under=80
-	$(PYTEST) --cov=app/reporting --cov-fail-under=80
+	unset PYTEST_ADDOPTS PYTEST_PLUGINS; "$${PYTHON}" -m pytest -p pytest_cov --cov=app/utils --cov-fail-under=90
+	unset PYTEST_ADDOPTS PYTEST_PLUGINS; "$${PYTHON}" -m pytest -p pytest_cov --cov=app/pages --cov-fail-under=85
+	unset PYTEST_ADDOPTS PYTEST_PLUGINS; "$${PYTHON}" -m pytest -p pytest_cov --cov=app/automation --cov-fail-under=80
+	unset PYTEST_ADDOPTS PYTEST_PLUGINS; "$${PYTHON}" -m pytest -p pytest_cov --cov=app/reporting --cov-fail-under=80
 
-# Remove generated output only, tolerating its absence, so `make clean` on a
-# fresh checkout succeeds and repeating it is harmless. The set is exactly
-# what .gitignore excludes: the generated target/ tree, which holds the four
-# report artifacts and the per-worker intermediates beneath it; the Python
-# bytecode caches; the pytest cache; and the coverage data file.
-#
-# This target runs no pre-flight, deliberately: it must work on a checkout
-# that has no virtual environment, which is exactly when a developer reaches
-# for it.
-#
-# Never removed, which is why this recipe names paths instead of sweeping the
-# tree: configuration.properties, a developer's local git-ignored credentials
-# file whose deletion would be data loss; configuration.properties.example;
-# the virtual environment; and anything tracked by git. The bytecode sweeps
-# prune the git directory and the virtual environments for the same reason,
-# and both remove through `-exec rm ... +` rather than through find's own
-# delete action: that action forces depth-first traversal, which makes a
-# prune list inoperative, and GNU find rejects the combination outright - so
-# the shorter spelling would fail this target rather than protect anything.
-#
-# The runner has its own --clean/--no-clean option, on by default, which
-# empties target/ before a run and is ignored under --rerun so that the
-# manifest it reads survives. This target is the standalone equivalent of
-# that option, not a replacement for it.
+# Removes generated output only, tolerating its absence, and names each path
+# rather than sweeping the tree, so a developer's git-ignored
+# configuration.properties is never deleted. No pre-flight, so it works on a
+# checkout with no virtual environment. Both bytecode sweeps prune .git and
+# the virtual environments and remove via `-exec rm ... +`, not find's own
+# delete action, which forces depth-first traversal and would make the prune
+# list inoperative.
 clean:
 	rm -rf target .pytest_cache
 	rm -f .coverage

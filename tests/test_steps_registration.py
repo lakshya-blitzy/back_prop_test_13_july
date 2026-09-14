@@ -1,110 +1,48 @@
 r"""The step-registration contract: phrase resolution, and nothing besides.
 
-This module is the executable form of the three directions AAP 0.5.2 states for
-the port's one behavioural adaptation of the step decorator - **deviation 7**,
-``@step`` and only ``@step``:
+The contract this module owns
+-----------------------------
+AAP 0.5.2's three directions for deviation 7 - ``@step`` and only ``@step``:
 
-1. **Every step phrase across all ten feature files resolves to exactly one
-   implementation.**  Cucumber-JVM matches a step by its *text alone*, so a
-   definition annotated ``@When`` in Java is reached by a ``Given`` in Gherkin.
-   The engine used here resolves by *effective step type* instead, so a
-   definition bound to one keyword would not match a use under another.  ``@step``
-   restores text-only matching; these tests prove it restores it completely.
-2. **No phrase resolves to more than one implementation.**  That is the price of
-   ``@step``'s reach: two patterns can overlap on a concrete phrase without
-   either being a duplicate registration the engine would have rejected at load
-   time.  Ambiguity in this suite is therefore a defect in the step *text*, and
-   the port already carries one fix for it - the ``CukeStr`` field type in
-   ``features/steps/contacts_steps.py``, whose necessity is proved below with a
-   throwaway matcher rather than asserted on trust.
+1. **Every phrase across all ten feature files resolves to exactly one
+   implementation.**  Cucumber-JVM matched on text alone - ``Session.java:12``
+   declares ``@When("User login to test other features")`` and Gherkin reaches
+   it with a ``Given``, and the ``io.cucumber.java.en.And`` of
+   ``Calendar.java:5``, ``Crm.java:5`` and ``Sales.java:5`` has no decorator
+   here at all.  This engine resolves by effective step type instead, so
+   ``@step`` is what restores text-only matching.
+2. **No phrase resolves to more than one.**  Two patterns can overlap on a
+   concrete phrase without being the duplicate registration the engine rejects
+   at load time, so ambiguity is a defect in the step *text*; the port's one
+   fix for it is the ``CukeStr`` field type of ``contacts_steps.py``, proved
+   below with a throwaway matcher rather than asserted on trust.
 3. **No module under ``features/steps/`` imports ``given``, ``when``, ``then``
-   or the browser-automation library.**  AAP 0.4.2 names this module as the
-   owner of both checks: the keyword-decorator boundary, and the invariant that
-   the automation library is imported only inside ``app/automation``.
+   or the browser-automation library.**  AAP 0.4.2 names this module the owner
+   of the keyword-decorator boundary and of the invariant that the automation
+   library is imported only inside ``app/automation``.
 
-What this module deliberately does **not** cover
-------------------------------------------------
-AAP 0.4.1 is explicit, and the division is worth stating in the file that would
-otherwise be mistaken for discharging it:
+Per-module behavioural parity is **not** covered here: AAP 0.4.1 states that
+this module "covers only phrase resolution and does not discharge this
+obligation", which belongs to the ten ``tests/test_steps_<area>.py`` modules.
+Nothing here executes a step body, so a green run says the glue is wired - not
+that it is correct.
 
-    ``tests/test_steps_registration.py`` covers only phrase resolution and does
-    not discharge this obligation.
+Every assertion names the corpus it counts, because the two differ by a factor
+of nearly three.  :data:`AS_WRITTEN_USAGES` is the authored step lines - 158
+usages, 93 distinct phrases, each ``Background`` counted once - and the only
+corpus containing a ``Background``, where all nine ``Given`` usages live.
+:data:`EXPANDED_USAGES` is ``walk_scenarios(with_outlines=True)`` - 443 usages,
+143 distinct phrases, every ``Examples`` row rendered plus the templates -
+which is what a run executes and which omits backgrounds entirely, as
+:func:`test_expanded_corpus_omits_backgrounds` pins.
 
-The obligation in question is **per-module behavioural parity** - that for every
-step method of the paired Java class the port performs the same observable
-operations in the same order: the same navigation targets and their property
-sources, the same locators, the same wait target and timeout, the same keys or
-action-chain sequence, the same literals, the same assertion subject and message,
-and the same no-ops where a Java body is empty.  That belongs to the ten
-``tests/test_steps_<area>.py`` modules, one per step module, each enumerating its
-Java class's methods so an omission fails rather than passes silently.
-
-Consequently **nothing here executes a step body**.  No test calls
-``StepMatch.run``, no test drives a stub driver, and no assertion in this file is
-about what a step *does*.  What is asserted is which definition a phrase reaches,
-how many definitions exist and where, and what the ten modules are allowed to
-import.  A green run of this module says the glue is wired; it says nothing about
-whether the glue is correct.
-
-The two corpora, and which assertion uses which
------------------------------------------------
-The counts differ by a factor of nearly three depending on how the Gherkin is
-enumerated, so every assertion below names its corpus.
-
-``AS_WRITTEN_USAGES`` - **158 usages, 93 distinct phrases**
-    Each feature's ``Background`` steps counted **once**, plus every
-    scenario's and outline's steps exactly as the file writes them, placeholders
-    included.  This is the corpus of *authored* step lines, and it is the only
-    one that contains a ``Background``: all nine ``Given`` usages in the suite
-    are background lines, so an enumeration that skipped backgrounds would both
-    miss them and wrongly report two definitions as unexercised.
-``EXPANDED_USAGES`` - **443 usages, 143 distinct phrases**
-    ``Feature.walk_scenarios(with_outlines=True)``: every ``Examples`` row
-    rendered into a concrete step line, *plus* the outline templates themselves.
-    This is the corpus for the outline-expansion checkbox - it is what a real run
-    executes - and it **omits backgrounds entirely**, which is why it cannot
-    serve for the 158 count.  :func:`test_expanded_corpus_omits_backgrounds`
-    pins that difference rather than leaving it as folklore.
-
-Mutation sensitivity, without touching a production file
---------------------------------------------------------
-A test that passes today and would still pass with a definition deleted is
-worthless, so each direction is paired with a proof that it can fail:
-
-* **Counts are re-derived, never read back.**  The per-module census comes from
-  the loaded registry grouped by ``location.filename``; the usage counts come
-  from the engine's own parser.  Both are compared against tables derived from
-  the Java authority (``src/main/java/com/testinium/step_definitions/``, pinned
-  revision ``47e9d697e4a9a85da889f94a846fdf47af28a240``) and cited line by line.
-  Dropping, adding or duplicating a definition moves a number this file names.
-* **The source-inspection checks are helpers over *text*.**  Each takes source
-  code as a string, so the same helper that scans the ten real modules is fed
-  synthetic **bad** sources - a module importing ``given``, one importing the
-  automation library outright, one importing it through a submodule, one hiding
-  that import inside a function body, and one constructing a page object at
-  module scope - and asserted to reject each.  No production file is edited,
-  even temporarily: sibling work is in flight on several of these modules, and a
-  committed rejection test is permanent proof where a temporary edit is none.
-* **Ambiguity is proved locally.**  The plain-field counterfactual builds a
-  throwaway ``ParseMatcher`` in the test and never registers it, so the real
-  registry holds the same matchers afterwards as before - asserted against a
-  snapshot taken in the test, not assumed.
-
-Standing constraints honoured here
-----------------------------------
-* **The registry is loaded exactly once per process.**  Every test reaches it
-  through :fixture:`step_registry` (session-scoped) or through
-  ``conftest.load_step_registry()``, which caches.  A second load of a changed
-  definition raises ``AmbiguousStep``, so "load it again to be safe" is the one
-  thing that must not happen.
-* **No browser, no socket, no import of the automation library, and no write
-  into the repository's ``target/``.**  This module reads feature files and
-  Python sources and asks the registry questions; that is all it does.
-* **The step modules are never imported as Python modules.**  ``features/``
-  carries no ``__init__.py`` by design, and ``load_step_modules`` *execs* the
-  files rather than importing them, so ``import features.steps.x`` would create
-  a second registration of every definition.  Modules are reached through the
-  registry, or by reading their source text.
+The registry is loaded once per process - through :fixture:`step_registry` or
+``conftest.load_step_registry()``, since a second load of a changed definition
+raises ``AmbiguousStep`` - and the step modules are never imported at all:
+``features/`` carries no ``__init__.py``, ``load_step_modules`` execs the
+files, and ``import features.steps.x`` would register everything twice.
+Nothing else happens here: the module reads feature files and Python sources
+and asks the registry questions, with no browser, no socket and no write.
 """
 
 from __future__ import annotations
@@ -168,18 +106,26 @@ SOURCE_ENCODING: Final[str] = "utf-8"
 # =========================================================================== #
 # The Java authority: the per-class census this port reproduces
 #
-# Measured from the annotation declarations of
+# Measured from the @Given/@When/@Then/@And declarations of
 # src/main/java/com/testinium/step_definitions/ at pinned revision
 # 47e9d697e4a9a85da889f94a846fdf47af28a240, which AAP 0.2.1 holds REFERENCE and
-# never modifies.  The table is written out here rather than read from that
-# checkout on purpose: the reference tree is not part of this repository, so a
-# test that opened it would fail on any machine that does not carry it.  It is
-# an authority transcribed with citations, not a Python constant copied back to
-# itself - the numbers on the right are what this file compares the *registry*
-# against.
+# never modifies.  Each class's count spans the annotation lines cited below:
 #
-# Hooks.java declares no step at all; it became features/environment.py, which
-# is why there is no eleventh row and no "environment" owner in the registry.
+#   Calendar.java:17-198       13    LoginSD.java:19-65      9
+#   Contacts.java:17-101       14    LogOutSD.java:16-30     3
+#   Crm.java:21-145            12    Notes.java:21-82       11
+#   EmployeeStage.java:16-107  12    Sales.java:19-87        7
+#   Inventory.java:15-57        9    Session.java:12         1
+#
+# The table is written out here rather than read from that checkout on purpose:
+# the reference tree is not part of this repository, so a test that opened it
+# would fail on any machine that does not carry it.  It is an authority
+# transcribed with citations, not a Python constant copied back to itself - the
+# numbers on the right are what this file compares the *registry* against.
+#
+# Hooks.java declares no step at all - its one @After at Hooks.java:11-18
+# became features/environment.py - which is why there is no eleventh row and no
+# "environment" owner in the registry.
 # =========================================================================== #
 
 
@@ -217,8 +163,9 @@ STEP_MODULE_NAMES: Final[tuple[str, ...]] = tuple(
     row.module for row in JAVA_STEP_CENSUS
 )
 
-#: 13 + 14 + 12 + 12 + 9 + 9 + 3 + 11 + 7 + 1.  The total the registry must
-#: hold, and the count AAP 0.5.2 and the review findings both name.
+#: 13 + 14 + 12 + 12 + 9 + 9 + 3 + 11 + 7 + 1: the annotations the ten classes
+#: cited above declare between them, and therefore the total the registry must
+#: hold under AAP 0.5.2's one-definition-per-annotation mapping.
 EXPECTED_DEFINITION_COUNT: Final[int] = 91
 
 
@@ -410,10 +357,11 @@ EXPECTED_MULTI_TYPE_PHRASES: Final[dict[str, frozenset[str]]] = {
 #: As-written usages carried by those three phrases: 7 + 5 + 2.
 EXPECTED_MULTI_TYPE_USAGES: Final[int] = 14
 
-#: The three Java classes that import ``io.cucumber.java.en.And``
-#: (``Calendar.java``, ``Crm.java``, ``Sales.java``).  Recorded for the reader
-#: and asserted only through its Python consequence - the engine publishes no
-#: ``and`` decorator, so those annotations have no keyword-typed translation.
+#: The three Java classes that import ``io.cucumber.java.en.And``, each at its
+#: line 5: ``Calendar.java:5``, ``Crm.java:5`` and ``Sales.java:5``.  Recorded
+#: for the reader and asserted only through its Python consequence - the engine
+#: publishes no ``and`` decorator, so those annotations have no keyword-typed
+#: translation.
 JAVA_AND_IMPORTERS: Final[tuple[str, ...]] = (
     "Calendar.java",
     "Crm.java",
@@ -637,9 +585,10 @@ EXPECTED_IMPORT_SURFACE: Final[dict[str, frozenset[str]]] = {
     # Contacts is the only module that takes anything besides ``step`` from the
     # engine, and the only one that imports ``parse``: both serve the
     # ``CukeStr`` registration.  It imports nothing from the interactions
-    # helpers - ``Contacts.java`` is the one step class importing neither the
-    # keyboard-key class nor the action builder, and its five ``sendKeys``
-    # calls are plain sends on a located element.
+    # helpers because ``Contacts.java:1-9`` imports neither
+    # ``org.openqa.selenium.Keys`` nor ``interactions.Actions``, and its four
+    # ``sendKeys`` calls (``Contacts.java:33``, ``:38``, ``:43``, ``:44``) are
+    # plain sends on a located element.
     "contacts_steps": frozenset(
         {
             "time:sleep",
@@ -662,6 +611,16 @@ EXPECTED_IMPORT_SURFACE: Final[dict[str, frozenset[str]]] = {
     ),
     # The only consumer of ``url`` and ``EmplTitle``
     # (``EmployeeStage.java:24``, ``:31``) and the only user of the title wait.
+    # ``get_username`` and ``get_password`` are here because this module signs
+    # in at three sites (``EmployeeStage.java:25``, ``:61`` and ``:94``) and
+    # supplies the credentials to ``EmployeePage.login``.  Review finding
+    # SEC2-F17 took the two account literals out of ``app/pages`` -- AAP 0.8's
+    # test-data note sanctions them in the Gherkin Examples tables and nowhere
+    # else -- and AAP 0.4.2's frozen rule keeps a page object importing
+    # ``app.automation`` and nothing else, so the read belongs to this module,
+    # which that same section already lists as an ``app.config`` consumer.
+    # Both keys are among the six of AAP 0.4.1 and ``session_steps`` already
+    # reads them; no key was added.
     "employee_steps": frozenset(
         {
             "time:sleep",
@@ -669,7 +628,9 @@ EXPECTED_IMPORT_SURFACE: Final[dict[str, frozenset[str]]] = {
             "app.automation:wait_title_is",
             "app.automation:wait_visible_element",
             "app.config:get_empl_title",
+            "app.config:get_password",
             "app.config:get_url",
+            "app.config:get_username",
             "app.config:get_web_table_url",
             "app.pages:EmployeePage",
         }
@@ -1641,7 +1602,8 @@ def test_every_definition_belongs_to_one_of_the_ten_modules(
     """No definition comes from a file outside the ten.
 
     ``features/environment.py`` in particular declares hooks and no steps: it
-    ports ``Hooks.java``, which declares no annotation, and it is not under
+    ports ``Hooks.java``, whose one declaration is the ``@After`` at
+    ``Hooks.java:11-18`` and no step annotation, and it is not under
     ``features/steps/`` so the loader never reaches it.
     """
     owners = {definition.module_name for definition in definitions}
@@ -1660,10 +1622,11 @@ def test_definitions_per_module_match_the_java_class_census(
 ) -> None:
     """Each module registers exactly as many definitions as its Java class declares.
 
-    The per-class census the review findings name, asserted one class at a
-    time so a failure says *which* class drifted.  ``Contacts.java`` is the one
-    to watch: it declares fourteen live annotations plus a fifteenth that is
-    commented out, so a port that read the comment would land on 15 here.
+    The per-class census transcribed above, asserted one class at a time so a
+    failure says *which* class drifted.  ``Contacts.java`` is the one to watch:
+    it declares fourteen live annotations between ``:17`` and ``:101`` plus a
+    fifteenth commented out at ``Contacts.java:90``, so a port that read the
+    comment would land on 15 here.
     """
     registered = definitions_by_module.get(census.module, ())
 
@@ -1692,12 +1655,21 @@ def test_definition_patterns_are_unique(definitions: tuple[StepMatch, ...]) -> N
 def test_definition_function_names_are_unique(
     definitions: tuple[StepMatch, ...],
 ) -> None:
-    """Each of the 91 step functions has its own name.
+    """Each of the 91 step functions has its own name, and that is all.
 
-    The names are the Java method names verbatim, which is also what
-    ``target/cucumber.json`` reports as a step's ``match.location`` (AAP
-    deviation 8).  Two definitions sharing a name would make that field
-    ambiguous in the artifact a downstream publisher reads.
+    ``target/cucumber.json`` reports a step's ``match.location`` as the dotted
+    Python path of the function that ran, ending in that function's own name
+    (AAP deviation 8: a dotted Python path, no Java method name).  Names unique
+    across all ten modules keep the field's last segment sufficient on its own
+    to say which definition ran, rather than leaving a downstream publisher to
+    lean on the module prefix to tell two same-named definitions apart.
+
+    Uniqueness is the whole of what the assertion below establishes.  It is
+    deliberately not a claim that the names reproduce the Java method names:
+    seventeen of the reference's methods are camelCase and are written
+    snake_case here, and ``LogOutSD.java:17``'s
+    ``user_clicks_the_account_icon_and_then_click_log_out_option`` is named
+    ``user_click_log_out_option`` after its phrase instead.
     """
     counts = collections.Counter(definition.func.__name__ for definition in definitions)
     duplicated = {name: count for name, count in counts.items() if count > 1}
@@ -2508,7 +2480,8 @@ def test_environment_module_declares_no_step_definition(
 ) -> None:
     """``features/environment.py`` carries hooks and no step definitions.
 
-    It ports ``Hooks.java``, which declares no annotation, and it sits beside
+    It ports ``Hooks.java``, which declares one ``@After`` at
+    ``Hooks.java:11-18`` and no step annotation, and it sits beside
     ``features/steps/`` rather than inside it, so the loader never reaches it.
     Asserted from both sides: no definition claims it as an owner, and its
     source applies no registration decorator.
@@ -2973,11 +2946,13 @@ def test_effective_step_types_resolve_the_conjunctions() -> None:
 def test_engine_publishes_no_conjunction_decorator(step_registry: Any) -> None:
     """There is no ``@and``, which is why three Java classes could not be translated literally.
 
-    ``Calendar.java``, ``Crm.java`` and ``Sales.java`` import
-    ``io.cucumber.java.en.And``.  The engine offers ``given``, ``when``, ``then``
-    and ``step`` and nothing for the conjunction, so those annotations have no
-    keyword-typed equivalent at all - ``@step`` is not a preference here, it is
-    the only available translation.
+    ``Calendar.java:5``, ``Crm.java:5`` and ``Sales.java:5`` each import
+    ``io.cucumber.java.en.And``, and between them declare the suite's nine
+    ``@And`` definitions - ``Calendar.java:160``, seven in ``Crm.java`` between
+    ``:27`` and ``:132``, and ``Sales.java:80``.  The engine offers ``given``,
+    ``when``, ``then`` and ``step`` and nothing for the conjunction, so those
+    annotations have no keyword-typed equivalent at all: ``@step`` is not a
+    preference here, it is the only available translation.
     """
     assert len(JAVA_AND_IMPORTERS) == 3
 

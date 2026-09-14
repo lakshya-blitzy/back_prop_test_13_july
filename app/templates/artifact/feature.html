@@ -3,235 +3,72 @@
   artifact/feature.html - one feature of the single, self-contained HTML
   report artifact.
   ---------------------------------------------------------------------------
-  Dividers here are dash rules throughout, deliberately: a run of equals signs
-  is the middle marker of an unresolved merge, the committed reference report
-  carries such a block, and no token a marker scan looks for belongs in a file
-  this project writes - not even inside a comment the engine discards.
+  It renders the feature's heading, status badge, tags, description and
+  details, and delegates each background and scenario whole to
+  artifact/element.html. There is no per-feature page on this contract and no
+  navigation, because every feature is in the one document.
 
-  WHICH ARTIFACT, AND WHICH GENERATOR. This file belongs to the FIRST of the
-  project's two HTML contracts, and the two are never collapsed into one.
-  cucumber-java 7.2.3 (pom.xml, retained as historical reference) pulls
-  html-formatter 17.0.0, which produced the single reports page - one document
-  carrying no external asset reference of any kind. That page is what
-  app/reporting/html_report.py writes and what the templates in this folder
-  describe. The report tree comes from a different generator -
-  cucumber-reporting 5.6.1 over Velocity - and owns its own page set, layout,
-  assets and navigation in app/templates/pretty/. No template from that folder
-  is imported or mirrored here, and one difference matters at this level in
-  particular: THERE IS NO PER-FEATURE DETAIL PAGE ON THIS CONTRACT and no
-  navigation between pages, because every feature is in this one document. So
-  nothing here links to a per-feature file; that belongs to the other contract
-  alone.
+  API
 
-  WHY THIS TEMPLATE RENDERS THE RESULTS AT ALL. In the committed reference
-  artifact the content container is EMPTY: the whole report travels as a
-  client-side message payload rendered at load time by a bundled behaviour
-  script of 1,381,454 characters. This port does not reproduce that, because
-  the plan's acceptance criterion for this artifact is its opposite - every
-  feature, scenario, step, status, timestamp and embedded screenshot from the
-  input result set has to be present in the DOM, checked against a generated
-  baseline for page structure. A client-side shell has none of it in the DOM.
-  The departure is the plan's own authorised deviation for both HTML outputs
-  being generated from this project's templates and accepted structurally.
-  This template is the part that puts features in the document, so it emits
-  neither that payload nor that bundle, and no behaviour of its own.
-
-  ---------------------------------------------------------------------------
-  THE MACRO
-  ---------------------------------------------------------------------------
       {% import "artifact/feature.html" as feature %}
       {{ feature.feature_block(feature_map, findex) }}
 
-  feature        REQUIRED. One feature mapping from the model's feature list,
-                 as described under THE INPUT MODEL below. Anything that is
-                 not a mapping - none, a string, or the name of a variable the
-                 calling template never defined - renders the EMPTY STRING and
-                 raises nothing.
+  feature_block(feature, findex, extra_classes='')
+      feature is REQUIRED - one mapping from the model's feature list - and
+      anything that is not a mapping renders the EMPTY STRING. findex is
+      REQUIRED: the feature's zero-based index in that list, read as text and
+      sanitised, and handed on unchanged to every element so their ids stay
+      unique across the whole document. extra_classes appends class tokens to
+      the root as a STRING, runs of whitespace collapsed. Every model field is
+      optional and type-tested, so a sparse feature renders under the strict
+      undefined policy the tests enable, and a feature with NO ELEMENTS
+      renders cleanly and says so in words.
 
-  findex         REQUIRED. This feature's zero-based index in that list. Not
-                 decoration: see DOCUMENT-UNIQUE IDS below. It is read as text
-                 and sanitised, so a value that is absent, null or not a
-                 number still yields a usable id rather than raising, and it
-                 is handed on unchanged to every element of this feature so
-                 that their own ids stay unique across the whole document.
-
-  extra_classes  OPTIONAL, default the empty string. Further class tokens for
-                 the block's single root element, as a STRING. Runs of
-                 whitespace collapse and an empty value leaves no trailing
-                 space behind.
-
-  The only caller is the page template of this folder, which owns the document
-  shell, the run metadata block, the filter controls and the one screenshot
-  overlay. This file emits none of those: in particular it never calls the
-  overlay macro, because exactly one overlay belongs on a page and the page
-  template is the only place that can know that.
-
-  ---------------------------------------------------------------------------
-  THE INPUT MODEL - measured, not assumed
-  ---------------------------------------------------------------------------
-  Measured against the reference report's one feature, whose keys are exactly
-
-      line   elements   name   description   id   keyword   uri   tags
-
-  Every one of them is optional here and type tested before use, so a feature
-  renders under a strict undefined policy however sparse it is:
-
-      uri          "file:" and a repository-relative path. DISPLAYED EXACTLY
-                   AS THE MODEL CARRIES IT: the prefix is not stripped, the
-                   directory is not rewritten, the value is not turned into a
-                   link and it is not normalised. Normalising a feature URI
-                   belongs to app/utils/paths.py, which owns both the legacy
-                   prefix and the function that rewrites it, and a template
-                   holds no path literal at all - which is also why no
-                   directory name appears anywhere in this file. Outer
-                   whitespace is TESTED here and never removed, so what is
-                   emitted is the value itself.
-      keyword      "Feature" at this level, and part of the heading.
-      name         rendered as the data carries it. The suite's own
-                   inconsistencies are preserved rather than tidied: two
-                   feature headers are mis-titled at the source, one name
-                   begins with a run of periods, and three vocabularies
-                   disagree about what the system under test is called.
-                   Report metadata uses whatever the data itself carries, so
-                   nothing is renamed, re-titled or corrected here.
-      description  PRESERVES ITS LEADING INDENTATION VERBATIM - the reference
-                   feature description carries two leading spaces - and is the
-                   empty string rather than absent when there is none, so it
-                   is tested for content and never for presence. It is
-                   rendered flush against its tag, in the class whose pre-wrap
-                   rule keeps that indentation, and is never trimmed, stripped
-                   of markup or reflowed.
-      id           DISPLAYED DATA AND NOTHING MORE. See below.
-      tags         the shapes differ by level: a FEATURE tag carries name,
-                   type and location, where a scenario tag carries name
-                   alone. Only name is read, the leading sign is kept, and an
-                   absent type or location is tolerated. The key can be
-                   MISSING ENTIRELY as well as empty - five of the ten
-                   features declare no feature-level tag - so absence is what
-                   is guarded and no empty tag container is ever emitted.
-      elements     the feature's backgrounds and scenarios, each delegated
-                   whole to the element template of this folder.
-      status       the ROLLED-UP status of the feature, supplied by
-                   app/reporting/html_report.py. It is never derived here and
-                   NEVER rolled up from the elements: the artifacts and the
-                   HTTP views read one normalised model precisely so that no
-                   view can contradict an artifact. It is passed through the
-                   badge partial's normaliser, the single place in the project
-                   where a status is folded, which answers "unknown" for an
-                   absent or unrecognised one. The model that feeds the JSON
-                   writer carries no status at all, so absent is a real case
-                   and not a defensive hypothetical.
-
-  ELEMENT ORDER IS THE MODEL'S ORDER, unconditionally: no sorting, filtering,
-  grouping, de-duplication or hoisting. Two consequences are load-bearing. A
-  BACKGROUND IS REPEATED BEFORE EACH SCENARIO in this schema - the reference
-  feature carries eight elements, four backgrounds interleaved with four
-  scenarios - and every occurrence is rendered in its own position, because
-  that repetition is both what the run did and one of the plan's determinism
-  guarantees. And scenarios stay in line order: the alphabetical sorting the
-  pipeline's publisher is configured with is a display option of that
-  publisher and imposes nothing on the artifacts, so no writer and no template
-  sorts on its account.
-
-  A FEATURE WITH NO ELEMENTS renders cleanly and says so in words. A run whose
-  tag expression selects no scenario is a legitimate outcome that still writes
-  every artifact and still exits zero, so an empty feature is a state to
-  report rather than an error to hide.
-
-  ---------------------------------------------------------------------------
-  DOCUMENT-UNIQUE IDS - the trap specific to this contract
-  ---------------------------------------------------------------------------
-  This artifact is ONE document containing EVERY feature, where the generated
-  report tree gives each feature a page of its own. A per-feature id scheme is
-  correct there and silently broken here: it yields duplicate id attributes,
-  invalid markup, and toggles that expand the wrong region. So every id and
-  every name reference this file emits is composed from the FEATURE INDEX -
-  never from the feature name, and above all never from the feature id slug,
-  because TWO PAIRS OF FEATURES SHARE AN id: two are titled "Testinium app
-  Inventory feature" and two "Testinium app login feature". The plan preserves
-  that collision rather than disambiguating it, which is also why the viewer's
-  routes key on index; the same reasoning binds this template. The index is
-  handed on to each element for the same reason, so the element and step ids
-  built from it stay unique document-wide.
-
-  The feature id therefore appears in exactly one place - as text, in the
-  details list, where a reader can see what the run recorded. It is never an
-  id attribute, never a name reference and never a link key.
-
-  ---------------------------------------------------------------------------
-  STANDING PROHIBITIONS
-  ---------------------------------------------------------------------------
-  This markup is inlined into a page that must open from a workspace with no
-  network at all, so, with no exception: no absolute, protocol-relative or
-  content-delivery-network address; no stylesheet, behaviour-script, image or
-  sibling-page reference; no source-map annotation; no application endpoint
-  address and no call to the framework's address builder, since this template
-  is rendered to a file rather than served; and the only address permitted on
-  the page is an inline data URI, which only the screenshot partial emits and
-  only through an element. This file inherits no shell template - the shell
-  resolves its own assets through that builder, which would break
-  self-containment outright - and contains no inline behaviour and no inline
-  style block, because behaviour belongs to app/static/js/report.js and
-  presentation to app/static/css/main.css, which the writer inlines.
-
-  ESCAPING - the engine's own default escaping of HTML templates is relied on
-  for every interpolated value, and no value is ever declared pre-escaped or
-  trusted markup. Feature names, descriptions and URIs are untrusted result
-  data: names carry apostrophes and quotation marks, descriptions carry
-  arbitrary prose, and both may carry angle brackets. The only trusted text on
-  the page is the stylesheet and the behaviour script, which the writer wraps
-  as markup in Python and the page template interpolates - never this file.
-
-  NO STATE IS EVER SERVER-RENDERED. Neither of the three boolean state
-  attributes the stylesheet reads nor any of the three state classes the
-  behaviour script sets at run time is emitted here. The stylesheet reads
-  their absence as expanded, visible and closed, so this file always describes
-  the fully expanded page - which is what makes a single self-contained
-  artifact useful when it is read with scripting effectively idle, and correct
-  on paper.
-
-  ---------------------------------------------------------------------------
-  VOCABULARY AND ACCESSIBILITY
-  ---------------------------------------------------------------------------
-  Classes from app/static/css/main.css and behaviour hooks from
-  app/static/js/report.js, with nothing invented in either namespace:
-      tqa-feature, tqa-feature-name, tqa-feature-desc, tqa-tags, tqa-tag,
-      tqa-meta, tqa-meta-item, tqa-meta-label, tqa-meta-value, tqa-empty
-      data-report-status
-  The stylesheet carries no selector outside that namespace, so an invented
-  class would render silently; elements it declares no rule for - the code
-  element used for the two machine-readable values - fall back to the
-  browser's own defaults, which is the intent.
-
-  THE FEATURE ROOT IS NOT A FILTER UNIT, and that is deliberate: its status
-  is an aggregate of its elements, while hiding a filterable element hides
-  its whole subtree, so registering the feature would hide every passed
-  scenario that happens to sit inside a feature rolled up to failed. The
-  status hook therefore stands alone here - it is the stylesheet's accent and
-  print hook, which is why it stays on the root and the feature keeps its
-  colour - and the filter registers one level down, on the scenarios and
-  backgrounds the element template of this folder emits, where a status is
-  the element's own and nobody else's. The behaviour script evaluates each of
-  those independently, so filtering to one status thins the scenarios inside
-  a feature and never removes the feature around them.
-
-  NO TOGGLE CONTROL IS EMITTED HERE. Interactivity at this level would need a
-  collapsible region wrapping the elements, and the stylesheet declares no
-  class for such a wrapper; the per-scenario toggles the element template
-  emits, and the page template's own controls, are the whole of this
-  artifact's collapse behaviour. The stylesheet's feature-level collapse rules
-  are reached through the script's own vocabulary from those controls, not
-  from server output.
-
-  The feature name is a real heading, one level below the page title the page
-  template renders and one level above the element headings this file
-  contains, so heading navigation reflects the report's structure; the macro
-  signature carries no level, so the level is fixed here. The block is a
-  section named by that heading, which makes each feature a region a reader
-  can jump between in a document that holds all ten. Status is never carried
-  by colour alone - the badge spells it out in words beside the name, and the
-  stylesheet pairs each status colour with a border style and a weight, so it
-  survives greyscale printing.
+  CONSTRAINTS THAT CANNOT BE READ OFF THE CODE
+    - The uri is DISPLAYED EXACTLY AS THE MODEL CARRIES IT: no prefix
+      stripped, no directory rewritten, nothing turned into a link, nothing
+      normalised. Normalising a feature URI belongs to app/utils/paths.py, and
+      no template holds a path literal. The name is rendered as the data
+      carries it too - the suite's own inconsistent titles are preserved
+      rather than tidied - and the description keeps its leading indentation
+      verbatim, which is why it is tested for content and never for presence.
+    - Status is the ROLLED-UP value the writer supplies, never derived here
+      and never rolled up from the elements; it is only passed through the
+      badge partial's normaliser, which answers "unknown" for an absent one.
+    - ELEMENT ORDER IS THE MODEL'S ORDER, unconditionally: no sorting,
+      filtering, grouping, de-duplication or hoisting. A background REPEATS
+      BEFORE EACH SCENARIO in this schema and every occurrence renders in its
+      own position, because that repetition is both what the run did and part
+      of the determinism the report contract requires.
+    - Every id and name reference is composed from findex - never from the
+      feature name and above all never from the feature id slug, two pairs of
+      which collide in this suite. The feature id therefore appears in exactly
+      one place, as text in the details list, and is never an id attribute, a
+      name reference or a link key.
+    - THE FEATURE ROOT IS NOT A FILTER UNIT. Its status is an aggregate of its
+      elements and hiding a filterable element hides its whole subtree, so
+      registering the feature would hide every passed scenario inside a
+      feature rolled up to failed. data-report-status stands alone here as the
+      stylesheet's accent and print hook, and the filter registers one level
+      down, in artifact/element.html.
+    - Inlined into a page that must open from a filesystem with no network, so
+      no URL of any form, no stylesheet, script, image or sibling-page
+      reference and no endpoint-builder call. This file inherits no shell
+      template, carries no inline style or script, relies on automatic
+      escaping and declares nothing trusted markup.
+    - No control is emitted here - the per-scenario toggles and the page's own
+      controls are the whole of this artifact's collapse behaviour - so no
+      mutable ARIA mirror is authored; the accessible name and the heading
+      relationship this file does emit are static semantics, which nothing
+      maintains and main.css does not read. None of the three runtime classes
+      report.js
+      writes - report-is-collapsed, report-is-filtered-out,
+      report-lightbox-is-open - appears either; main.css alone reads those,
+      and their absence is the fully expanded, fully visible page.
+    - The block is a section named by its own heading, so each feature is a
+      region a reader can move between in a document holding all of them; the
+      heading level is fixed here, one below the page title and one above the
+      element headings.
 -#}
 {% import "artifact/element.html" as element %}
 {% import "partials/status_badge.html" as badge %}

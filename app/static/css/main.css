@@ -14,21 +14,42 @@
         attribute or one of the three runtime state classes, with element
         parts only as descendants or qualifiers.
 
-   THE STATE VOCABULARY, in full, and there is no second one:
-     - data-report-status carries the status of an element. It is the only
-       status hook; every colour, every print rule and the status filter read
-       that one attribute.
-     - report-is-collapsed, report-is-filtered-out and report-lightbox-is-open
-       are the three runtime classes. The behaviour script is their only
-       author and this file is their only reader.
-   Nothing else exists: no parallel family of boolean state attributes, and
-   none may be reintroduced. A selector for state no template and no script
-   produces is a rule that silently never matches, and a second vocabulary
-   beside a live one is indistinguishable from the live one until it breaks.
-
-   The authored default is the ABSENCE of all three runtime classes, so with
-   no scripting at all the page stays complete: detail expanded, rows visible,
-   overlay closed, thumbnail shown.
+   WHAT THIS FILE SELECTS ON IS THREE SEPARATE CONCEPTS, never one
+   vocabulary:
+     1. SELECTION ATTRIBUTES - the "data-report-" family the templates author
+        so a rule here and the behaviour script can find an element at all.
+        data-report-status is the only status hook among them: every colour,
+        every print rule and the status filter read that one attribute.
+     2. RUNTIME CLASSES - report-is-collapsed, report-is-filtered-out and
+        report-lightbox-is-open, and there are exactly three. The behaviour
+        script is their only author and this file their only reader. Their
+        ABSENCE is what every template emits, and this file reads that
+        absence as the finished page: detail expanded, rows visible, overlay
+        closed, thumbnail shown, with no scripting at all.
+     3. THE MUTABLE ARIA MIRRORS of that state: aria-expanded on a disclosure
+        control, aria-pressed on a status-filter control, and aria-hidden on a
+        [data-report-detail] region. The first two are authored at the same
+        default the classes' absence describes; the third is authored only by
+        the generated tree's own templates, the script supplying it on every
+        other surface. The script maintains all three from there. An overlay is
+        a case of its own: it ships carrying no aria-hidden at all, is given
+        aria-hidden="false" while open, and has the attribute REMOVED on close,
+        which restores the authored absence exactly.
+        This file READS the mirrors in three rules -
+        the selected filter control, that control on hover, and the collapsed
+        chevron glyph - and writes none of them, which a stylesheet cannot do
+        anyway.
+   STATIC ARIA SEMANTICS ARE NOT STATE and are no part of the three above:
+   aria-hidden="true" on a decorative glyph or chevron, aria-current on the
+   current navigation link, and the roles, accessible names and aria-controls
+   relationships a template authors once. Nothing maintains them, no rule here
+   reads them, and they neither mirror nor contradict the state above - which
+   is why a template that emits them still emits no state.
+   Separately from all of that, the prohibition: no boolean state-attribute
+   family of this project's own invention exists, and none may be added. A
+   selector for state no template and no script produces is a rule that
+   silently never matches, and a second vocabulary beside a live one is
+   indistinguishable from the live one until it breaks.
    -------------------------------------------------------------------------- */
 
 /* ---- tokens and page shell -------------------------------------------------
@@ -403,10 +424,8 @@
 /* The matched arguments of a step. The markup is one inline container holding
    one inline element per argument value - never a table: the model carries a
    flat list of matched values with no header row and no columns to align, so
-   there is nothing for a table to express. This file used to style the
-   component as one, with border-collapse and th/td rules that no markup could
-   ever match; those declarations are gone and each value is now drawn as its
-   own bordered chip, which is what the structure actually is. */
+   there is nothing for a table to express. Each value is drawn as its own
+   bordered chip, which is what the structure actually is. */
 .tqa-step-args {
     display: inline-flex;
     flex-wrap: wrap;
@@ -630,8 +649,6 @@
     cursor: zoom-in;
 }
 
-/* Hovering or holding the trigger reads on the picture, since the trigger
-   itself draws nothing. */
 .tqa-shot-trigger:hover .tqa-shot-thumb {
     border-color: var(--tqa-link-fg, #0b5fa5);
 }
@@ -651,22 +668,15 @@
        of the vendored grid framework's own stylesheet rather than chosen:
        that stylesheet declares its fixed-top navbar at 1030, its modal
        backdrop at 1040 and its modal at 1050, and every page of the generated
-       report tree carries that navbar. At the previous 1000 the overlay
-       painted UNDER it. Measured in
-       Chrome two ways, on a tag detail page and on an emitted report page: the
-       navbar stayed bright and undimmed over the scrim's top 51px, and
-       document.elementFromPoint at the centre of the overlay's own close
-       control returned the navbar's "Failures" link instead of the control, so
-       a real pointer click reached navigation rather than dismissing the
-       overlay. 1060 is the lowest value that clears all three vendored layers
-       - the fixed navbar at 1030, its backdrop at 1040 and the modal layer at
-       1050 - so the overlay cannot be painted over by any of them. Harmless on
-       the self-contained artifact, which has no fixed navbar and no other
-       stacking context at all. */
+       report tree carries that navbar. 1060 is the lowest value that clears
+       all three of those layers, so none of them can paint over the scrim or
+       intercept a pointer click meant for the overlay's own controls.
+       Harmless on the self-contained artifact, which has no fixed navbar and
+       no other stacking context at all. */
     z-index: 1060;
     /* Column, so the caption sits BELOW the enlarged image rather than beside
-       it. Measured in Chrome with the row default: the caption became a second
-       flex item on the image's right and pushed the image 249px off centre. */
+       it: under the row default the caption is a second flex item to the
+       image's right and pushes the image off centre. */
     flex-direction: column;
     align-items: center;
     justify-content: center;
@@ -675,7 +685,6 @@
     background-color: rgba(31, 35, 40, 0.85);
 }
 
-/* Open is the one runtime class the script writes on the overlay. */
 .tqa-lightbox.report-lightbox-is-open {
     display: flex;
 }
@@ -853,19 +862,16 @@
 /* ---- state ----------------------------------------------------------------
    THE WHOLE OF IT. Three classes, written only by the behaviour script and
    read only here, each sitting on the element it describes: the collapsible
-   region, the filterable row, the overlay. No state is ever server-rendered
-   and no state is expressed as an attribute, so their joint absence - which
-   is what every template emits - is the complete, expanded, unfiltered page.
+   region, the filterable row, the overlay. No state is ever server-rendered,
+   so their joint absence - which is what every template emits - is the
+   complete, expanded, unfiltered page. The accessible mirror of that state
+   lives in ARIA, which the templates author and the script maintains, and
+   which the last rule of this section reads for the collapsed glyph.
 
    Two selectors deliberately carry no "tqa-" prefix. These are the runtime
    classes themselves and their names are fixed by the script that writes
    them; they are already namespaced by their own "report-is-" prefix, which
    no third-party stylesheet in the emitted tree uses.
-
-   An earlier revision of this file also carried a parallel family of boolean
-   state attributes for these same three states. No template ever produced
-   them and no script ever wrote them, so every one of those rules was dead;
-   they are gone, and the three classes below are the only state contract.
    -------------------------------------------------------------------------- */
 
 .report-is-collapsed {
@@ -1010,19 +1016,6 @@
     outline-offset: 2px;
 }
 
-/* THE COLLAPSE CONTROL of the generated tree, as a real button.
-   ---------------------------------------------------------------------------
-   The tree's result detail is expanded and collapsed by the same behaviour
-   script as every other surface, through data-report-toggle, aria-controls
-   and the report-is-collapsed class - not by the third-party collapse widget,
-   which owns no state this file can read and leaves its regions hidden when
-   there is no script at all. A real button is what makes the control
-   focusable and operable by keyboard; the rules below give that button the
-   full-width, unstyled, pointer-cursor appearance the tree's own control had.
-
-   The direction of the tree's chevron glyph came from a class that widget
-   added. It comes from aria-expanded now, which the script maintains, so the
-   glyph and the region can no longer disagree. */
 .tqa-collapse-control {
     display: block;
     width: 100%;
@@ -1174,21 +1167,16 @@
         display: none;
     }
 
-    /* Collapse is an affordance, so a collapsed region expands on paper;
-       filtering is a deliberate choice, so a filtered row stays hidden -
-       which is exactly what the exclusion expresses. */
     .report-is-collapsed:not(.report-is-filtered-out) {
         display: block !important;
     }
 
-    /* The same, for the regions of the generated report tree. That tree's own
-       stylesheet hides a collapsible region unless it carries the widget
-       class its script adds, and on paper there is no script and no reader to
-       expand anything - so every region the port authors inside its own
-       containers is forced visible here, and a printed page carries the whole
-       result rather than only the parts that happened to be open. Scoped to
-       this project's containers so no navigation or third-party widget
-       outside them is affected. */
+    /* A defensive force-visible guarantee for the regions of the generated
+       report tree: on paper there is no script and no reader to expand
+       anything, so every region this project authors inside its own
+       containers prints, and a printed page carries the whole result rather
+       than only the parts that happened to be open. The selectors are scoped
+       to this project's containers, so nothing outside them is affected. */
     .tqa-feature .collapsable-details,
     .tqa-scenario .collapsable-details,
     .tqa-background .collapsable-details,

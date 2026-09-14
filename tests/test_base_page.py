@@ -1,77 +1,34 @@
 r"""Tests for ``app/pages/base_page.py`` - the port's ``PageFactory`` replacement.
 
-What this module is the gate for
---------------------------------
-``BasePage`` is the whole of the mechanism that stands in for Java's
+``BasePage`` is the whole of the mechanism standing in for Java's
 ``PageFactory.initElements`` / ``@FindBy`` pair (``LoginP.java:9-11``), which
 AAP 0.5.2 maps onto *"locator constants plus lazy accessors in
-``app/pages/base_page.py``"* and AAP 0.3.3 constrains with the consequence that
-must not be broken: *"a Python page object that called ``find_element`` in
-``__init__`` would change when elements are looked up and break scenarios that
-build a page before navigating."*  All ten page objects inherit from it, so a
-regression here is a regression in every scenario the suite runs.
+``app/pages/base_page.py``"*.  AAP 0.3.3 fixes why laziness is the contract: an
+eager ``find_element`` in ``__init__`` *"would change when elements are looked
+up and break scenarios that build a page before navigating."*  All ten page
+objects inherit it, so a regression here reaches every scenario.
 
-Seven things are therefore pinned below, and they are the seven the
-specification names:
+The contract this module owns: inert construction, touching neither driver nor
+DOM; resolution on every access, singular and plural, with nothing cached; the
+naming transform, where ``INPUT_EMAIL`` yields a read-only ``input_email``
+accessor, the constant stays readable as a ``(strategy, value)`` tuple, and a
+name shadowing the mechanism or a class-body method is rejected at class
+creation; ``PLURAL_LOCATORS`` routing a Java ``List<WebElement>`` field through
+``find_elements``; ``LOCATORS`` complete, in declaration order, immutable and
+merged ancestors-first; a driver seam resolved per access, injection first and
+this worker's session otherwise, with ``find`` and ``find_all`` its only lookup
+funnels; and the closed AAP 0.4.2 boundary, a page object reaching
+``app.automation`` for the driver and nothing else.
 
-1. **Inert construction** - ``__init__`` stores its argument and touches
-   neither a driver nor the DOM, with or without injection.
-2. **Laziness with no caching** - every singular *and* every plural access
-   resolves again.  ``grep -rn CacheLookup`` over the reference sources returns
-   zero hits, so no ``@FindBy`` proxy in the suite is cached and none may be
-   here.
-3. **The naming transform** - ``INPUT_EMAIL`` yields a read-only
-   ``input_email`` accessor while the constant itself stays readable as a
-   ``(strategy, value)`` tuple, and an accessor that would shadow the mechanism
-   or a class-body method is rejected at class-creation time.
-4. **``PLURAL_LOCATORS``** - the port of a Java ``List<WebElement>`` field,
-   validated against the declared constants and routed through
-   ``find_elements``.
-5. **``LOCATORS``** - complete, in declaration order, immutable, and merged
-   ancestors-first under inheritance.
-6. **The driver seam and the two lookup funnels** - injection first, this
-   worker's session otherwise, resolved per access, with ``find`` and
-   ``find_all`` the only ``find_element`` / ``find_elements`` call sites and
-   nothing caught, wrapped or retried.
-7. **The closed import boundary** (AAP 0.4.2) - page objects import
-   ``app.automation`` for the current driver and nothing else, and only
-   ``app.automation`` may import the browser-automation library.
+Laziness is measured by call *count* on an ordered driver log, since a cached
+element satisfies any result-only assertion, and every mechanism assertion is
+applied a second time to a deliberately wrong page declared below.
 
-Why the assertions are shaped the way they are
-----------------------------------------------
-A test that would still pass with the behaviour broken is worth nothing here,
-so two devices run through the module:
-
-* **Counting, not observing.**  Laziness is asserted by call *count* on the
-  ordered ``StubDriver`` log - three accesses must produce three
-  ``find_element`` entries - because an accessor that returned a cached element
-  would still return an element and would still pass an assertion that only
-  checked the result.
-* **Committed sensitivity models.**  Every mechanism assertion is applied a
-  second time to a *deliberately wrong* page declared in this module -
-  :class:`CachingProbePage`, :class:`EagerProbePage`,
-  :class:`ReversedProbePage` - and to synthetic bad source text fed to the
-  source-inspection helpers.  Those tests fail if the assertion technique ever
-  stops being able to tell right from wrong, which a manual mutation
-  experiment cannot do once it has been run and discarded.  No production file
-  is modified by this suite, temporarily or otherwise.
-
-Collaborators, and what this module deliberately does not do
-------------------------------------------------------------
-The WebDriver stand-in is ``tests/conftest.py``'s :fixture:`stub_driver`, a
-duck-typed recorder with an ordered ``calls`` log; the two small local
-recorders below exist only for the two cases the shared stub cannot express (a
-falsy-but-not-``None`` driver, and a callable standing in for the module-global
-``get_driver``).  Nothing here launches a browser, opens a socket, sleeps,
-reads ``configuration.properties`` or writes into the repository's ``target/``,
-and **selenium is never imported** - strategies are compared against
-``app.automation.By``, the re-export AAP 0.4.2 authorises for exactly this
-purpose, whose members are plain strings (``By.XPATH == "xpath"``).
-
-Per-page locator inventories are *not* asserted here: they belong to
-``tests/test_pages.py``, which holds the Java-derived table for all 131
-``@FindBy`` fields.  This module asserts the mechanism, using locators invented
-for the test.
+Per-page locator inventories belong to ``tests/test_pages.py``; the locators
+here are invented for the test.  Nothing launches a browser, sleeps, reads
+``configuration.properties`` or writes into ``target/``, and selenium is never
+imported: strategies are compared against ``app.automation.By``, the
+plain-string re-export AAP 0.4.2 authorises (``By.XPATH == "xpath"``).
 """
 
 from __future__ import annotations
@@ -301,10 +258,11 @@ class AncestorProbePage(BasePage):
 class DescendantProbePage(AncestorProbePage):
     """Declares one new constant and re-declares an inherited one.
 
-    No page under ``app/pages`` subclasses another today, so this class is what
-    keeps the inheritance half of ``__init_subclass__`` honest: the module
-    merges ancestors anyway *"so that inheritance is not actively broken"*, and
-    an untested merge is a merge that will break unnoticed.
+    No page under ``app/pages`` is a subclass of another, so this class is the
+    sole exercise of the inheritance half of ``__init_subclass__``:
+    ``app/pages/base_page.py`` merges ancestors *"so that inheritance is not
+    actively broken"*, and an unexercised merge is a merge that breaks
+    unnoticed.
     """
 
     THIRD = (By.XPATH, "//third")
@@ -1056,7 +1014,6 @@ def test_a_constant_shadowing_a_class_body_method_is_rejected() -> None:
     """
 
     def login(self: Any) -> Any:
-        """Click the login button, as a real page method would."""
         return self.find(self.LOGIN).click()
 
     with pytest.raises(ValueError, match="shadows an existing attribute") as error:
@@ -1085,10 +1042,11 @@ def test_every_by_strategy_is_recognised(
 ) -> None:
     """All eight strategies work, not just the five the reference uses.
 
-    The reference declares ``xpath`` 96 times, ``partial link text`` 12,
-    ``name`` 8, ``id`` 8 and ``class name`` 7; the other three are unused
-    today.  The mechanism is nonetheless strategy-agnostic, and a
-    special-cased implementation would fail here.
+    The reference's 131 ``@FindBy`` declarations name five strategies -
+    ``xpath`` 96 times, ``partial link text`` 12, ``name`` 8, ``id`` 8 and
+    ``class name`` 7 - and never the remaining three.  The mechanism is
+    strategy-agnostic all the same, so an implementation that special-cased
+    the five in use fails here.
     """
     page_class = type(
         f"{name.title().replace('_', '')}ProbePage",

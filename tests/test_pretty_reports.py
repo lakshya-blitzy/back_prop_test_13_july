@@ -1,11 +1,10 @@
 """Tests for HTML contract 2: the emitted PrettyReports tree.
 
-This module is the gate for ``app/reporting/pretty_reports.py`` and for every
-template under ``app/templates/pretty/`` that writer renders, read as the
-*artifact* it produces rather than as the functions that produce it.  The
-artifact is a directory -- ``target/cucumber/cucumber-html-reports/`` -- that a
-Jenkins agent opens straight from a workspace over the file protocol, so the
-contract it is held to here is:
+This module is the gate for ``app/reporting/pretty_reports.py`` and for the
+``app/templates/pretty/`` templates it renders, read as the *artifact* they
+produce rather than as the functions producing it.  The destination is
+``CukesRunner.java:13``; the artifact is a directory a Jenkins agent opens
+straight from a workspace over the file protocol, and AAP 0.3.4 holds it to:
 
 1. **Exact filenames.**  The detail pages are named by a numeric hash the Java
    generator computed (``net.masterthought.cucumber.util.Util.toValidFileName``
@@ -13,7 +12,8 @@ contract it is held to here is:
    expected name in this module is a pinned literal rather than a pattern.  A
    filename nobody can predict is a filename no published report can link.
 2. **Page cardinality.**  The four overview pages, always; one feature page per
-   emitted feature in source order; one tag page per tag of the run.
+   emitted feature in source order; one tag page per tag of the run; and, above
+   the writer's aggregate fan-out budgets, no tree at all.
 3. **The asset census.**  Exactly 22 files: the 20 vendored ones copied byte
    for byte out of ``app/static/vendor`` plus the port's own ``css/main.css``
    and ``js/report.js``.  Nothing more (a page that links nothing extra), and
@@ -26,28 +26,53 @@ contract it is held to here is:
    message, timestamp, embedded screenshot, status and duration reaches the
    page that owns it, and hostile result data is escaped rather than executed.
 6. **Behaviour at the edges.**  An empty document, a document that shrinks
-   between two renders, a render fault and an I/O fault part-way through the
-   page loop.
+   between two renders, a document whose page fan-out or output size is beyond
+   what this writer will produce, a render fault and an I/O fault part-way
+   through the page loop.
 
-Two seams these tests were written to straddle, both of them now landed.
+Two contracts every assertion here is written against.
 
 ``write_pretty_reports`` publishes a validated staging tree by rename
-    The writer used to overwrite the tree in place and delete nothing, so a
-    second render with a smaller result set left the previous run's surplus
-    detail pages on disk.  It now builds the whole tree in a dot-prefixed
-    staging sibling, verifies the inventory there, and swaps it into place with
-    two renames -- so a reader sees one complete generation or none, never a
-    mixture, and a page whose feature or tag has disappeared is gone rather
-    than merely unreachable.
+    The writer builds the whole tree in a dot-prefixed staging sibling,
+    verifies the inventory there, and swaps it into place with two renames, so
+    a reader sees one complete generation or none and never a mixture, and a
+    page whose feature or tag has disappeared is gone rather than merely
+    unreachable.  A second render over a smaller document therefore publishes
+    exactly that document's page set.
 
-    The consequence for this module is that a **fault no longer leaves a
-    partial tree to inspect**: the three forced-failure tests below assert what
-    the destination holds after a fault, which is either the previous complete
-    tree byte for byte or nothing at all, and no publication scratch either
-    way.  Everything else was already written to hold on both sides of the
-    change and did: current pages carry current content, the census stays
-    complete, no reference anywhere in the tree dangles, and no page links
-    anything the current document did not produce.
+    What follows for this module is that a fault leaves **no partial tree to
+    inspect**: the three forced-failure tests below assert what the destination
+    holds after a fault, which is either the previous complete tree byte for
+    byte or nothing at all, and no publication scratch either way.  The rest of
+    the tree contract is asserted on the published tree as a whole: current
+    pages carry current content, the census is complete, no reference anywhere
+    dangles, and no page links or is anything the current document did not
+    produce.
+
+The publication is descriptor-bound, and its output is owner-only
+    Every filesystem step of the publication -- the staging directory, each
+    asset copy, each page write, both renames of the swap and each scratch
+    removal -- now runs relative to a directory descriptor
+    ``app/utils/paths.py`` verified, through the
+    ``ArtifactDirectoryPublication`` that module publishes, instead of being
+    re-resolved from a pathname after the check that approved it.  The writer
+    therefore no longer derives a staging path, no longer copies with
+    ``shutil``, and no longer removes anything by walking a directory it
+    reached by name -- the probe that closed this gap redirected a
+    path-resolved cleanup into a prepared directory *outside* the artifact root
+    and deleted it.
+
+    What that adds to this module: the census and the page set are asserted
+    through a publication object wherever the copy is exercised on its own; the
+    published tree is asserted to be **owner-only**, every directory ``0700``
+    and every page and asset ``0600``, including the copy of a vendored asset
+    whose source is group-readable; a link standing where the published tree or
+    an owned directory component belongs is asserted to be *refused*; and a
+    symbolic link planted inside a scratch tree is asserted to be unlinked
+    rather than followed, with a prepared directory outside the artifact root
+    still intact afterwards.  The mode assertions compare the permission bits
+    only: a build output directory that is set-group-id stays set-group-id, it
+    simply grants the group nothing.
 
 The status hook attribute has been unified onto ``data-report-*``
     The pages carry a single ``data-report-status`` hook, and the shared
@@ -76,6 +101,9 @@ import errno
 import hashlib
 import os
 import re
+import shutil
+import stat
+import zlib
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
@@ -84,7 +112,7 @@ from typing import Any, Final
 import pytest
 from jinja2 import Environment, FileSystemLoader, TemplateNotFound
 
-from app.reporting import pretty_reports
+from app.reporting import aggregation, pretty_reports
 from app.utils import paths
 
 # --------------------------------------------------------------------------
@@ -114,6 +142,14 @@ PAGE_SUFFIX: Final[str] = ".html"
 TREE_DIR_NAME: Final[str] = "cucumber-html-reports"
 TREE_PARENT_DIR_NAME: Final[str] = "cucumber"
 BUILD_OUTPUT_DIR_NAME: Final[str] = "target"
+
+#: A process id this process is certainly not, for the publication-scratch
+#: recovery rules: scratch carrying it must be left exactly where it is,
+#: because a live publication in another process may still own it.  Its value
+#: is immaterial -- ``PublicationScratch.is_own`` compares names, so any id but
+#: this process's is another process's -- so it is a fixed implausible number
+#: rather than a real pid, which would risk naming a process that exists.
+FOREIGN_PID: Final[int] = 999999999
 
 # --------------------------------------------------------------------------
 # The pinned hashes
@@ -177,6 +213,30 @@ SAMPLE_PAGES: Final[tuple[str, ...]] = (
 #: and therefore lands on ``-1``, which is reproduced rather than papered over.
 INT32_MAX: Final[int] = 2147483647
 
+#: ``java.lang.Integer.MIN_VALUE``, the hash whose offset segment is ``-1``.
+INT32_MIN: Final[int] = -2147483648
+
+#: The inclusive bounds of the offset filename segment: the signed hash plus
+#: ``Integer.MAX_VALUE``, computed in 64 bits as the generator computes it.
+MIN_PAGE_HASH: Final[int] = INT32_MIN + INT32_MAX
+MAX_PAGE_HASH: Final[int] = 2 * INT32_MAX
+
+#: The documented string whose Java hash is ``Integer.MIN_VALUE``, and the two
+#: detail-page names it produces.  Both are emitted names, so both are
+#: destinations ``local_page_href`` must admit; a filename the writer emits and
+#: the allowlist refuses is a page in the tree that nothing links.
+MIN_VALUE_HASH_INPUT: Final[str] = "polygenelubricants"
+MIN_VALUE_FEATURE_PAGE: Final[str] = (
+    f"{FEATURE_PAGE_PREFIX}{MIN_PAGE_HASH}{PAGE_SUFFIX}"
+)
+MIN_VALUE_TAG_PAGE: Final[str] = f"{TAG_PAGE_PREFIX}{MIN_PAGE_HASH}{PAGE_SUFFIX}"
+
+#: A tag name -- leading ``@`` included, as the model carries it -- whose own
+#: Java hash is ``Integer.MIN_VALUE``.  It is what lets the negative page name
+#: be driven through a whole render rather than only through the two name
+#: functions, and the hash is asserted rather than trusted wherever it is used.
+MIN_VALUE_TAG: Final[str] = "@DEUFDHV"
+
 #: Inputs whose Java ``String.hashCode`` is a fixed point of the algorithm's
 #: documented edge cases, as ``(text, signed hash, offset filename segment)``.
 HASH_EDGE_CASES: Final[tuple[tuple[str, int, str], ...]] = (
@@ -184,7 +244,7 @@ HASH_EDGE_CASES: Final[tuple[tuple[str, int, str], ...]] = (
     (SMOKE_TAG, 1912275215, "4059758862"),
     # The Integer.MIN_VALUE case: the JVM's 32-bit overflow is load-bearing,
     # and a mask-only implementation would answer 4294967295 here.
-    ("polygenelubricants", -2147483648, "-1"),
+    (MIN_VALUE_HASH_INPUT, INT32_MIN, "-1"),
 )
 
 # --------------------------------------------------------------------------
@@ -307,6 +367,36 @@ DATA_URI_PREFIX: Final[str] = "data:"
 #: records it and the lightbox partial emits it.
 PNG_DATA_URI_PREFIX: Final[str] = "data:image/png;base64,"
 
+#: A genuinely well-formed 1x1 PNG payload -- the same bytes
+#: ``tests/conftest.py`` hands its stub driver, base64 as an embedding carries
+#: them.  Every probe here that expects a screenshot to *render* uses it,
+#: because the lightbox partial and the writers both apply the inline-PNG
+#: contract owned by ``app/reporting/screenshots.py``: a payload that merely
+#: begins with PNG's signature renders as nothing at all, and an assertion
+#: about the rendered image would then pass without the image.
+VALID_PNG_PAYLOAD: Final[str] = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAH/"
+    "VscvDQAAAABJRU5ErkJggg=="
+)
+
+#: The embedding's declared MIME type, and the eight-byte signature its decoded
+#: payload must begin with.  ``app/reporting/screenshots.py`` drops an
+#: attachment that fails either check, so a synthetic screenshot built here has
+#: to satisfy both to reach a page at all.
+PNG_MIME_TYPE: Final[str] = "image/png"
+PNG_SIGNATURE: Final[bytes] = b"\x89PNG\r\n\x1a\x0a"
+
+#: What :func:`padded_png_bytes` needs to build a large screenshot the
+#: inline-PNG contract accepts: the width of each of a chunk's three fields,
+#: the twelve bytes an empty ``IEND`` chunk occupies at the end of every
+#: well-formed PNG, and the ancillary chunk the padding rides in with its
+#: keyword.  ``tEXt`` is on that contract's allowlist of safe, uncompressed
+#: ancillary types, so a screenshot padded through it is still a screenshot.
+PNG_CHUNK_FIELD_BYTES: Final[int] = 4
+PNG_END_CHUNK_BYTES: Final[int] = 12
+PNG_TEXT_CHUNK: Final[bytes] = b"tEXt"
+PNG_TEXT_KEYWORD: Final[bytes] = b"Comment"
+
 #: The three markers a conflicted merge leaves behind.  The committed reference
 #: tree carries them (AAP 0.3.4 records nine in one page), which is exactly why
 #: a freshly written page is asserted to carry none.
@@ -345,7 +435,17 @@ STATUS_LABELS: Final[dict[str, str]] = {
 
 #: A status the result model never produces, used to drive the fallback.  The
 #: writer must report it as ``unknown`` rather than as a pass.
-UNRECOGNISED_STATUS: Final[str] = "executing"
+#:
+#: It was ``"executing"`` until the shared status model took in the behave-only
+#: spellings: ``app/reporting/aggregation.py``'s ``STATUS_ALIASES`` folds
+#: ``executing`` onto ``untested``, because it is behave's own name for a step
+#: whose outcome was never established, so that word is now a *recognised*
+#: status rather than an unrecognised one and drives the alias fold instead of
+#: the fallback.  This value belongs to no tool's vocabulary and no alias
+#: table, which is the whole of what this constant needs to be: the fallback is
+#: reached for a status nothing in the project can read, and a word any table
+#: claims cannot exercise it.
+UNRECOGNISED_STATUS: Final[str] = "no-such-status"
 
 # --------------------------------------------------------------------------
 # Fixed values of the sample document
@@ -597,7 +697,7 @@ def document_with_features(document: Any, *filenames: str) -> dict[str, Any]:
     """Return ``document`` reduced to the features named by ``filenames``.
 
     Used for the second-render case: the same document with fewer features is
-    exactly the input that leaves an unpruned tree holding surplus pages.
+    the input that shows whether a published tree is replaced or added to.
 
     :param document: A merged result document.
     :param filenames: Feature file names to keep, e.g. ``"Crm.feature"``.
@@ -726,7 +826,6 @@ class _PageCollector(HTMLParser):
                 )
 
     def handle_data(self, data: str) -> None:
-        """Route character data to the structures currently open."""
         if self._title_parts is not None:
             self._title_parts.append(data)
         if self._opaque_depth:
@@ -840,6 +939,183 @@ def read_tree_pages(root: Path) -> dict[str, ParsedPage]:
 
 
 # --------------------------------------------------------------------------
+# Table reading
+#
+# A page's visible text is enough for a value that appears on it, which is what
+# most of the content assertions below read.  A per-row *status* is not: it
+# lives on the cell's class and hook attribute rather than in its text, and the
+# cell it belongs to has to be tied back to the row that owns it.  These
+# helpers read one named table into rows and cells, so an assertion can name
+# the row it is about, and they are deliberately as neutral as
+# :class:`_PageCollector` -- no judgement, only structure.
+# --------------------------------------------------------------------------
+
+#: The ``id`` of the steps-overview statistics table, which the layout's
+#: sorter initialisation binds to and which distinguishes it from the
+#: build-info table every page's layout also emits.
+STEPS_TABLE_ID: Final[str] = "tablesorter"
+
+
+@dataclass(frozen=True)
+class Cell:
+    """One ``th`` or ``td``, as a reader and the stylesheet see it.
+
+    :ivar tag: ``"th"`` or ``"td"``.
+    :ivar text: Its text content, with runs of whitespace collapsed and the
+        edges stripped, so an assertion is about the value and not about the
+        template's line breaks.
+    :ivar classes: Its class tokens, the bare status word among them.
+    :ivar status: The value of whichever status hook the cell carries, or
+        ``""`` when it carries neither spelling -- see
+        :data:`STATUS_HOOK_ATTRIBUTES`.
+    """
+
+    tag: str
+    text: str
+    classes: tuple[str, ...]
+    status: str
+
+
+@dataclass(frozen=True)
+class TableRow:
+    """One ``tr`` of a named table.
+
+    :ivar section: ``"thead"``, ``"tbody"`` or ``"tfoot"``, so a footer
+        assertion cannot be satisfied by a body row or the reverse.
+    :ivar cells: Its cells in column order, header cell included.
+    """
+
+    section: str
+    cells: tuple[Cell, ...]
+
+    @property
+    def texts(self) -> tuple[str, ...]:
+        """Every cell's text, in column order."""
+        return tuple(cell.text for cell in self.cells)
+
+    @property
+    def last(self) -> Cell:
+        """The row's final cell, which is where these tables put the status.
+
+        :returns: The last cell.
+        :raises AssertionError: If the row has none, in which case no
+            assertion about "the" status cell would mean anything.
+        """
+        assert self.cells, f"a {self.section} row with no cells has no status cell"
+        return self.cells[-1]
+
+
+class _TableCollector(HTMLParser):
+    """Collect the rows of the one table carrying ``table_id``."""
+
+    _CELL_TAGS: Final[frozenset[str]] = frozenset({"th", "td"})
+    _SECTION_TAGS: Final[frozenset[str]] = frozenset({"thead", "tbody", "tfoot"})
+
+    def __init__(self, table_id: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self._table_id = table_id
+        self.rows: list[TableRow] = []
+        self._inside = False
+        self._section = ""
+        self._cells: list[Cell] | None = None
+        self._cell: tuple[str, dict[str, str], list[str]] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Enter the named table, a section, a row or a cell."""
+        attributes = {name: (value if value is not None else "") for name, value in attrs}
+        if tag == "table":
+            self._inside = attributes.get("id") == self._table_id
+            return
+        if not self._inside:
+            return
+        if tag in self._SECTION_TAGS:
+            self._section = tag
+        elif tag == "tr":
+            self._cells = []
+        elif tag in self._CELL_TAGS and self._cells is not None:
+            self._cell = (tag, attributes, [])
+
+    def handle_endtag(self, tag: str) -> None:
+        """Close whichever structure ``tag`` opened, and bank a finished row."""
+        if tag == "table":
+            self._inside = False
+            return
+        if not self._inside:
+            return
+        if tag in self._CELL_TAGS and self._cell is not None:
+            cell_tag, attributes, parts = self._cell
+            status = ""
+            for hook in STATUS_HOOK_ATTRIBUTES:
+                if hook in attributes:
+                    status = attributes[hook]
+                    break
+            assert self._cells is not None
+            self._cells.append(
+                Cell(
+                    tag=cell_tag,
+                    text=re.sub(r"\s+", " ", "".join(parts)).strip(),
+                    classes=tuple(attributes.get("class", "").split()),
+                    status=status,
+                )
+            )
+            self._cell = None
+        elif tag == "tr" and self._cells is not None:
+            self.rows.append(
+                TableRow(section=self._section, cells=tuple(self._cells))
+            )
+            self._cells = None
+
+    def handle_data(self, data: str) -> None:
+        """Route character data to the open cell, if any."""
+        if self._cell is not None:
+            self._cell[2].append(data)
+
+
+def table_rows(page: ParsedPage, table_id: str) -> tuple[TableRow, ...]:
+    """Every row of the table carrying ``table_id``, in document order.
+
+    :param page: The parsed page, read for its exact markup.
+    :param table_id: The table's ``id``.
+    :returns: Its rows, header, body and footer alike.
+    """
+    collector = _TableCollector(table_id)
+    collector.feed(page.html)
+    collector.close()
+    return tuple(collector.rows)
+
+
+def steps_body_rows(page: ParsedPage) -> dict[str, TableRow]:
+    """The steps overview's body rows, keyed by their implementation.
+
+    The first cell of each row is the implementation, which is that row's own
+    header cell, so keying by it is how an assertion names the row it is
+    about.
+
+    :param page: The parsed ``overview-steps.html``.
+    :returns: Implementation to row.
+    """
+    return {
+        row.cells[0].text: row
+        for row in table_rows(page, STEPS_TABLE_ID)
+        if row.section == "tbody" and row.cells
+    }
+
+
+def steps_footer_row(page: ParsedPage) -> TableRow:
+    """The steps overview's single footer row.
+
+    :param page: The parsed ``overview-steps.html``.
+    :returns: The footer row.
+    :raises AssertionError: If the page carries none or more than one.
+    """
+    footers = [
+        row for row in table_rows(page, STEPS_TABLE_ID) if row.section == "tfoot"
+    ]
+    assert len(footers) == 1, f"{page.name} carries {len(footers)} footer rows"
+    return footers[0]
+
+
+# --------------------------------------------------------------------------
 # Filesystem helpers
 # --------------------------------------------------------------------------
 
@@ -891,6 +1167,90 @@ def listed_names(directory: Path) -> frozenset[str]:
     :returns: Its entry names.
     """
     return frozenset(os.listdir(directory))
+
+
+def permission_bits(path: Path) -> int:
+    """The permission bits of ``path``, read without following a link.
+
+    The special bits are deliberately excluded.  A build output directory that
+    the operator made set-group-id stays set-group-id -- the writer's mode
+    policy clears the group and other *permission* bits and leaves the special
+    ones alone -- so an assertion that compared the whole mode would fail on a
+    workspace mounted under a setgid directory while the property under test
+    held perfectly.
+
+    :param path: The entry to read.
+    :returns: ``st_mode`` masked to ``0o777``.
+    """
+    return stat.S_IMODE(path.lstat().st_mode) & 0o777
+
+
+def tree_permissions(root: Path) -> dict[str, int]:
+    """Every entry under ``root`` mapped to its permission bits.
+
+    :param root: The tree to walk, itself excluded.
+    :returns: Tree-relative POSIX path to permission bits.
+    """
+    return {
+        path.relative_to(root).as_posix(): permission_bits(path)
+        for path in sorted(root.rglob("*"))
+    }
+
+
+def staged_publication(final: Path) -> paths.ArtifactDirectoryPublication:
+    """Begin a publication of ``final`` with its staging tree created.
+
+    The two calls every exercise of the asset copy on its own needs, since
+    :func:`app.reporting.pretty_reports.copy_pretty_assets` now takes the
+    publication that owns the destination rather than a destination path: the
+    files it writes have to land under a verified staging descriptor, and only
+    the publication holds one.
+
+    The caller closes it -- ``with staged_publication(...) as publication`` --
+    which releases the descriptors and removes nothing.
+
+    :param final: The directory the publication would publish.
+    :returns: The publication, staged.
+    """
+    publication = paths.begin_directory_publication(final)
+    publication.create_staging()
+    return publication
+
+
+def scratch_name(final: Path, infix: str, pid: int) -> str:
+    """The name a publication of ``final`` gives one of its scratch trees.
+
+    Reproduced from the path authority's own exported infixes rather than from
+    a literal, so a test that plants scratch by hand plants the name the
+    publication will recognise -- which is the whole of what makes an
+    interrupted publication recoverable.
+
+    :param final: The published tree's directory.
+    :param infix: :data:`app.utils.paths.PUBLICATION_STAGING_INFIX` or
+        :data:`~app.utils.paths.PUBLICATION_SUPERSEDED_INFIX`.
+    :param pid: The process id the name carries.  ``os.getpid()`` for
+        scratch this process owns, :data:`FOREIGN_PID` for another's.
+    :returns: The scratch directory's final component.
+    """
+    return f".{final.name}{infix}{pid}"
+
+
+def plant_scratch(final: Path, name: str, marker: str = "marker.txt") -> Path:
+    """Create a scratch directory beside ``final`` holding one marker file.
+
+    The state an interrupted publication leaves behind, built by hand so the
+    recovery rules can be asserted without killing a process.  The marker is
+    what an assertion reads to tell a restored tree from a freshly written one.
+
+    :param final: The published tree's directory.
+    :param name: The scratch directory's name, from :func:`scratch_name`.
+    :param marker: Name of the file written inside it.
+    :returns: The scratch directory.
+    """
+    directory = final.with_name(name)
+    directory.mkdir(parents=True)
+    (directory / marker).write_text(name, encoding="utf-8")
+    return directory
 
 
 def split_reference(value: str) -> str:
@@ -1171,6 +1531,203 @@ def test_feature_href_map_drops_the_ambiguous_id_and_name_keys(
     assert SHARED_FEATURE_ID not in hrefs
     assert "Testinium app Inventory feature" not in hrefs
     assert hrefs["Testinium app CRM Module"] == SUITE_FEATURE_PAGES["Crm.feature"]
+
+
+# --------------------------------------------------------------------------
+# The link allowlist
+#
+# ``local_page_href`` is the one check every dynamic href of the six page
+# templates passes through, and its contract is an equivalence rather than a
+# resemblance: the names it admits are exactly the names the writer emits.
+# Both directions are gated here, because each failure is its own defect --
+# admitting more than the writer emits is an open link sink fed by a result
+# document, and admitting less strips the link to a page that is in the tree
+# and leaves its label as plain text.
+# --------------------------------------------------------------------------
+
+
+def test_the_minimum_value_hash_names_are_the_two_negative_page_names() -> None:
+    """The one input whose page names carry a minus sign, named exactly.
+
+    ``polygenelubricants`` hashes to ``Integer.MIN_VALUE``, whose offset
+    segment is ``-1``, so the writer's own two name functions produce
+    ``report-feature_-1.html`` and ``report-tag_-1.html``.  Asserted here as
+    literals because the rest of this section is about those two names being
+    reachable destinations.
+    """
+    assert pretty_reports.java_hash_code(MIN_VALUE_HASH_INPUT) == INT32_MIN
+    assert pretty_reports.to_valid_file_name(MIN_VALUE_HASH_INPUT) == str(
+        MIN_PAGE_HASH
+    )
+    assert pretty_reports.feature_page_name(MIN_VALUE_HASH_INPUT) == (
+        MIN_VALUE_FEATURE_PAGE
+    )
+    assert pretty_reports.tag_page_name(MIN_VALUE_HASH_INPUT) == MIN_VALUE_TAG_PAGE
+    assert MIN_VALUE_FEATURE_PAGE == "report-feature_-1.html"
+    assert MIN_VALUE_TAG_PAGE == "report-tag_-1.html"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        *OVERVIEW_PAGES,
+        *sorted(SUITE_FEATURE_PAGES.values()),
+        SMOKE_TAG_PAGE,
+        # The whole range of the offset hash, at both ends and at the one
+        # value that carries a sign.
+        MIN_VALUE_FEATURE_PAGE,
+        MIN_VALUE_TAG_PAGE,
+        f"{FEATURE_PAGE_PREFIX}0{PAGE_SUFFIX}",
+        f"{TAG_PAGE_PREFIX}{MAX_PAGE_HASH}{PAGE_SUFFIX}",
+    ],
+)
+def test_the_allowlist_admits_every_name_this_writer_can_emit(name: str) -> None:
+    """Every emittable filename is returned unchanged.
+
+    The four overview names, all ten pinned feature pages, the reference tag
+    page and the three boundary values of the hash segment -- ``-1``, ``0`` and
+    ``4294967294``.  A name the writer can write and this function refuses is a
+    page in the published tree that no page of that tree links.
+    """
+    assert pretty_reports.local_page_href(name) == name
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        # Outside the offset hash's range at either end.
+        f"{TAG_PAGE_PREFIX}-2{PAGE_SUFFIX}",
+        f"{FEATURE_PAGE_PREFIX}-2{PAGE_SUFFIX}",
+        f"{TAG_PAGE_PREFIX}{MAX_PAGE_HASH + 1}{PAGE_SUFFIX}",
+        f"{TAG_PAGE_PREFIX}9999999999{PAGE_SUFFIX}",
+        # A digit run far longer than any value the generator can produce.
+        f"{TAG_PAGE_PREFIX}{'9' * 5000}{PAGE_SUFFIX}",
+        # Spellings of a number that ``str`` never produces.
+        f"{TAG_PAGE_PREFIX}-0{PAGE_SUFFIX}",
+        f"{TAG_PAGE_PREFIX}+1{PAGE_SUFFIX}",
+        f"{TAG_PAGE_PREFIX}01{PAGE_SUFFIX}",
+        f"{TAG_PAGE_PREFIX}1.0{PAGE_SUFFIX}",
+        f"{TAG_PAGE_PREFIX}--1{PAGE_SUFFIX}",
+        # No hash segment at all.
+        f"{FEATURE_PAGE_PREFIX}{PAGE_SUFFIX}",
+        f"{TAG_PAGE_PREFIX}{PAGE_SUFFIX}",
+        # Digits of another script, which Python's ``\d`` matches and no
+        # filesystem entry of this tree carries.
+        f"{TAG_PAGE_PREFIX}\u0661\u0662\u0663{PAGE_SUFFIX}",
+        # Schemes, which autoescaping does not neutralise.
+        "javascript:alert(9)",
+        "data:text/html,<script>alert(9)</script>",
+        "http://evil.example/x.html",
+        "//evil.example/x.html",
+        # Paths, absolute, parent-relative and nested.
+        "/etc/passwd",
+        "../../etc/passwd",
+        f"../{SMOKE_TAG_PAGE}",
+        f"pages/{SMOKE_TAG_PAGE}",
+        f"{MIN_VALUE_FEATURE_PAGE}/../../x",
+        # A query and a fragment, which no page of this tree takes.
+        f"{OVERVIEW_INDEX}?a=b#z",
+        f"{MIN_VALUE_TAG_PAGE}#top",
+        # Surrounding whitespace and a control character.
+        f" {MIN_VALUE_TAG_PAGE}",
+        f"{MIN_VALUE_TAG_PAGE}\n",
+        f"{TAG_PAGE_PREFIX}-1\x00{PAGE_SUFFIX}",
+        # The wrong prefix and the wrong suffix.
+        f"report-scenario_-1{PAGE_SUFFIX}",
+        f"{TAG_PAGE_PREFIX}-1.htm",
+        # Not a string, and empty.
+        None,
+        7,
+        (),
+        "",
+    ],
+)
+def test_the_allowlist_refuses_anything_this_writer_cannot_emit(
+    candidate: Any,
+) -> None:
+    """A destination the writer did not compute is answered with ``""``.
+
+    The in-range negative value is the only signed segment there is, so every
+    other signed or oddly spelled number is refused; so is every value above
+    the maximum, including the ``4294967295`` a mask-based implementation of
+    the hash would have produced and a digit run no integer of that range can
+    have.  The template then renders the label as plain text, which is how a
+    crafted destination in a result document reaches a reader as words rather
+    than as an active link.
+    """
+    assert pretty_reports.local_page_href(candidate) == ""
+
+
+def test_a_rejected_destination_is_logged_and_an_absent_one_is_not(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stripped link is a build-log line; an absent one is ordinary.
+
+    The only way a rejected destination can arrive is a result document
+    carrying a name the writer did not compute, which is worth reporting.  An
+    empty or absent value is not: a feature with no URI has no page, and that
+    is a state the writer reports in its own right.
+    """
+    with caplog.at_level("WARNING", logger=pretty_reports.logger.name):
+        assert pretty_reports.local_page_href("javascript:alert(9)") == ""
+    assert [record.getMessage() for record in caplog.records]
+
+    caplog.clear()
+    with caplog.at_level("WARNING", logger=pretty_reports.logger.name):
+        assert pretty_reports.local_page_href("") == ""
+        assert pretty_reports.local_page_href(None) == ""
+        assert pretty_reports.local_page_href(MIN_VALUE_TAG_PAGE) == (
+            MIN_VALUE_TAG_PAGE
+        )
+    assert [record.getMessage() for record in caplog.records] == []
+
+
+def test_a_tag_whose_hash_is_the_minimum_value_is_linked_end_to_end(
+    pretty_env: Environment, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The negative page name survives a whole render, as a link.
+
+    The round trip the two halves of the contract meet in: a tag whose name
+    hashes to ``Integer.MIN_VALUE`` gets the page ``report-tag_-1.html``, and
+    the tags overview links that page instead of rendering the tag as plain
+    text.  A run of this suite reaches the case as soon as somebody writes a
+    tag whose hash happens to land there, so the page and its link are asserted
+    together -- the page existing while nothing links it is the defect, not the
+    page name itself.
+    """
+    assert pretty_reports.java_hash_code(MIN_VALUE_TAG) == INT32_MIN
+    document = build_document(
+        build_feature(
+            "Crm.feature",
+            "Testinium app CRM Module",
+            (build_element("a scenario", (build_step("acts", "passed", 4),)),),
+            tags=(MIN_VALUE_TAG,),
+        )
+    )
+
+    with caplog.at_level("WARNING", logger=pretty_reports.logger.name):
+        pages = pretty_reports.render_pretty_pages(document, environment=pretty_env)
+
+    assert pretty_reports.tag_page_name(MIN_VALUE_TAG) == MIN_VALUE_TAG_PAGE
+    assert MIN_VALUE_TAG_PAGE in pages
+    tags_overview = parse_page(OVERVIEW_PAGES[1], pages[OVERVIEW_PAGES[1]])
+    assert MIN_VALUE_TAG_PAGE in resolvable_references(tags_overview)
+    assert MIN_VALUE_TAG in tags_overview.normalized_text
+    # The tag chip on the feature page is the other sink for the same name.
+    feature_page = parse_page(
+        SUITE_FEATURE_PAGES["Crm.feature"],
+        pages[SUITE_FEATURE_PAGES["Crm.feature"]],
+    )
+    assert MIN_VALUE_TAG_PAGE in resolvable_references(feature_page)
+    # Every page of the tree, so no sink anywhere stripped the destination.
+    for name, page in parse_pages(pages).items():
+        for value in resolvable_references(page):
+            assert value != "", name
+    assert [
+        message
+        for message in (record.getMessage() for record in caplog.records)
+        if "Rejected" in message
+    ] == []
 
 
 # --------------------------------------------------------------------------
@@ -1526,29 +2083,44 @@ def test_copy_pretty_assets_returns_every_path_it_wrote(tmp_path: Path) -> None:
 
     A caller -- the writer's own log line, and this suite -- has to be able to
     assert on the set rather than re-walk the directory to discover it.
+
+    Rewritten for the descriptor-bound publication: the copy takes the
+    publication that owns the destination rather than a destination path,
+    because every file it writes has to be created under the staging
+    descriptor the path authority verified.  The paths it reports are therefore
+    inside the staging tree, which is where the assets are until the swap
+    renames it, and that is what is asserted here.
     """
-    destination = tmp_path / "assets-only"
+    with staged_publication(tmp_path / "assets-only") as publication:
+        written = pretty_reports.copy_pretty_assets(publication)
 
-    written = pretty_reports.copy_pretty_assets(destination)
-
-    assert isinstance(written, tuple)
-    assert len(written) == 22
-    assert list(written) == sorted(written)
-    assert all(path.is_absolute() for path in written)
-    assert {
-        path.relative_to(destination).as_posix() for path in written
-    } == EXPECTED_ASSETS
-    assert asset_files(destination) == EXPECTED_ASSETS
+        assert isinstance(written, tuple)
+        assert len(written) == 22
+        assert list(written) == sorted(written)
+        assert all(path.is_absolute() for path in written)
+        assert {
+            path.relative_to(publication.staging).as_posix() for path in written
+        } == EXPECTED_ASSETS
+        assert asset_files(publication.staging) == EXPECTED_ASSETS
 
 
 def test_copy_pretty_assets_creates_its_destination(tmp_path: Path) -> None:
-    """A destination that does not exist yet is created, parents included."""
-    destination = tmp_path / "absent" / "deeper" / "tree"
-    assert not destination.exists()
+    """A destination that does not exist yet is created, parents included.
 
-    pretty_reports.copy_pretty_assets(destination)
+    Rewritten for the descriptor-bound publication, which is now what creates
+    the destination: beginning a publication creates and verifies the parent of
+    the tree it will publish, and staging it creates the directory the assets
+    are copied into -- so a copy into a location nothing has prepared still
+    lands, and it lands under a descriptor rather than under a name.
+    """
+    final = tmp_path / "absent" / "deeper" / "tree"
+    assert not final.parent.exists()
 
-    assert asset_files(destination) == EXPECTED_ASSETS
+    with staged_publication(final) as publication:
+        pretty_reports.copy_pretty_assets(publication)
+
+        assert asset_files(publication.staging) == EXPECTED_ASSETS
+        assert publication.staging.parent == final.parent
 
 
 def test_copy_pretty_assets_is_idempotent_and_still_byte_exact(
@@ -1556,20 +2128,23 @@ def test_copy_pretty_assets_is_idempotent_and_still_byte_exact(
 ) -> None:
     """A second copy over the first leaves the same 22 files, same bytes.
 
-    The writer overwrites its tree in place, so the asset copy runs again on
-    every render: it has to be repeatable without accumulating, truncating or
-    re-encoding anything.
+    The asset copy runs on every render, so it has to be repeatable without
+    accumulating, truncating or re-encoding anything.  Repeated within one
+    publication here rather than into a bare directory twice: the writer's
+    second render is a second publication, and what has to be idempotent is the
+    copy into a staging tree that already holds a copy -- which is exactly what
+    an interrupted publication of this process leaves for the next one to build
+    over.
     """
-    destination = tmp_path / "twice"
+    with staged_publication(tmp_path / "twice") as publication:
+        first = pretty_reports.copy_pretty_assets(publication)
+        before = tree_digests(publication.staging)
+        second = pretty_reports.copy_pretty_assets(publication)
+        after = tree_digests(publication.staging)
 
-    first = pretty_reports.copy_pretty_assets(destination)
-    before = tree_digests(destination)
-    second = pretty_reports.copy_pretty_assets(destination)
-    after = tree_digests(destination)
-
-    assert first == second
-    assert before == after
-    assert set(before) == set(EXPECTED_ASSETS)
+        assert first == second
+        assert before == after
+        assert set(before) == set(EXPECTED_ASSETS)
 
 
 # --------------------------------------------------------------------------
@@ -1610,18 +2185,18 @@ def test_assets_copy_correctly_from_an_unrelated_working_directory(
     """
     elsewhere = tmp_path / "unrelated-cwd"
     elsewhere.mkdir()
-    destination = tmp_path / "from-elsewhere"
     monkeypatch.chdir(elsewhere)
 
     assert not (Path.cwd() / "app").exists()
-    written = pretty_reports.copy_pretty_assets(destination)
+    with staged_publication(tmp_path / "from-elsewhere") as publication:
+        written = pretty_reports.copy_pretty_assets(publication)
 
-    assert len(written) == 22
-    assert asset_files(destination) == EXPECTED_ASSETS
-    for name in sorted(VENDORED_ASSETS):
-        assert destination.joinpath(*name.split("/")).read_bytes() == (
-            paths.vendor_dir().joinpath(*name.split("/")).read_bytes()
-        )
+        assert len(written) == 22
+        assert asset_files(publication.staging) == EXPECTED_ASSETS
+        for name in sorted(VENDORED_ASSETS):
+            assert publication.staging.joinpath(*name.split("/")).read_bytes() == (
+                paths.vendor_dir().joinpath(*name.split("/")).read_bytes()
+            )
 
 
 def test_whole_tree_writes_from_an_unrelated_working_directory(
@@ -2118,6 +2693,17 @@ def test_overview_failures_carries_both_failure_messages(
     # A passing scenario has no place on the failures overview.
     assert "User can create pipeline in the displayed dashboard" not in text
 
+    # THE SAMPLE RUN'S UNDEFINED SCENARIO IS LISTED TOO, and that assertion is
+    # new rather than relaxed.  ``net.masterthought:cucumber-reporting:5.6.1``
+    # lists every element for which ``Status.isPassed()`` is false, and the
+    # statistics tables of this very tree already counted this scenario as a
+    # failed scenario -- its Sales row reads one failed scenario -- so while
+    # the page selected on a literal ``failed`` token it contradicted every
+    # other page of the artifact it belongs to.
+    assert "Lucas" in text
+    assert "User can search the customer from the search bar" in text
+    assert ("undefined", "Undefined (1)") in filter_buttons(page)
+
 
 def test_overview_steps_aggregates_every_step_implementation(
     sample_result_set: Any, sample_tree: Path
@@ -2153,6 +2739,315 @@ def test_overview_steps_aggregates_every_step_implementation(
     # and a step with no match carries no implementation to aggregate by.
     assert "user_can_export_the_customer_list" not in text
     assert "user_can_search_the_customer_from_the_search_bar" not in text
+
+
+# --------------------------------------------------------------------------
+# The steps overview's occurrence rule
+#
+# ONE OCCURRENCE PER LOCATED STEP, whatever its result says.  The page used to
+# drop a step whose status the port's vocabulary could not read, on the
+# reasoning that a row cannot report a result it never understood -- and the
+# reasoning does not survive the arithmetic beside it:
+# ``app/reporting/aggregation.py``'s ``count_steps`` counts that same step
+# towards ``steps_total``, which is what fills every statistics table in this
+# tree, so the dropped occurrence made this page report fewer steps than the
+# tables printed next to it.  One run, two readings, no way for a reader to
+# tell which was wrong.
+#
+# The rule these tests hold the page to is therefore: a step with a
+# ``match.location`` is an occurrence of that implementation, a step without
+# one is not (there is no key to aggregate it under), and a status outside the
+# seven the result model produces is REPORTED as ``unknown`` rather than
+# dropped.  The Ratio cell carries that reading -- ``passed`` when every
+# occurrence passed, ``unknown`` when none of them reported an outcome this
+# port recognises, ``failed`` otherwise, the mixed row included -- and the
+# footer, which is five readings of the rendered rows, follows.
+# --------------------------------------------------------------------------
+
+#: The four implementations of :func:`unreadable_status_document`, each named
+#: for the shape of result its steps carry.
+UNREADABLE_PASSED_LOCATION: Final[str] = "features.steps.synthetic_steps.step_passed"
+UNREADABLE_STATUS_LOCATION: Final[str] = "features.steps.synthetic_steps.step_odd"
+UNREADABLE_RESULTLESS_LOCATION: Final[str] = "features.steps.synthetic_steps.step_bare"
+UNREADABLE_MIXED_LOCATION: Final[str] = "features.steps.synthetic_steps.step_mixed"
+
+
+def unreadable_status_document() -> dict[str, Any]:
+    """A one-scenario document whose steps reach every occurrence branch.
+
+    Six steps over four implementations plus two the page must not aggregate:
+
+    * one plainly passing step, so the unchanged branch is asserted in the
+      same render as the changed ones;
+    * one carrying :data:`UNRECOGNISED_STATUS`, a word from no vocabulary
+      this port knows;
+    * one carrying **no result mapping at all**, which is the other way a
+      step arrives with nothing readable -- the ``result`` key is removed
+      rather than blanked, because an absent mapping and an empty one take
+      different paths through the template's guarded lookups;
+    * one implementation used twice, once passing and once unreadable, which
+      is the mixed row;
+    * one step with a blank location and one with no ``match`` key at all,
+      neither of which names an implementation to aggregate under.
+
+    :returns: The document, in the shape ``app/reporting/events.py`` owns.
+    """
+    passing = build_step(
+        "a step that passed",
+        "passed",
+        duration=1_000_000,
+        line=10,
+        location=UNREADABLE_PASSED_LOCATION,
+    )
+    unreadable = build_step(
+        "a step carrying another tool's word",
+        UNRECOGNISED_STATUS,
+        duration=2_000_000,
+        line=11,
+        location=UNREADABLE_STATUS_LOCATION,
+    )
+    resultless = build_step(
+        "a step carrying no result at all",
+        "passed",
+        line=12,
+        location=UNREADABLE_RESULTLESS_LOCATION,
+    )
+    del resultless["result"]
+    mixed_pass = build_step(
+        "the half of the mixed row that passed",
+        "passed",
+        duration=3_000_000,
+        line=13,
+        location=UNREADABLE_MIXED_LOCATION,
+    )
+    mixed_unreadable = build_step(
+        "the half of the mixed row nobody read",
+        UNRECOGNISED_STATUS,
+        duration=4_000_000,
+        line=14,
+        location=UNREADABLE_MIXED_LOCATION,
+    )
+    blank_location = build_step(
+        "a step naming no implementation",
+        UNRECOGNISED_STATUS,
+        duration=5_000_000,
+        line=15,
+        location="   ",
+    )
+    no_match = build_step(
+        "a step with no match at all",
+        UNRECOGNISED_STATUS,
+        duration=6_000_000,
+        line=16,
+        location=UNREADABLE_PASSED_LOCATION,
+    )
+    del no_match["match"]
+
+    return build_document(
+        build_feature(
+            "Unreadable.feature",
+            "Unreadable results",
+            (
+                build_element(
+                    "every occurrence branch",
+                    (
+                        passing,
+                        unreadable,
+                        resultless,
+                        mixed_pass,
+                        mixed_unreadable,
+                        blank_location,
+                        no_match,
+                    ),
+                ),
+            ),
+        )
+    )
+
+
+def steps_overview_of(document: Any, environment: Environment) -> ParsedPage:
+    """Render ``document`` and return its parsed steps overview.
+
+    :param document: The merged result document.
+    :param environment: The template environment to render through.
+    :returns: The parsed ``overview-steps.html``.
+    """
+    pages = pretty_reports.render_pretty_pages(document, environment=environment)
+    return parse_page(OVERVIEW_PAGES[2], pages[OVERVIEW_PAGES[2]])
+
+
+def test_a_located_step_with_an_unreadable_result_is_still_an_occurrence(
+    pretty_env: Environment,
+) -> None:
+    """An unreadable result is reported as ``unknown``, never dropped.
+
+    Both shapes of "nothing readable" reach the page as a row of their own:
+    a status outside the seven the model produces, and a step carrying no
+    ``result`` mapping at all.  Each is one occurrence of its implementation
+    and each renders the ``unknown`` token on its Ratio cell -- the neutral
+    grey ``main.css`` gives ``.tqa-table td.unknown`` -- so the reading is
+    visibly neither a pass nor a failure.  The percentage is ``0.00%``
+    because no occurrence passed, which is the honest numerator.
+
+    The passing row in the same render is the control: the branch this page
+    was measured on is untouched.
+    """
+    page = steps_overview_of(unreadable_status_document(), pretty_env)
+    rows = steps_body_rows(page)
+
+    assert set(rows) == {
+        UNREADABLE_PASSED_LOCATION,
+        UNREADABLE_STATUS_LOCATION,
+        UNREADABLE_RESULTLESS_LOCATION,
+        UNREADABLE_MIXED_LOCATION,
+    }
+    for location in (UNREADABLE_STATUS_LOCATION, UNREADABLE_RESULTLESS_LOCATION):
+        row = rows[location]
+        assert row.texts[1] == "1", location
+        assert row.last.status == "unknown", location
+        assert "unknown" in row.last.classes, location
+        assert row.last.text == "0.00%", location
+    # The control row, and the vocabulary word itself never reaches the page.
+    assert rows[UNREADABLE_PASSED_LOCATION].texts[1] == "1"
+    assert rows[UNREADABLE_PASSED_LOCATION].last.status == "passed"
+    assert rows[UNREADABLE_PASSED_LOCATION].last.text == "100.00%"
+    assert UNRECOGNISED_STATUS not in page.html
+
+    # A step with no duration renders zero rather than a blank cell or an
+    # exception: the resultless row carries three 0.000 duration cells.
+    assert rows[UNREADABLE_RESULTLESS_LOCATION].texts[2:5] == ("0.000",) * 3
+
+    # A step naming no implementation is still excluded -- the one exclusion
+    # the page keeps, and it is about the aggregation key, not the result.
+    assert "a step naming no implementation" not in page.normalized_text
+    assert "a step with no match at all" not in page.normalized_text
+
+
+def test_a_row_mixing_a_pass_with_an_unreadable_result_reads_failed(
+    pretty_env: Environment,
+) -> None:
+    """``unknown`` is the all-or-nothing reading, so a mixed row is not green.
+
+    One implementation, two occurrences, one of them passing and one of them
+    unreadable.  The row did not fully pass and part of it was never
+    understood, so it reads ``failed`` at 50.00%: ``unknown`` is reserved for
+    a row where *nothing* reported an outcome this port recognises, because
+    the reading that overstates a run's health is the one that misleads.
+    """
+    page = steps_overview_of(unreadable_status_document(), pretty_env)
+    row = steps_body_rows(page)[UNREADABLE_MIXED_LOCATION]
+
+    assert row.texts[1] == "2"
+    assert row.last.text == "50.00%"
+    assert row.last.status == "failed"
+    assert "failed" in row.last.classes
+    assert "unknown" not in row.last.classes
+
+
+def test_the_steps_overview_footer_counts_every_located_occurrence(
+    pretty_env: Environment,
+) -> None:
+    """The footer is a reading of the rows, unknown occurrences included.
+
+    Its first two cells are the number of distinct implementations and the
+    total occurrences, and both now count what the rows carry: four rows and
+    five occurrences, against the three and three the old status exclusion
+    produced for this same document.  That total is what has to agree with
+    the ``steps_total`` the statistics tables render, which is the
+    disagreement the exclusion caused.
+    """
+    document = unreadable_status_document()
+    page = steps_overview_of(document, pretty_env)
+    rows = steps_body_rows(page)
+    footer = steps_footer_row(page)
+
+    located = sum(
+        1
+        for feature in document["features"]
+        for element in feature["elements"]
+        for step in element["steps"]
+        if str((step.get("match") or {}).get("location", "")).strip()
+    )
+    assert located == 5
+
+    assert footer.texts[0] == str(len(rows)) == "4"
+    assert footer.texts[1] == str(located) == "5"
+    assert footer.texts[1] == str(sum(int(row.texts[1]) for row in rows.values()))
+    assert footer.texts[5] == "Totals"
+    assert len(footer.cells) == 6
+
+
+def test_the_step_stats_override_reports_its_own_unknown_occurrences(
+    pretty_env: Environment,
+) -> None:
+    """The Python-side override carries the same three readings.
+
+    ``step_stats`` is the documented override for a writer that would rather
+    aggregate in Python, so its rows reach the same Ratio cell.  ``unknown``
+    is optional there and defaults to zero: a row that never counted them --
+    the third below -- renders exactly as it did before the key existed,
+    which is what keeps the override backwards compatible.
+    """
+    template = pretty_env.get_template("pretty/overview_steps.html")
+    page = parse_page(
+        OVERVIEW_PAGES[2],
+        template.render(
+            step_stats=[
+                {
+                    "location": "steps.all_unknown",
+                    "occurrences": 2,
+                    "passed": 0,
+                    "unknown": 2,
+                },
+                {
+                    "location": "steps.mixed",
+                    "occurrences": 2,
+                    "passed": 1,
+                    "unknown": 1,
+                },
+                {"location": "steps.no_key", "occurrences": 2, "passed": 2},
+            ]
+        ),
+    )
+    rows = steps_body_rows(page)
+
+    assert rows["steps.all_unknown"].last.status == "unknown"
+    assert rows["steps.mixed"].last.status == "failed"
+    assert rows["steps.no_key"].last.status == "passed"
+    assert steps_footer_row(page).texts[:2] == ("3", "6")
+
+
+def test_the_well_formed_steps_overview_reports_no_unknown_occurrence(
+    sample_result_set: Any, sample_tree: Path
+) -> None:
+    """The measured page is unchanged: every sample status is one of the seven.
+
+    The occurrence rule only moves a step whose result this port cannot read,
+    and the sample document carries none, so the page keeps the two readings
+    the reference was measured with -- ``passed`` and ``failed`` -- its
+    seventeen rows and a footer occurrence total equal to every located step
+    of the run.
+    """
+    page = read_tree_pages(sample_tree)[OVERVIEW_PAGES[2]]
+    rows = steps_body_rows(page)
+    footer = steps_footer_row(page)
+
+    assert len(rows) == 17
+    for location, row in rows.items():
+        assert row.last.status in {"passed", "failed"}, location
+        assert "unknown" not in row.last.classes, location
+    assert 'data-report-status="unknown"' not in page.html
+
+    located = sum(
+        1
+        for feature in sample_result_set["features"]
+        for element in feature["elements"]
+        if element.get("selected") is not False
+        for step in element.get("steps", ())
+        if str((step.get("match") or {}).get("location", "")).strip()
+    )
+    assert footer.texts[0] == "17"
+    assert footer.texts[1] == str(located)
 
 
 def test_scenario_start_timestamps_reach_the_pages(sample_tree: Path) -> None:
@@ -2394,6 +3289,20 @@ def test_an_unrecognised_status_is_reported_as_unknown_not_as_a_pass(
     ``Unknown`` badge; the stylesheet declares no rule for that token, so it
     resolves the neutral fallback -- visibly a status, visibly not one of the
     seven.
+
+    **Every level of the page reads it, and that assertion changed.** This
+    test used to require exactly ONE ``Unknown`` badge, because the element
+    tree folded statuses for itself over a seven-token precedence: the fold
+    found nothing it recognised, fell through to its ``passed`` empty answer,
+    and the page read ``[passed, passed, passed, unknown]`` from the feature
+    brief down to the step -- a feature and a scenario reported as passes
+    although nothing established either.  The Pretty templates now read
+    :mod:`app.reporting.aggregation`, whose ``STATUS_PRECEDENCE`` ranks
+    ``unknown`` between ``untested`` and ``passed`` precisely so that a status
+    nobody established cannot be folded away, which is the one-model
+    invariant AAP 0.3.4 and 0.4.2 state.  Four badges is therefore the
+    contract, not a relaxation of it: the step, its Steps group, its scenario
+    and its feature all report ``Unknown``.
     """
     assert pretty_reports.status_token(UNRECOGNISED_STATUS) == "unknown"
     assert pretty_reports.status_token(None) == "unknown"
@@ -2419,19 +3328,24 @@ def test_an_unrecognised_status_is_reported_as_unknown_not_as_a_pass(
         ],
     )
 
-    # The step itself is reported as Unknown, and the raw vocabulary word the
-    # document carried never reaches the page in any form.  The scenario and
-    # feature badges above it read Passed, because STATUS_PRECEDENCE names
-    # only the seven statuses the model produces and worst_status answers its
-    # ``empty`` default -- measured behaviour of the writer and the element
-    # tree, owned by those units, so this module asserts the step badge that
-    # is unambiguously this contract's.
+    # The raw vocabulary word the document carried never reaches the page in
+    # any form, and no level of the page reports a pass: the four briefs the
+    # tree emits for a one-step scenario -- feature, element, Steps group and
+    # step -- all read Unknown, and none of them reads Passed.
     assert "Unknown" in page.badge_labels()
     assert UNRECOGNISED_STATUS not in page.normalized_text
     assert UNRECOGNISED_STATUS not in page.html
     unknown_badges = [badge for badge in page.badges if badge.label == "Unknown"]
-    assert len(unknown_badges) == 1
-    assert unknown_badges[0].status == "unknown"
+    assert len(unknown_badges) == 4
+    assert {badge.status for badge in unknown_badges} == {"unknown"}
+    assert "Passed" not in page.badge_labels()
+    # The briefs are what paint the rows, and the measured defect was their
+    # sequence reading [passed, passed, passed, unknown] from the feature down
+    # to the step.  Every one of the four is the honest token now.
+    assert brief_statuses(page) == ("unknown",) * 4
+    assert container_statuses(page, "feature") == ("unknown",)
+    assert container_statuses(page, "element") == ("unknown",)
+    assert container_statuses(page, "steps") == ("unknown",)
 
 
 def test_worst_status_folds_by_severity() -> None:
@@ -2536,6 +3450,575 @@ def test_tag_rows_agree_cell_for_cell_with_the_tag_page(
     cells = f"{SMOKE_TAG} 5 2 1 0 0 8 2 2 4 20.477 Failed"
     assert cells in overview
     assert cells in tag_page
+
+
+# --------------------------------------------------------------------------
+# The normalized model is what these pages read
+#
+# ``app/reporting/aggregation.py`` is this port's single normalised result
+# model, which AAP 0.3.4 requires of both HTML artifacts and the HTTP views
+# ("Both HTML outputs and the HTTP views render over one normalized result
+# model ... so no view contradicts an artifact") and 0.4.2 repeats as a
+# cross-file invariant.  The templates under ``app/templates/pretty/`` used to
+# grade a run for themselves beside it, and the two gradings disagreed in three
+# measurable ways:
+#
+# * A scenario whose steps all passed and whose AFTER-HOOK FAILED rendered a
+#   passed brief with a Passed badge on its feature page, on every tag page and
+#   on the failures page, beside a statistics row that counted it as a failed
+#   scenario.  The local fold read steps only;
+#   ``Element.calculateElementStatus`` in ``net.masterthought:cucumber-
+#   reporting:5.6.1`` folds ``stepsStatus`` with ``beforeStatus`` and
+#   ``afterStatus``.
+# * A local precedence tuple naming seven statuses answered ``passed`` for an
+#   element whose only step carried a status the model never produced, so a
+#   feature page read ``[passed, passed, passed, unknown]`` from the feature
+#   brief down to the step.  The authority ranks ``unknown`` between
+#   ``untested`` and ``passed`` for exactly that reason.
+# * ``contains_failure`` selected the failures overview's rows by a literal
+#   ``failed`` token, while 5.6.1 lists every element for which
+#   ``Status.isPassed()`` is false -- so an undefined, pending, skipped,
+#   ambiguous, untested or unknown scenario vanished from the page that exists
+#   to show what did not pass, while every statistics table in the same tree
+#   counted it as a failed scenario.
+#
+# The templates now read the decorated values ``decorate_feature`` records and,
+# where a mapping carries none, call the authority through the ``model_``
+# globals ``build_environment`` installs.  These tests assert that contract from
+# both directions: the rendered pages for inputs that used to be graded wrongly,
+# and a structural assertion over the template sources that no second
+# implementation has come back.
+# --------------------------------------------------------------------------
+
+#: The templates of ``app/templates/pretty/`` that render the element tree, and
+#: therefore the ones that answer a status, verdict or duration question.
+ELEMENT_TREE_TEMPLATES: Final[tuple[str, ...]] = (
+    "_element_tree.html",
+    "feature.html",
+    "overview_failures.html",
+    "tag.html",
+)
+
+#: The globals :func:`app.reporting.pretty_reports.build_environment` installs,
+#: paired with the authority's own object each one must BE rather than merely
+#: agree with.  Identity is the assertion: a copy of a fold is what this whole
+#: section exists to keep out of the render path.
+MODEL_GLOBAL_IDENTITIES: Final[tuple[tuple[str, Any], ...]] = (
+    ("model_element_status", aggregation.element_status),
+    ("model_element_steps_status", aggregation.element_steps_status),
+    ("model_element_verdict", aggregation.element_verdict),
+    ("model_feature_status", aggregation.feature_status),
+    ("model_feature_verdict", aggregation.feature_verdict),
+    ("model_unit_status", aggregation.unit_status),
+    ("model_unit_verdict", aggregation.unit_verdict),
+    ("model_element_duration_ns", aggregation.element_duration_ns),
+    ("model_status_token", aggregation.status_token),
+    ("model_is_passed_token", aggregation.is_passed_token),
+    ("model_worst_status", aggregation.worst_status),
+    ("model_stats_row", aggregation.stats_row),
+    ("model_status_precedence", aggregation.STATUS_PRECEDENCE),
+    ("model_status_reading_order", aggregation.STATUS_READING_ORDER),
+)
+
+#: A Jinja comment, in either whitespace-control spelling.  Stripped before the
+#: structural assertion, so the prose that DESCRIBES a deleted fold cannot be
+#: mistaken for the fold.
+JINJA_COMMENT: Final[re.Pattern[str]] = re.compile(r"\{#.*?#\}", re.S)
+
+#: Two quoted status tokens side by side, which is what a precedence tuple or a
+#: severity list looks like in a template.
+ADJACENT_STATUS_LITERALS: Final[re.Pattern[str]] = re.compile(
+    r"'(?:passed|failed|skipped|pending|undefined|untested|ambiguous|unknown)'"
+    r"\s*,\s*"
+    r"'(?:passed|failed|skipped|pending|undefined|untested|ambiguous|unknown)'"
+)
+
+#: A status compared against a literal token, which is how a template counted
+#: statuses into columns for itself.
+STATUS_COMPARISON: Final[re.Pattern[str]] = re.compile(
+    r"[=!]=\s*'(?:passed|failed|skipped|pending|undefined|untested|ambiguous|unknown)'"
+)
+
+#: A status appended to a list, which is the signature of a fold loop.
+STATUS_ACCUMULATION: Final[re.Pattern[str]] = re.compile(r"append\([^)]*status")
+
+#: A duration accumulated into a running total.
+DURATION_ACCUMULATION: Final[re.Pattern[str]] = re.compile(r"duration\w* = [^%]*\+")
+
+#: One filter button of a status filter group, as its token and its label.
+FILTER_BUTTON: Final[re.Pattern[str]] = re.compile(
+    r'data-report-filter="([^"]+)"[^>]*>\s*([^<]*?)\s*</button>'
+)
+
+
+def pretty_template_code() -> dict[str, str]:
+    """Return every template of the Pretty folder as comment-free source.
+
+    Jinja comments are removed and whitespace collapsed, so the structural
+    assertions below are about what the engine executes rather than about the
+    prose recording what was deleted.
+
+    :returns: Template filename to its executable source, whitespace
+        collapsed.
+    """
+    folder = paths.templates_dir() / "pretty"
+    sources = {
+        path.name: re.sub(r"\s+", " ", JINJA_COMMENT.sub(" ", path.read_text(encoding="utf-8")))
+        for path in sorted(folder.glob("*.html"))
+    }
+    assert sources, f"no template found under {folder}"
+    return sources
+
+
+def with_after_hook(
+    element: dict[str, Any],
+    status: str,
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    """Return ``element`` carrying one after-hook result.
+
+    The after-hook is where this port records a teardown's outcome and the
+    failure screenshot, and it is the half of an element's status that the
+    templates used to ignore.
+
+    :param element: An element from :func:`build_element`.
+    :param status: The hook's raw ``result.status``.
+    :param error_message: The hook's failure text, omitted when ``None``.
+    :returns: A copy carrying an ``after`` list of one entry.
+    """
+    result: dict[str, Any] = {"status": status}
+    if error_message is not None:
+        result["error_message"] = error_message
+    hooked = dict(element)
+    hooked["after"] = [{"match": {"location": "features/environment.py:1"}, "result": result}]
+    return hooked
+
+
+def hook_failure_document() -> dict[str, Any]:
+    """A document whose only scenario passed every step and failed its teardown.
+
+    One feature, tagged so that a tag page exists for the same scenario, and
+    one scenario: two passing steps and a failed after-hook.  Every surface of
+    the tree has to report that scenario as a failure, because the authority's
+    verdict for it is not a pass and the statistics row beside it counts it as
+    a failed scenario.
+
+    :returns: The document.
+    """
+    scenario = build_element(
+        HOOK_FAILURE_SCENARIO,
+        (
+            build_step("acts", "passed", duration=3_000_000_000),
+            build_step("asserts", "passed", duration=1_500_000_000),
+        ),
+    )
+    return build_document(
+        build_feature(
+            "HookFailure.feature",
+            "Teardown failure",
+            (with_after_hook(scenario, "failed", error_message="teardown boom"),),
+            tags=(SMOKE_TAG,),
+        )
+    )
+
+
+#: The scenario name :func:`hook_failure_document` carries, looked for on three
+#: pages.
+HOOK_FAILURE_SCENARIO: Final[str] = "a scenario whose teardown failed"
+
+#: The whole statistics row :func:`hook_failure_document` produces on its
+#: feature page, cell by cell in the table's own column order: two passed
+#: steps, nothing in the other four columns, two steps in total, ZERO passed
+#: and ONE FAILED scenario of one, 4.500 seconds of step time -- the hook's
+#: own time deliberately excluded -- and the binary verdict.
+HOOK_FAILURE_ROW: Final[str] = "Teardown failure 2 0 0 0 0 2 0 1 1 4.500 Failed"
+
+#: The same figures on the tag page, under the tag's own key cell.
+HOOK_FAILURE_TAG_ROW: Final[str] = f"{SMOKE_TAG} 2 0 0 0 0 2 0 1 1 4.500 Failed"
+
+#: The statuses :func:`every_status_document` drives, in the document order it
+#: writes them.  ``passed`` leads so that the one scenario which must NOT reach
+#: the failures overview is in the same render as the seven that must.
+EVERY_STATUS_SEQUENCE: Final[tuple[str, ...]] = (
+    "passed",
+    "failed",
+    "undefined",
+    "pending",
+    "skipped",
+    "untested",
+    "ambiguous",
+    UNRECOGNISED_STATUS,
+)
+
+#: What each of those scenarios reads as once the authority has graded it: the
+#: unrecognised status folds to the ``unknown`` fallback and every other token
+#: is its own.
+EVERY_STATUS_TOKENS: Final[tuple[str, ...]] = tuple(
+    "unknown" if status == UNRECOGNISED_STATUS else status
+    for status in EVERY_STATUS_SEQUENCE
+)
+
+
+def scenario_name_for(status: str) -> str:
+    """Return the scenario name :func:`every_status_document` gives ``status``."""
+    return f"the {status} scenario"
+
+
+def every_status_document() -> dict[str, Any]:
+    """One feature, one scenario per status, each named for its status.
+
+    The input the failures overview's selection rule is asserted against:
+    every reading 5.6.1 calls not-passed, plus the one it calls passed.
+
+    :returns: The document.
+    """
+    return build_document(
+        build_feature(
+            "EveryStatus.feature",
+            "Every reading",
+            tuple(
+                build_element(
+                    scenario_name_for(status),
+                    (build_step(f"a {status} step", status, duration=1_000_000),),
+                    element_id=f"every-status;{index}",
+                    line=10 + index,
+                )
+                for index, status in enumerate(EVERY_STATUS_SEQUENCE)
+            ),
+            tags=(SMOKE_TAG,),
+        )
+    )
+
+
+def background_failure_document() -> dict[str, Any]:
+    """A document whose Background failed and whose scenario therefore skipped.
+
+    The element shape is the measured one -- a Cucumber-JVM probe emits the
+    Background's failed step and the scenario's own steps ``skipped`` -- so
+    each brief keeps its own reading while the scenario UNIT reads failed,
+    which is what selects it here, counts it in the statistics tables and puts
+    it in the rerun manifest.
+
+    :returns: The document.
+    """
+    return build_document(
+        build_feature(
+            "BackgroundFailure.feature",
+            "Background failure",
+            (
+                build_element(
+                    BACKGROUND_FAILURE_NAME,
+                    (
+                        build_step(
+                            "logs in",
+                            "failed",
+                            duration=2_000_000_000,
+                            error_message="setup boom",
+                        ),
+                    ),
+                    element_type="background",
+                    keyword="Background",
+                ),
+                build_element(
+                    BACKGROUND_FAILURE_SCENARIO,
+                    (build_step("acts", "skipped"),),
+                ),
+            ),
+            tags=(SMOKE_TAG,),
+        )
+    )
+
+
+#: The two element names :func:`background_failure_document` carries.
+BACKGROUND_FAILURE_NAME: Final[str] = "the background that failed"
+BACKGROUND_FAILURE_SCENARIO: Final[str] = "the scenario behind it"
+
+
+def container_statuses(page: ParsedPage, class_token: str) -> tuple[str, ...]:
+    """Return the status hook of every element-tree container of one kind.
+
+    :param page: A parsed page.
+    :param class_token: ``"feature"``, ``"element"`` or ``"steps"`` -- the bare
+        generator class the container carries.
+    :returns: One status per container, in document order.
+    """
+    statuses: list[str] = []
+    for tag, attributes in page.elements:
+        if tag != "div" or class_token not in attributes.get("class", "").split():
+            continue
+        for hook in STATUS_HOOK_ATTRIBUTES:
+            if hook in attributes:
+                statuses.append(attributes[hook])
+                break
+    return tuple(statuses)
+
+
+def brief_statuses(page: ParsedPage) -> tuple[str, ...]:
+    """Return the status class of every ``div.brief`` the page carries.
+
+    The brief is what paints a row, so this is the colour a reader sees, read
+    from the class the generator's own vocabulary puts it in.
+
+    :param page: A parsed page.
+    :returns: One status token per brief, in document order.
+    """
+    briefs: list[str] = []
+    for tag, attributes in page.elements:
+        classes = attributes.get("class", "").split()
+        if tag != "div" or "brief" not in classes:
+            continue
+        tokens = [token for token in classes if token in STATUS_LABELS]
+        assert len(tokens) == 1, f"{page.name}: brief carries {tokens}"
+        briefs.append(tokens[0])
+    return tuple(briefs)
+
+
+def filter_buttons(page: ParsedPage) -> tuple[tuple[str, str], ...]:
+    """Return the page's status filter buttons as ``(token, label)`` pairs.
+
+    :param page: A parsed page.
+    :returns: The buttons in document order, the reserved ``all`` control
+        included.
+    """
+    return tuple(FILTER_BUTTON.findall(page.html))
+
+
+def failures_overview_of(document: Any, environment: Environment) -> ParsedPage:
+    """Render ``document`` and return its parsed failures overview.
+
+    :param document: The merged result document.
+    :param environment: The template environment to render through.
+    :returns: The parsed ``overview-failures.html``.
+    """
+    pages = pretty_reports.render_pretty_pages(document, environment=environment)
+    return parse_page(OVERVIEW_PAGES[3], pages[OVERVIEW_PAGES[3]])
+
+
+def test_the_writer_registers_the_aggregation_authority_on_its_environment(
+    pretty_env: Environment,
+) -> None:
+    """Every model global IS the authority's own object, not a copy of it.
+
+    The templates answer a status, verdict, duration or statistics question by
+    calling one of these, so identity is what makes "one normalized result
+    model" checkable rather than hopeful: a second implementation installed
+    here would satisfy every rendering assertion in this module while
+    re-creating exactly the divergence they were written for.
+    """
+    assert set(pretty_reports.MODEL_GLOBALS) == {
+        name for name, _ in MODEL_GLOBAL_IDENTITIES
+    }
+    for name, authority in MODEL_GLOBAL_IDENTITIES:
+        assert pretty_reports.MODEL_GLOBALS[name] is authority, name
+        assert pretty_env.globals[name] is authority, name
+    # The link allowlist is still installed beside them, since both are what
+    # make this environment the only one that can render the folder.
+    assert pretty_env.globals["local_page_href"] is pretty_reports.local_page_href
+
+
+def test_a_failed_after_hook_reports_its_scenario_failed_on_every_page(
+    pretty_env: Environment,
+) -> None:
+    """A passing scenario with a failed teardown is a failure everywhere.
+
+    Its feature page, its tag page and the failures overview all badge it
+    failed, and the failures overview lists it, because the authority's
+    element status folds both hook groups exactly as
+    ``Element.calculateElementStatus`` does.  Its nested Steps group still
+    reads ``passed``: that brief answers for the steps -- the generator's
+    ``stepsStatus`` -- and the steps did pass, which is the distinction that
+    makes the page report what happened rather than flattening it.
+    """
+    pages = pretty_reports.render_pretty_pages(
+        hook_failure_document(), environment=pretty_env
+    )
+    feature_page = parse_page(
+        "feature",
+        pages[pretty_reports.feature_page_name(f"{FEATURE_URI_PREFIX}HookFailure.feature")],
+    )
+    tag_page = parse_page(SMOKE_TAG_PAGE, pages[SMOKE_TAG_PAGE])
+    failures = parse_page(OVERVIEW_PAGES[3], pages[OVERVIEW_PAGES[3]])
+
+    for page in (feature_page, tag_page, failures):
+        assert container_statuses(page, "element") == ("failed",), page.name
+        assert container_statuses(page, "steps") == ("passed",), page.name
+        assert HOOK_FAILURE_SCENARIO in page.normalized_text, page.name
+
+    # The feature reads failed too, and its brief order is
+    # feature, element, steps, step, step, hook: the element is failed while
+    # its steps are not, which is the whole of the hook's contribution, and
+    # the failed hook's own brief closes the element -- the one node on the
+    # page that accounts for the red scenario above the green steps.
+    assert container_statuses(feature_page, "feature") == ("failed",)
+    assert brief_statuses(feature_page) == (
+        "failed",
+        "failed",
+        "passed",
+        "passed",
+        "passed",
+        "failed",
+    )
+
+    # And the statistics row on the same page agrees, cell for cell: two
+    # passing steps, no failed step, and ONE FAILED SCENARIO of one -- the
+    # pair of numbers that used to stand beside a Passed badge.  The
+    # duration is the steps' 4.5 seconds, with the hook's time excluded.
+    assert HOOK_FAILURE_ROW in feature_page.normalized_text
+    assert HOOK_FAILURE_TAG_ROW in tag_page.normalized_text
+
+
+def test_the_failures_overview_lists_every_non_passed_scenario_unit(
+    pretty_env: Environment,
+) -> None:
+    """``Status.isPassed()`` being false is the rule, not a ``failed`` token.
+
+    Seven of the eight scenarios are not passes -- failed, undefined, pending,
+    skipped, untested, ambiguous and a status the model never produced -- and
+    every one of them belongs on the page that exists to show a reader what
+    did not pass, because every statistics table in the same tree already
+    counts it as a failed scenario (5.6.1's ``getFailedScenarios()`` is total
+    minus passed).  The passed scenario is the control: it must not be listed.
+    """
+    page = failures_overview_of(every_status_document(), pretty_env)
+    expected = tuple(token for token in EVERY_STATUS_TOKENS if token != "passed")
+
+    assert len(expected) == 7
+    assert container_statuses(page, "element") == expected
+    for status in EVERY_STATUS_SEQUENCE:
+        name = scenario_name_for(status)
+        if status == "passed":
+            assert name not in page.normalized_text
+        else:
+            assert name in page.normalized_text, name
+
+    # The filter offers one button per status actually present, in the
+    # authority's severity order and with 'unknown' named exactly once -- the
+    # order used to be that tuple plus a hand-appended ('unknown',), which
+    # named the token twice the moment the authority took it into the order.
+    buttons = filter_buttons(page)
+    assert buttons[0] == ("all", f"All ({len(expected)})")
+    assert tuple(token for token, _ in buttons[1:]) == tuple(
+        token for token in aggregation.STATUS_PRECEDENCE if token in expected
+    )
+    assert [token for token, _ in buttons].count("unknown") == 1
+    # Each count equals the number of rows the script hides for that status.
+    for token, label in buttons[1:]:
+        assert label == f"{token.capitalize()} (1)", token
+
+
+def test_a_background_only_failure_lists_both_rows_with_the_background_present(
+    pretty_env: Environment,
+) -> None:
+    """The failure a reader came for has to be on the page.
+
+    A Background-only failure is ``background=failed`` with the scenario's own
+    steps ``skipped`` in ``target/cucumber.json``, and each brief keeps that
+    reading -- the Pretty pages and the JSON artifact describe one run.  What
+    the unit reading decides is SELECTION: the scenario is listed although its
+    own steps carry no failure, and its Background occurrence is listed
+    immediately above it, in model order, so the traceback is where the reader
+    looking at the scenario can see it.
+    """
+    page = failures_overview_of(background_failure_document(), pretty_env)
+
+    assert container_statuses(page, "element") == ("failed", "skipped")
+    assert BACKGROUND_FAILURE_NAME in page.normalized_text
+    assert BACKGROUND_FAILURE_SCENARIO in page.normalized_text
+    assert page.normalized_text.index(BACKGROUND_FAILURE_NAME) < page.normalized_text.index(
+        BACKGROUND_FAILURE_SCENARIO
+    )
+    assert "setup boom" in page.normalized_text
+    # Two filterable rows, two statuses, and the counts add up to them.
+    buttons = filter_buttons(page)
+    assert buttons[0] == ("all", "All (2)")
+    assert tuple(buttons[1:]) == (("failed", "Failed (1)"), ("skipped", "Skipped (1)"))
+
+
+def test_an_element_renders_the_duration_the_authority_recorded(
+    pretty_env: Environment,
+) -> None:
+    """The lead duration is the decorated ``duration_ns``, formatted once.
+
+    The span is compared against the formatting macro applied to the
+    authority's own recorded value, so the assertion covers the whole path --
+    which duration is summed, and how it is rendered -- without holding a
+    third implementation of either.  The failed after-hook of the document is
+    what makes it load-bearing: a hook's duration is never a step's, so an
+    element that ran 4.5 seconds of steps must not report the hook's time too.
+    """
+    document = hook_failure_document()
+    run = aggregation.normalize_run(document)
+    formatter = pretty_env.get_template("pretty/_macros.html").module
+    pages = pretty_reports.render_pretty_pages(document, environment=pretty_env)
+    feature_page = pages[
+        pretty_reports.feature_page_name(f"{FEATURE_URI_PREFIX}HookFailure.feature")
+    ]
+
+    elements = [
+        element
+        for feature in run.features
+        for element in feature["elements"]
+    ]
+    assert len(elements) == 1
+    for element in elements:
+        assert element["duration_ns"] == 4_500_000_000
+        assert str(formatter.duration_span(element["duration_ns"])) in feature_page
+
+    # The hook carries no duration key at all here; the assertion above is
+    # what proves the element's own figure is the sum of its steps and
+    # nothing else.
+    assert str(formatter.duration_span(4_500_000_000)) in feature_page
+
+    # And the READING is the decorated key rather than a sum the template
+    # performs, which only an element whose two answers differ can show: the
+    # macro is handed a mapping recording twelve seconds over a single
+    # one-nanosecond step, and it renders the recorded figure.
+    tree = pretty_env.get_template("pretty/_element_tree.html").module
+    recorded = str(
+        tree.element_block(
+            {
+                "type": SCENARIO_TYPE,
+                "keyword": "Scenario",
+                "name": "a decorated element",
+                "description": "",
+                "steps": [build_step("acts", "passed", duration=1)],
+                "status": "passed",
+                "steps_status": "passed",
+                "duration_ns": 12_000_000_000,
+            }
+        )
+    )
+    assert str(formatter.duration_span(12_000_000_000)) in recorded
+    assert str(formatter.duration_span(1)) not in recorded
+
+
+def test_no_pretty_template_folds_a_status_or_sums_a_duration() -> None:
+    """The structural half: no second implementation has come back.
+
+    Every rendering assertion above would still pass if a template reproduced
+    the authority's arithmetic correctly today, and that is exactly how the
+    two came to disagree in the first place -- so the sources themselves are
+    asserted.  Comments are stripped first, because the prose that records a
+    deleted fold is not the fold.
+    """
+    sources = pretty_template_code()
+
+    assert set(ELEMENT_TREE_TEMPLATES) <= set(sources)
+    for name, code in sources.items():
+        assert not ADJACENT_STATUS_LITERALS.search(code), f"{name}: status literal sequence"
+        assert "STATUS_PRECEDENCE = (" not in code, f"{name}: local precedence tuple"
+        assert "worst_token" not in code, f"{name}: local severity fold"
+        # Appending to the authority's order is what duplicated 'unknown' once
+        # that token joined it.
+        assert "STATUS_PRECEDENCE +" not in code, f"{name}: appends to the authority's order"
+
+    for name in ELEMENT_TREE_TEMPLATES:
+        code = sources[name]
+        assert not STATUS_COMPARISON.search(code), f"{name}: compares a status to a literal"
+        assert not STATUS_ACCUMULATION.search(code), f"{name}: collects statuses to fold"
+        assert not DURATION_ACCUMULATION.search(code), f"{name}: sums a duration"
+        # And the positive half: each one asks the authority.
+        assert "model_" in code, f"{name}: reads no model global"
 
 
 # --------------------------------------------------------------------------
@@ -2801,14 +4284,13 @@ def test_a_pinned_build_date_makes_a_dateless_document_deterministic(
 # --------------------------------------------------------------------------
 # A second render over a smaller document
 #
-# The writer used to overwrite its tree in place and delete nothing, so a
-# second render with fewer features left the earlier run's surplus detail
-# pages on disk; it now publishes a staging tree by rename, so the page set is
-# exactly the second document's.  The five assertions below were written to
-# hold on both sides of that change and still do: they are about the tree a
-# reader can reach and the references it carries, and the bound on the surplus
-# -- which the swap has since reduced to nothing -- is stated as a bound so
-# that it keeps describing the artifact rather than the mechanism.
+# The writer publishes a validated staging tree by rename, so a second render
+# replaces the published tree rather than overwriting parts of it: the page set
+# on disk is exactly the second document's, and a detail page whose feature or
+# tag has gone is gone with it.  The five assertions below hold the tree a
+# reader can reach to that contract -- the pages that exist, their content,
+# the asset census, every reference resolving, and nothing reachable that the
+# current document did not produce.
 # --------------------------------------------------------------------------
 
 
@@ -2852,7 +4334,7 @@ def test_second_render_leaves_no_stale_content_in_a_current_page(
 
     Compared byte for byte against a fresh render of the second document, so a
     page left over *in content* -- an overview still tallying the features that
-    went away -- fails here whether or not the surplus files were pruned.
+    went away -- fails here as loudly as a page left over as a file.
     """
     root, document, _first, second_pages = rerendered_tree
     expected = pretty_reports.render_pretty_pages(document, environment=pretty_env)
@@ -2887,9 +4369,10 @@ def test_second_render_leaves_no_dangling_reference_anywhere_in_the_tree(
 ) -> None:
     """(c) Every reference of every page in the tree still resolves to a file.
 
-    Every page, including any the second render did not produce: a surplus
-    page left behind must not be a broken one, because a reader who bookmarked
-    it still opens it.
+    The pages are read from disk rather than taken from the expected set, so a
+    reference that resolves only under an assumption about which pages the
+    tree holds cannot pass here: whatever is published is opened, parsed and
+    followed.
     """
     root, _document, _first, _second = rerendered_tree
     pages = read_tree_pages(root)
@@ -2905,12 +4388,13 @@ def test_second_render_leaves_no_dangling_reference_anywhere_in_the_tree(
 def test_second_render_overviews_reach_only_the_current_pages(
     rerendered_tree: tuple[Path, dict[str, Any], frozenset[str], frozenset[str]],
 ) -> None:
-    """(d) Nothing stale is reachable from the tree's entry point.
+    """(d) Nothing stale is reachable from anywhere in the tree.
 
-    The four overview pages are the navigation surface: what they link is what
-    a reader can get to.  Every detail page they name is one the second
-    document demanded, so a surplus file on disk is unreachable rather than
-    misleading.
+    The four overview pages are the navigation surface: what they link is
+    where a reader starts, and every detail page they name is one the current
+    document demanded.  The walk then widens to every page in the tree,
+    because a link out of this generation would be a route into another one
+    from whichever page carried it.
     """
     root, _document, _first, second_pages = rerendered_tree
     pages = read_tree_pages(root)
@@ -2927,50 +4411,40 @@ def test_second_render_overviews_reach_only_the_current_pages(
     for filename in ("Contact.feature", "Inventory.feature", "Sales.feature"):
         assert SUITE_FEATURE_PAGES[filename] not in reachable
 
-    # Tightened from the four overviews to every page in the tree, surplus
-    # pages included: a stale page must be unreachable from anywhere, not
-    # merely absent from the navigation surface.  A surplus page still linking
-    # its siblings would otherwise leave a reader a route into the previous
-    # run's results from a file the current run never wrote.
+    # Every page in the tree, not only the four overviews: each one is a page
+    # the current document produced, and each page destination it carries is
+    # another of them.  A tree in which both hold cannot take a reader to a
+    # page the current run did not write.
     for name, page in pages.items():
+        assert name in second_pages, f"{name} is a page this document did not ask for"
         for value in resolvable_references(page):
-            if not value.endswith(PAGE_SUFFIX):
-                continue
-            if name in second_pages:
-                assert value in second_pages, f"{name} links surplus {value}"
-            else:
-                assert (root / value).is_file(), f"surplus {name} links dead {value}"
+            if value.endswith(PAGE_SUFFIX):
+                assert value in second_pages, f"{name} links stale {value}"
 
 
-def test_second_render_adds_no_page_neither_render_produced(
+def test_second_render_publishes_exactly_the_second_page_set(
     rerendered_tree: tuple[Path, dict[str, Any], frozenset[str], frozenset[str]],
 ) -> None:
-    """(e) The surplus is bounded by what an earlier render itself wrote.
+    """(e) The published tree holds the second document's pages and no others.
 
-    Today the writer overwrites its tree in place and deletes nothing, so the
-    surplus here is the three feature pages the smaller document no longer
-    demands -- a strict subset of the first render's own page set.  Once the
-    staging-and-atomic-replace change lands in
-    ``app/reporting/pretty_reports.py`` the surplus becomes empty, and the
-    subset relation holds just as it does now: an empty set is a subset of
-    every set.  The assertion is written that way on purpose, so it gates the
-    property that matters in both worlds -- the tree never holds a page
-    neither render produced, and never a half-written one -- without pinning
-    today's behaviour as required or forbidding tomorrow's.
+    Set equality, in both directions at once: every page the second document
+    demands is there, and nothing else is -- the three feature pages the
+    smaller document no longer asks for are **absent**, not merely unlinked,
+    because publication replaces the tree rather than writing over parts of
+    it.
 
-    Every surplus page is also required to be a complete, parseable document,
-    because an unpruned tree must not contain a truncated one.
+    Every page on disk is also required to be a complete, parseable document,
+    which is the other half of "one complete generation or none": a published
+    tree may not hold a truncated page, whichever run wrote it.
     """
     root, _document, first_pages, second_pages = rerendered_tree
     pages = read_tree_pages(root)
     on_disk = frozenset(pages)
-    surplus = on_disk - second_pages
 
-    assert surplus <= first_pages
-    assert on_disk <= first_pages | second_pages
-    assert second_pages <= on_disk
+    assert on_disk == second_pages
+    assert not (first_pages - second_pages) & on_disk
 
-    for name in sorted(surplus):
+    for name in sorted(on_disk):
         page = pages[name]
         assert page.declarations == ("DOCTYPE html",), name
         assert page.title.strip(), name
@@ -2998,56 +4472,136 @@ def test_second_render_adds_no_page_neither_render_produced(
 #
 # The last two need a page write to fail *inside the staging tree*, and the
 # staging tree is created by the call under test, so there is no path a test
-# can occupy beforehand -- ``_recover_interrupted_publication`` clears this
+# can occupy beforehand: ``_recover_interrupted_publication`` clears this
 # process's own scratch names on the way in, and a directory standing where a
 # published page belongs is now simply replaced by the swap.  The fault is
-# therefore injected at the writer's own ``open``: ``PageWriteFault`` below
-# shadows the module global, which is where Python resolves the name first, and
-# raises a genuine ``IsADirectoryError`` for one page and delegates every other
-# call to the real builtin.  That is the same errno the previous mechanism
-# produced, raised at the same point in the loop, and ``monkeypatch`` removes
-# the shadow again when the test ends.
+# therefore injected at the page write itself, which is no longer a builtin
+# ``open`` on a path but ``ArtifactDirectoryPublication.open`` on a name
+# relative to the verified staging descriptor.  ``PublicationProbe`` below
+# wraps the real publication and stands in for
+# ``begin_directory_publication``, the module global the writer resolves first,
+# so the object under test is the genuine one for every step except the page
+# whose write must fail -- where it raises a genuine ``IsADirectoryError``,
+# which is the same errno the previous mechanism produced, at the same point in
+# the loop.  It is also the only seam from which a *probe* can run inside a
+# publication, which is what the staging-visibility and planted-link tests
+# below need.  ``monkeypatch`` removes the stand-in when the test ends.
 # --------------------------------------------------------------------------
 
 
-class PageWriteFault:
-    """A stand-in for :func:`open` that fails on one page and no other file.
+class PublicationProbe:
+    """A publication that watches the page writes, and can break one.
 
-    Installed over ``pretty_reports.open`` for the two I/O-fault tests.  Every
-    call it does not target is delegated to the real builtin, so the asset copy
-    and the pages before the target one are written exactly as they would be
-    otherwise and the fault lands mid-loop rather than at the start of it.
+    Wraps a real :class:`app.utils.paths.ArtifactDirectoryPublication` and
+    delegates everything to it, so the publication under test is the genuine
+    one -- the same verified parent descriptor, the same staging descriptor,
+    the same renames and the same scratch removal.  Only
+    :meth:`open` is intercepted, which is where the writer writes a page, and
+    that gives a test two things it can get nowhere else:
+
+    * a **page write that fails** deterministically, mid-loop, with a real
+      errno, for the two I/O-fault tests.  The asset copy goes through
+      :meth:`~app.utils.paths.ArtifactDirectoryPublication.copy_in` on the
+      wrapped object, so it reaches the real ``open`` directly and
+      :attr:`attempts` counts page writes only; and
+    * a **hook that runs inside the publication**, while the staging tree
+      exists and before the swap, for the tests that assert what is reachable
+      at that instant and for the one that plants a link inside staging.
+
+    Installed over ``pretty_reports.begin_directory_publication`` -- the module
+    global the writer resolves -- by :func:`probe_publication`.
     """
 
-    def __init__(self, page_name: str) -> None:
-        """Record which page must fail, and how many writes were attempted.
+    def __init__(
+        self,
+        publication: paths.ArtifactDirectoryPublication,
+        *,
+        fail_on: str | None = None,
+        before_write: Any = None,
+    ) -> None:
+        """Wrap ``publication``.
 
-        :param page_name: The filename whose ``open`` raises.  Matched on the
-            path's last component, so it matches wherever the writer is
-            currently building -- the staging tree, whose name carries a
-            process id a test has no reason to reconstruct.
+        :param publication: The real publication every call is delegated to.
+        :param fail_on: Tree-relative name of the page whose write must raise,
+            or ``None`` for a probe that only observes.
+        :param before_write: Called as ``before_write(publication, name)``
+            before each page write, for a test that needs to observe or
+            disturb the staging tree from inside the publication.
         """
-        self.page_name = page_name
+        self._publication = publication
+        self.fail_on = fail_on
+        self.before_write = before_write
         self.attempts = 0
+        self.written: list[str] = []
 
-    def __call__(self, file: Any, *args: Any, **kwargs: Any) -> Any:
-        """Open ``file``, unless it is the page this instance fails on.
+    def __getattr__(self, name: str) -> Any:
+        """Delegate every attribute this class does not define.
 
-        :param file: The path the writer is opening.
-        :param args: Positional arguments for the real :func:`open`.
-        :param kwargs: Keyword arguments for the real :func:`open`.
-        :returns: Whatever the real :func:`open` returns.
-        :raises IsADirectoryError: When ``file`` names the target page.  The
-            errno is the real one, so the writer sees an ordinary
+        :param name: The attribute name.
+        :returns: The wrapped publication's attribute.
+        """
+        return getattr(self._publication, name)
+
+    def __enter__(self) -> "PublicationProbe":
+        """Enter the wrapped publication and return this probe."""
+        self._publication.__enter__()
+        return self
+
+    def __exit__(self, *exception: object) -> None:
+        """Release the wrapped publication's descriptors."""
+        self._publication.__exit__(*exception)
+
+    def open(self, relative_name: str, **kwargs: Any) -> Any:
+        """Open a page in the staging tree, unless it is the one that fails.
+
+        :param relative_name: Tree-relative name of the page.
+        :param kwargs: Keyword arguments for the real method.
+        :returns: Whatever the real method returns.
+        :raises IsADirectoryError: When ``relative_name`` is :attr:`fail_on`.
+            The errno is the real one, so the writer sees an ordinary
             :class:`OSError` and cannot distinguish this from a filesystem
             that genuinely refused the write.
         """
         self.attempts += 1
-        if Path(file).name == self.page_name:
+        if self.before_write is not None:
+            self.before_write(self._publication, relative_name)
+        if relative_name == self.fail_on:
             raise IsADirectoryError(
-                errno.EISDIR, os.strerror(errno.EISDIR), str(file)
+                errno.EISDIR,
+                os.strerror(errno.EISDIR),
+                str(self._publication.staging / relative_name),
             )
-        return open(file, *args, **kwargs)
+        self.written.append(relative_name)
+        return self._publication.open(relative_name, **kwargs)
+
+
+def probe_publication(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fail_on: str | None = None,
+    before_write: Any = None,
+) -> list[PublicationProbe]:
+    """Make the writer publish through a :class:`PublicationProbe`.
+
+    :param monkeypatch: pytest's patcher, which removes the stand-in again.
+    :param fail_on: Passed to the probe.
+    :param before_write: Passed to the probe.
+    :returns: A list the probes are appended to, in creation order, so a test
+        can assert on the one the call under test used.
+    """
+    probes: list[PublicationProbe] = []
+
+    def begin(final: Any, **kwargs: Any) -> PublicationProbe:
+        probe = PublicationProbe(
+            paths.begin_directory_publication(final, **kwargs),
+            fail_on=fail_on,
+            before_write=before_write,
+        )
+        probes.append(probe)
+        return probe
+
+    monkeypatch.setattr(pretty_reports, "begin_directory_publication", begin)
+    return probes
 
 
 def publication_scratch(final: Path) -> frozenset[str]:
@@ -3142,10 +4696,10 @@ def test_an_io_fault_part_way_through_publishes_nothing_at_all(
 
     The fault is raised on the last page the loop reaches, so every earlier
     page and all 22 assets had already been written into the staging tree --
-    which is precisely the state that used to become a half-published report.
-    Nothing of it reaches the destination: the published directory does not
-    exist, no page or asset file exists anywhere under the build output
-    directory, and neither scratch directory is left behind.
+    a tree one page short of complete, which is the state a publication must
+    not let out.  Nothing of it reaches the destination: the published
+    directory does not exist, no page or asset file exists anywhere under the
+    build output directory, and neither scratch directory is left behind.
 
     The fault itself still propagates.  Producing this artifact is the writer's
     contract with the run's exit table, whose writer-failure class names the
@@ -3159,8 +4713,7 @@ def test_an_io_fault_part_way_through_publishes_nothing_at_all(
     assert tuple(expected)[-1] == SMOKE_TAG_PAGE, (
         "the fault must land on the last page of the loop"
     )
-    fault = PageWriteFault(SMOKE_TAG_PAGE)
-    monkeypatch.setattr(pretty_reports, "open", fault, raising=False)
+    probes = probe_publication(monkeypatch, fail_on=SMOKE_TAG_PAGE)
 
     with pytest.raises(IsADirectoryError):
         pretty_reports.write_pretty_reports(
@@ -3169,7 +4722,11 @@ def test_an_io_fault_part_way_through_publishes_nothing_at_all(
 
     # One open per page, so the fault really was reached at the end of a loop
     # that had already written every other page rather than at the start of it.
+    # The asset copy does not appear in the count: it goes through the
+    # publication's own copy_in, which reaches the real open directly.
+    (fault,) = probes
     assert fault.attempts == len(expected)
+    assert fault.written == [name for name in expected if name != SMOKE_TAG_PAGE]
     assert not final.exists()
     assert publication_scratch(final) == frozenset()
     assert [
@@ -3191,10 +4748,9 @@ def test_an_io_fault_leaves_a_previous_complete_tree_byte_for_byte(
     completely, a later publication failed part-way, and a reader now opens
     what is there.  What is there is the earlier generation **in full** -- every
     page and every asset byte-identical, the whole file set unchanged -- rather
-    than a mixture of two runs.  That is stronger than the per-page claim this
-    test could make before the swap landed, and it is the claim the artifact
-    contract actually needs: a reader cannot tell which pages a failed run
-    happened to reach.
+    than a mixture of two runs.  The claim is made over the whole tree rather
+    than page by page, which is what the artifact contract needs: a reader
+    cannot tell which pages a failed run happened to reach.
 
     The fault is injected as in the test above, on the last page of the loop,
     so the failing publication had a complete staging tree in hand and still
@@ -3211,8 +4767,7 @@ def test_an_io_fault_leaves_a_previous_complete_tree_byte_for_byte(
 
     # Same document, so the second publication would have written identical
     # bytes had it completed; the fault is the whole of what makes it fail.
-    fault = PageWriteFault(SMOKE_TAG_PAGE)
-    monkeypatch.setattr(pretty_reports, "open", fault, raising=False)
+    probe_publication(monkeypatch, fail_on=SMOKE_TAG_PAGE)
 
     with pytest.raises(IsADirectoryError):
         pretty_reports.write_pretty_reports(
@@ -3241,8 +4796,9 @@ def test_a_missing_page_linked_asset_is_reported_as_a_writer_failure(
     (incomplete / "css" / "cucumber.css").write_bytes(b"/* partial install */\n")
     monkeypatch.setattr(pretty_reports, "vendor_dir", lambda: incomplete)
 
-    with pytest.raises(FileNotFoundError) as failure:
-        pretty_reports.copy_pretty_assets(tmp_path / "broken-tree")
+    with staged_publication(tmp_path / "broken-tree") as publication:
+        with pytest.raises(FileNotFoundError) as failure:
+            pretty_reports.copy_pretty_assets(publication)
 
     message = str(failure.value)
     assert "css/bootstrap.min.css" in message
@@ -3259,14 +4815,13 @@ def test_a_font_that_was_not_copied_is_a_writer_failure_like_any_other(
 ) -> None:
     """A missing icon font fails the artifact; it does not merely warn.
 
-    A font is requested from a stylesheet rather than from a page, which used
-    to be the argument for reporting the gap and writing the tree anyway.  It
-    is the wrong conclusion, and the writer no longer draws it: the stylesheet
-    doing the requesting is a file this writer itself copies into the tree, so
-    a missing font is the writer publishing a reference to something it knows
-    is not there -- a dangling reference in a published artifact, which is the
-    one thing an offline report cannot survive.  All eleven fonts are therefore
-    as mandatory as the page-linked assets, and the failure names every asset
+    A font is requested from a stylesheet rather than from a page, and that
+    makes no difference to the outcome: the stylesheet doing the requesting is
+    a file this writer itself copies into the tree, so a missing font is the
+    writer publishing a reference to something it knows is not there -- a
+    dangling reference in a published artifact, which is the one thing an
+    offline report cannot survive.  All eleven fonts are therefore as
+    mandatory as the page-linked assets, and the failure names every asset
     that would have dangled so the cause is in the log rather than in a
     reader's browser console.
 
@@ -3284,12 +4839,17 @@ def test_a_font_that_was_not_copied_is_a_writer_failure_like_any_other(
         target.write_bytes(b"/* stand-in */\n")
     monkeypatch.setattr(pretty_reports, "vendor_dir", lambda: partial)
 
-    root = tmp_path / "fontless-tree"
-    with pytest.raises(FileNotFoundError) as failure:
-        pretty_reports.copy_pretty_assets(root)
+    with staged_publication(tmp_path / "fontless-tree") as publication:
+        with pytest.raises(FileNotFoundError) as failure:
+            pretty_reports.copy_pretty_assets(publication)
+        staging = publication.staging
 
     message = str(failure.value)
-    assert str(root) in message
+    # The tree the check was made over is the staging tree, and the message
+    # names it: the assets are verified where they were written, before
+    # anything is renamed into place, which is why nothing dangling can reach
+    # the published name.
+    assert str(staging) in message
     # Every font is named, not just the first one found missing: a broken
     # installation is diagnosed once rather than one file per attempt.
     for name in pretty_reports.VENDORED_FONT_ASSETS:
@@ -3300,7 +4860,447 @@ def test_a_font_that_was_not_copied_is_a_writer_failure_like_any_other(
         assert name not in message, name
     # And the tree that would have dangled is not a tree anyone can publish:
     # no font reached it, which is exactly what the failure is about.
-    assert not any(name.startswith("fonts/") for name in asset_files(root))
+    assert not any(name.startswith("fonts/") for name in asset_files(staging))
+
+
+# --------------------------------------------------------------------------
+# Fan-out budgets
+#
+# The page set is a function of the result document: one page per feature, one
+# per distinct tag, and every failure and screenshot repeated on each page that
+# reaches it.  The document's own schema bounds one level at a time -- 1000
+# features, 100 tags per level, 10,000 elements per feature, 250,000 nodes --
+# which leaves room for a document that is small and entirely valid to ask for
+# a tree orders of magnitude larger than itself.  ``MAX_PRETTY_TAGS``,
+# ``MAX_PRETTY_DETAIL_PAGES`` and ``MAX_PRETTY_OUTPUT_BYTES`` bound that, and
+# the writer refuses rather than truncating: a truncated report omits results
+# silently, while a refusal is the exit contract's writer-failure class with
+# the previously published tree left intact.
+#
+# The declared budgets are generous by design, so the tests that drive a
+# refusal scale the budget down rather than scaling the document up: a document
+# at the real tag cap renders a thousand pages and tens of megabytes, which is
+# the amplification being bounded and not a fixture worth building.  The first
+# test below is the one that holds the declared numbers themselves to this
+# suite's own scale.
+# --------------------------------------------------------------------------
+
+
+def suite_tag_names() -> frozenset[str]:
+    """Every tag this suite's feature files declare, read from disk.
+
+    Tag lines are the lines whose first non-blank character is ``@``; a tag
+    inside a step name or a data table is not a tag.  The directory comes from
+    ``app.utils.paths`` rather than from a literal, as everywhere else here.
+
+    :returns: The distinct tag names, leading ``@`` included.
+    """
+    names: set[str] = set()
+    for path in sorted(paths.features_dir().glob("*.feature")):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("@"):
+                names.update(word for word in stripped.split() if word.startswith("@"))
+    return frozenset(names)
+
+
+def tagged_document(tag_count: int, feature_count: int = 1) -> dict[str, Any]:
+    """Build a document carrying ``tag_count`` distinct tags in total.
+
+    The tags are element-level and are spread over the features in turn, so the
+    distinct-tag count and the feature count are independent -- which is what
+    lets the tag budget and the detail-page budget be driven one at a time.
+
+    :param tag_count: How many distinct tags the whole document carries.
+    :param feature_count: How many features carry them, each with one scenario.
+    :returns: The document, in the port's internal schema.
+    """
+    assert feature_count >= 1
+    names = [f"@t{index:05d}" for index in range(tag_count)]
+    features: list[dict[str, Any]] = []
+    for index in range(feature_count):
+        mine = names[index::feature_count]
+        features.append(
+            build_feature(
+                f"Budget{index}.feature",
+                f"Budget feature {index}",
+                (
+                    build_element(
+                        f"scenario {index}",
+                        (build_step("acts", "passed", duration=3),),
+                        tags=tuple({"name": name} for name in mine),
+                    ),
+                ),
+            )
+        )
+    return build_document(*features)
+
+
+def padded_png_bytes(payload_bytes: int) -> bytes:
+    """Return a structurally valid PNG carrying ``payload_bytes`` of padding.
+
+    The size has to come from a chunk the format defines rather than from
+    filler after the signature: ``app/reporting/screenshots.py`` walks every
+    chunk, CRC-checks it and holds the image data to the size IHDR declares,
+    so a signature followed by arbitrary bytes is discarded outright and would
+    leave a "large screenshot" that renders as nothing at all.  The padding
+    therefore rides in a ``tEXt`` chunk -- one of the safe, uncompressed
+    ancillary types that contract admits -- spliced in front of the 1x1
+    image's ``IEND``, whose own twelve bytes are the tail every well-formed
+    PNG ends with.
+
+    :param payload_bytes: How many bytes of padding to carry.
+    :returns: The PNG's bytes.
+    """
+    image = base64.b64decode(VALID_PNG_PAYLOAD)
+    assert image.startswith(PNG_SIGNATURE), "the base image is not a PNG"
+    body = PNG_TEXT_KEYWORD + b"\x00" + b"a" * max(payload_bytes, 0)
+    chunk = (
+        len(body).to_bytes(PNG_CHUNK_FIELD_BYTES, "big")
+        + PNG_TEXT_CHUNK
+        + body
+        + zlib.crc32(body, zlib.crc32(PNG_TEXT_CHUNK)).to_bytes(
+            PNG_CHUNK_FIELD_BYTES, "big"
+        )
+    )
+    return image[:-PNG_END_CHUNK_BYTES] + chunk + image[-PNG_END_CHUNK_BYTES:]
+
+
+def screenshot_document(payload_bytes: int, tag_count: int = 2) -> dict[str, Any]:
+    """Build a document whose one failing scenario carries a large screenshot.
+
+    The payload is a genuinely valid PNG, by way of
+    :func:`padded_png_bytes`, because the embedding contract drops anything
+    that is not -- and a discarded attachment renders nothing, which would
+    leave this fixture unable to reach the byte budget it exists to reach.
+    One screenshot is then repeated on its feature page, on the failures
+    overview and on every tag page its scenario's tags reach, which is the
+    amplification a page count cannot see.
+
+    :param payload_bytes: How many bytes of padding the screenshot carries.
+    :param tag_count: How many tags the scenario carries, and therefore how
+        many further copies of the payload the tree holds.
+    :returns: The document, in the port's internal schema.
+    """
+    payload = base64.b64encode(padded_png_bytes(payload_bytes)).decode("ascii")
+    element = build_element(
+        "a failing scenario",
+        (
+            build_step(
+                "acts",
+                "failed",
+                duration=3,
+                error_message="AssertionError: the step failed",
+            ),
+        ),
+        tags=tuple({"name": f"@s{index:03d}"} for index in range(tag_count)),
+    )
+    element["after"] = [
+        {
+            "result": {"status": "passed", "duration": 1},
+            "embeddings": [
+                {"mime_type": PNG_MIME_TYPE, "data": payload, "name": "a shot"}
+            ],
+        }
+    ]
+    return build_document(
+        build_feature("Crm.feature", "Testinium app CRM Module", (element,))
+    )
+
+
+def test_this_suite_is_far_inside_every_declared_fan_out_budget(
+    sample_tree: Path,
+) -> None:
+    """No legitimate run of this suite can reach a budget.
+
+    The budgets exist to refuse amplification, so they must be nowhere near the
+    artifact a real run publishes: this suite declares 18 tags across ten
+    feature files and its published tree is a fraction of a megabyte, each of
+    them orders of magnitude inside the corresponding budget.  The detail-page
+    budget is also checked against its own derivation -- every feature the
+    result schema admits (``MAX_FEATURES`` is 1000) plus every tag this writer
+    admits -- so a change to one of the two numbers cannot silently leave them
+    inconsistent.
+    """
+    tags = suite_tag_names()
+    feature_files = set(SUITE_FEATURE_PAGES)
+    published_bytes = sum(
+        (sample_tree / name).stat().st_size for name in page_files(sample_tree)
+    )
+
+    assert len(tags) == 18
+    assert len(feature_files) == 10
+    assert len(tags) * 50 < pretty_reports.MAX_PRETTY_TAGS
+    assert (len(tags) + len(feature_files)) * 50 < (
+        pretty_reports.MAX_PRETTY_DETAIL_PAGES
+    )
+    assert published_bytes * 1000 < pretty_reports.MAX_PRETTY_OUTPUT_BYTES
+    assert pretty_reports.MAX_PRETTY_DETAIL_PAGES == (
+        1000 + pretty_reports.MAX_PRETTY_TAGS
+    )
+
+
+def test_a_document_at_both_count_budgets_still_publishes(
+    tmp_artifact_root: Path, pretty_env: Environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A document exactly at the caps is a document the writer publishes.
+
+    The budgets refuse what is *over* them, so the boundary is asserted from
+    the inside as well: three distinct tags against a cap of three, and five
+    detail pages against a cap of five, produce the whole tree -- four
+    overviews, two feature pages and three tag pages -- with every page on
+    disk.
+    """
+    monkeypatch.setattr(pretty_reports, "MAX_PRETTY_TAGS", 3)
+    monkeypatch.setattr(pretty_reports, "MAX_PRETTY_DETAIL_PAGES", 5)
+    document = tagged_document(3, feature_count=2)
+
+    root = pretty_reports.write_pretty_reports(
+        document, base=tmp_artifact_root, environment=pretty_env
+    )
+
+    pages = page_files(root)
+    assert len(pages) == len(OVERVIEW_PAGES) + 5
+    assert frozenset(OVERVIEW_PAGES) < pages
+    assert len([name for name in pages if name.startswith(TAG_PAGE_PREFIX)]) == 3
+    assert len([name for name in pages if name.startswith(FEATURE_PAGE_PREFIX)]) == 2
+    assert asset_files(root) == EXPECTED_ASSETS
+    assert publication_scratch(root) == frozenset()
+
+
+def test_one_tag_over_the_budget_is_refused_before_any_directory_exists(
+    tmp_artifact_root: Path, pretty_env: Environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The distinct-tag budget, refused with nothing created and nothing left.
+
+    The count is known from the model alone, so the refusal happens before a
+    staging directory exists: ``begin_directory_publication`` -- the one
+    function this writer reaches the filesystem through, and the only thing
+    that creates a directory for it -- is never called, no path under the
+    checkout root is created, and the message names both the count and the
+    budget so the build log says which document was refused and by how much.
+    """
+    created: list[Any] = []
+    monkeypatch.setattr(pretty_reports, "MAX_PRETTY_TAGS", 3)
+    monkeypatch.setattr(
+        pretty_reports,
+        "begin_directory_publication",
+        lambda directory: created.append(directory),
+    )
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    document = tagged_document(4)
+
+    with pytest.raises(pretty_reports.PrettyReportBudgetError) as refusal:
+        pretty_reports.write_pretty_reports(
+            document, base=tmp_artifact_root, environment=pretty_env
+        )
+
+    message = str(refusal.value)
+    assert "4 distinct tags" in message
+    assert "more than the 3" in message
+    assert "MAX_PRETTY_TAGS" in message
+    assert created == []
+    assert not final.exists()
+    assert not paths.target_root(tmp_artifact_root).exists()
+    assert publication_scratch(final) == frozenset()
+
+
+def test_one_detail_page_over_the_budget_is_refused_before_any_directory_exists(
+    tmp_artifact_root: Path, pretty_env: Environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The detail-page budget, driven through features rather than tags.
+
+    A document can stay inside the tag budget and still ask for an unbounded
+    page set through its features, so the page budget is a separate limit and
+    is asserted separately: three features and two tags are five detail pages
+    against a cap of four.  The refusal is again free of filesystem effects.
+    """
+    created: list[Any] = []
+    monkeypatch.setattr(pretty_reports, "MAX_PRETTY_TAGS", 1000)
+    monkeypatch.setattr(pretty_reports, "MAX_PRETTY_DETAIL_PAGES", 4)
+    monkeypatch.setattr(
+        pretty_reports,
+        "begin_directory_publication",
+        lambda directory: created.append(directory),
+    )
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    document = tagged_document(2, feature_count=3)
+
+    with pytest.raises(pretty_reports.PrettyReportBudgetError) as refusal:
+        pretty_reports.write_pretty_reports(
+            document, base=tmp_artifact_root, environment=pretty_env
+        )
+
+    message = str(refusal.value)
+    assert "5 detail pages" in message
+    assert "more than the 4" in message
+    assert "MAX_PRETTY_DETAIL_PAGES" in message
+    assert created == []
+    assert not final.exists()
+    assert publication_scratch(final) == frozenset()
+
+
+def test_the_count_budgets_are_refused_by_the_pure_render_too(
+    pretty_env: Environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``render_pretty_pages`` refuses the same documents, yielding nothing.
+
+    The pure render is the other entry point, and a budget that only the
+    writing half applied would leave a caller free to build the whole tree in
+    memory.  The iterator raises on its first iteration, before a page is
+    rendered, so no page of an over-budget document exists even transiently.
+    """
+    monkeypatch.setattr(pretty_reports, "MAX_PRETTY_TAGS", 2)
+    document = tagged_document(3)
+
+    with pytest.raises(pretty_reports.PrettyReportBudgetError):
+        pretty_reports.render_pretty_pages(document, environment=pretty_env)
+
+    pages = pretty_reports.iter_pretty_pages(document, environment=pretty_env)
+    with pytest.raises(pretty_reports.PrettyReportBudgetError):
+        next(pages)
+
+
+def test_the_cumulative_byte_budget_refuses_before_the_filesystem_is_touched(
+    tmp_artifact_root: Path, pretty_env: Environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The amplification a page count cannot see: one screenshot, four copies.
+
+    One 256 KiB screenshot is repeated on the failures overview, on its
+    feature page and on both tag pages, taking a document of a few hundred
+    kilobytes past a budget of half a megabyte.  A page's size is not knowable
+    without rendering it, so the budget accumulates as the pages are produced
+    -- but it is applied by the page iterator, which the writer drains
+    **before** it derives a staging path, creates a directory, copies an asset
+    or opens a page for writing.  So the refusal costs the filesystem nothing
+    at all: this test asserts that by spying on the three functions that would
+    have touched it, and none of them is reached.
+
+    The same budget refuses the pure render, because both paths go through the
+    one iterator: a caller cannot obtain an over-budget page set at all, by any
+    route this module offers.
+    """
+    budget = 500_000
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    document = screenshot_document(256 * 1024)
+
+    # Measured with the budget still at its real value, through the unbounded
+    # inner generator, so the fixture is proven able to pass the budget
+    # without the measurement itself being refused.
+    page_names = [
+        name
+        for name, _html in pretty_reports._iter_rendered_pages(
+            document, environment=pretty_env
+        )
+    ]
+    produced = sum(
+        len(html.encode("utf-8"))
+        for _name, html in pretty_reports._iter_rendered_pages(
+            document, environment=pretty_env
+        )
+    )
+    assert produced > budget, "the document must be able to pass the budget"
+
+    monkeypatch.setattr(pretty_reports, "MAX_PRETTY_OUTPUT_BYTES", budget)
+
+    # The three doors to the filesystem, each recording instead of opening.
+    # The publication is the first of them and the only route to the other
+    # two: it verifies and holds the parent of the published tree, and the
+    # staging directory, the asset copy and every page write are made relative
+    # to the descriptor it hands back.
+    touched: list[str] = []
+    monkeypatch.setattr(
+        pretty_reports,
+        "begin_directory_publication",
+        lambda *args, **kwargs: touched.append("begin_directory_publication"),
+    )
+    monkeypatch.setattr(
+        pretty_reports,
+        "copy_pretty_assets",
+        lambda *args, **kwargs: touched.append("copy_pretty_assets"),
+    )
+    monkeypatch.setattr(
+        pretty_reports,
+        "open",
+        lambda *args, **kwargs: touched.append("open"),
+        raising=False,
+    )
+
+    with pytest.raises(pretty_reports.PrettyReportBudgetError) as refusal:
+        pretty_reports.write_pretty_reports(
+            document, base=tmp_artifact_root, environment=pretty_env
+        )
+
+    message = str(refusal.value)
+    assert f"more than the {budget}" in message
+    assert "MAX_PRETTY_OUTPUT_BYTES" in message
+    # The page the budget was reached at is named, so the log says where the
+    # tree grew rather than only that it did.
+    assert any(f"at {name}," in message for name in page_names), message
+
+    assert touched == [], f"the refusal reached the filesystem: {touched}"
+    assert not final.exists()
+    assert publication_scratch(final) == frozenset()
+    assert not paths.target_root(tmp_artifact_root).exists()
+
+    # The pure render is refused by the same budget, through the same iterator.
+    with pytest.raises(pretty_reports.PrettyReportBudgetError):
+        pretty_reports.render_pretty_pages(document, environment=pretty_env)
+    with pytest.raises(pretty_reports.PrettyReportBudgetError):
+        list(pretty_reports.iter_pretty_pages(document, environment=pretty_env))
+
+
+def test_the_byte_budget_leaves_a_previous_complete_tree_byte_for_byte(
+    sample_result_set: Any,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused publication does not degrade the report an earlier one wrote.
+
+    The budget is checked before the writer touches the filesystem, so a
+    refusal cannot reach the published tree even in principle.  This is the
+    guarantee the exit contract needs stated over the artifact a reader opens:
+    the previous complete generation is still there, byte for byte, rather
+    than a mixture of it and a run that was refused.
+    """
+    root = pretty_reports.write_pretty_reports(
+        sample_result_set, base=tmp_artifact_root, environment=pretty_env
+    )
+    before = tree_digests(root)
+
+    monkeypatch.setattr(pretty_reports, "MAX_PRETTY_OUTPUT_BYTES", 1)
+    with pytest.raises(pretty_reports.PrettyReportBudgetError):
+        pretty_reports.write_pretty_reports(
+            screenshot_document(1024), base=tmp_artifact_root, environment=pretty_env
+        )
+
+    assert tree_digests(root) == before
+    assert publication_scratch(root) == frozenset()
+
+
+def test_no_count_budget_can_suppress_the_four_overview_pages(
+    tmp_artifact_root: Path, pretty_env: Environment, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exit contract's four artifacts are not detail pages and are not capped.
+
+    A run that selected nothing still owes a reader all four overview pages, so
+    the count budgets are about detail pages only: with both of them at zero, an
+    empty document publishes exactly the four overviews and the whole asset set.
+    """
+    monkeypatch.setattr(pretty_reports, "MAX_PRETTY_TAGS", 0)
+    monkeypatch.setattr(pretty_reports, "MAX_PRETTY_DETAIL_PAGES", 0)
+
+    empty: dict[str, Any] = {"features": []}
+    pages = pretty_reports.render_pretty_pages(empty, environment=pretty_env)
+    root = pretty_reports.write_pretty_reports(
+        empty, base=tmp_artifact_root, environment=pretty_env
+    )
+
+    assert tuple(pages) == OVERVIEW_PAGES
+    assert page_files(root) == frozenset(OVERVIEW_PAGES)
+    assert asset_files(root) == EXPECTED_ASSETS
+
 
 
 def test_the_shared_partials_reference_nothing_outside_the_tree(
@@ -3327,7 +5327,11 @@ def test_the_shared_partials_reference_nothing_outside_the_tree(
     lightbox = pretty_env.get_template("partials/lightbox.html").module
 
     step = build_step("a step", "failed", 1, error_message="boom")
-    payload = base64.b64encode(b"\x89PNG\r\n\x1a\n synthetic").decode("ascii")
+    # A genuinely well-formed 1x1 PNG, not a signature with filler behind it:
+    # the lightbox partial renders nothing for a payload the inline-PNG
+    # contract in app/reporting/screenshots.py rejects, and the positive
+    # assertion at the end of this test would then pass vacuously.
+    payload = VALID_PNG_PAYLOAD
     embedding = {"mime_type": "image/png", "data": payload, "name": "a shot"}
     fragments: list[str] = [
         str(badges.status_badge(status, extra_classes=status))  # type: ignore[attr-defined]
@@ -3532,3 +5536,1029 @@ def test_an_unparseable_build_date_reaches_the_pages_it_dates(
 
     for name in OVERVIEW_PAGES:
         assert "not a timestamp" in parse_page(name, pages[name]).text, name
+
+
+# --------------------------------------------------------------------------
+# The publication's write authority
+#
+# The section the descriptor-bound publication added.  Everything above reads
+# the artifact; these read *how it came to be there*, because the two faults
+# this change closed are invisible in a finished tree:
+#
+# * a page, an asset or a whole cleanup resolved from a pathname after the
+#   check that approved it -- which let a link swapped in between redirect the
+#   write, and let a path-resolved scratch removal delete a prepared directory
+#   outside the artifact root; and
+# * generated output inheriting the process umask, so a report carrying a
+#   run's failure text and screenshots arrived group- and world-readable.
+#
+# Nothing here uses a permission trick to drive a failure -- this suite runs as
+# root in a container, where they do not work -- so each hostile case is a
+# link, a planted scratch directory or an injected errno.
+# --------------------------------------------------------------------------
+
+
+def test_every_published_file_and_directory_is_owner_only(
+    sample_tree: Path,
+) -> None:
+    """The whole tree is the owner's to read: ``0700`` dirs, ``0600`` files.
+
+    A page of this artifact carries the run's failure text, its step
+    arguments and its embedded screenshots of the application under test, and
+    the tree is written into a shared build agent's workspace.  Owner-only is
+    therefore the policy the path authority applies to everything it creates
+    (CWE-732/CWE-359), and this asserts it over every entry of a published
+    tree rather than over a sample: the four asset directories, all 22 assets
+    and all nine pages.
+
+    The sources are ``0644`` in the checkout, which is exactly why the asset
+    copy must not carry a source mode across -- see the test below, which
+    forces that case rather than relying on the checkout's own modes.
+    """
+    permissions = tree_permissions(sample_tree)
+
+    files = {
+        name: mode
+        for name, mode in permissions.items()
+        if sample_tree.joinpath(*name.split("/")).is_file()
+    }
+    directories = {
+        name: mode for name, mode in permissions.items() if name not in files
+    }
+
+    assert len(files) == len(SAMPLE_PAGES) + len(EXPECTED_ASSETS)
+    assert set(directories) == set(ASSET_SUBDIRECTORIES)
+    assert {mode for mode in files.values()} == {paths.ARTIFACT_FILE_MODE}
+    assert {mode for mode in directories.values()} == {paths.ARTIFACT_DIR_MODE}
+    # Stated a second way, against the mask the policy is defined by, so the
+    # claim survives a change to either constant: nothing in the tree grants
+    # the group or others anything at all.
+    for name, mode in permissions.items():
+        assert not mode & paths.ARTIFACT_MODE_MASK, (name, oct(mode))
+
+
+def test_the_published_tree_and_its_owned_parents_are_owner_only(
+    sample_tree: Path,
+) -> None:
+    """``target/``, ``target/cucumber/`` and the tree itself grant no one else.
+
+    The directories above the tree are created by the publication on the way
+    in, from the ``target`` component inward, so they are part of the same
+    policy -- a ``0755`` build output directory an earlier run or the operator
+    left behind is tightened through its own descriptor rather than accepted.
+    """
+    tree_parent = sample_tree.parent
+    build_output = tree_parent.parent
+
+    assert build_output.name == BUILD_OUTPUT_DIR_NAME
+    assert tree_parent.name == TREE_PARENT_DIR_NAME
+    for directory in (build_output, tree_parent, sample_tree):
+        assert permission_bits(directory) == paths.ARTIFACT_DIR_MODE, directory
+
+
+def test_a_group_readable_vendored_asset_is_published_owner_only(
+    tmp_path: Path,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``0644`` asset in the wheel does not arrive ``0644`` in the tree.
+
+    The regression this change exists to prevent, forced rather than observed:
+    the copy used to be :func:`shutil.copy2`, which copies the source's mode
+    along with its bytes, so every vendored file landed with whatever
+    permissions the installed package carried -- ``0644`` for a wheel, and
+    group- and world-readable in the published report.  The copy now takes the
+    bytes only and the destination is created ``0600`` like any page beside it.
+
+    Driven over a vendor directory whose files are deliberately ``0644`` and
+    ``0666``, so the source modes are the test's own rather than the
+    checkout's, and the sources are asserted unchanged afterwards: the copy
+    reads them and must not alter them either.
+    """
+    vendor = tmp_path / "group-readable-vendor"
+    shutil.copytree(paths.vendor_dir(), vendor)
+    sources = sorted(path for path in vendor.rglob("*") if path.is_file())
+    assert len(sources) == len(VENDORED_ASSETS)
+    for index, source in enumerate(sources):
+        source.chmod(0o666 if index == 0 else 0o644)
+    monkeypatch.setattr(pretty_reports, "vendor_dir", lambda: vendor)
+
+    root = pretty_reports.write_pretty_reports(
+        None, base=tmp_artifact_root, environment=pretty_env
+    )
+
+    assert asset_files(root) == EXPECTED_ASSETS
+    for name in sorted(EXPECTED_ASSETS):
+        copied = root.joinpath(*name.split("/"))
+        assert permission_bits(copied) == paths.ARTIFACT_FILE_MODE, name
+    # The bytes still travelled, which is the other half of the contract.
+    for name in sorted(VENDORED_ASSETS):
+        assert root.joinpath(*name.split("/")).read_bytes() == (
+            vendor.joinpath(*name.split("/")).read_bytes()
+        )
+    # And the package's own files were only read.
+    assert permission_bits(sources[0]) == 0o666
+    assert {permission_bits(source) for source in sources[1:]} == {0o644}
+
+
+def test_the_staging_tree_is_dot_prefixed_and_unreachable_while_it_exists(
+    sample_result_set: Any,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No partial generation is addressable, and none survives the call.
+
+    Asserted from *inside* the publication, at the first page write, which is
+    the only instant at which a partial tree exists at all: the staging
+    directory's name begins with a dot, which is what
+    :func:`app.utils.paths.resolve_artifact` rejects outright, so a page in it
+    cannot be requested over HTTP even while it is on disk -- and the published
+    name holds nothing yet, so a reader sees the viewer's ordinary 404 rather
+    than half a report.
+
+    After the swap the same request resolves to the overview page, and no
+    scratch directory is left beside the tree.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    observed: list[tuple[str, bool, object, object]] = []
+
+    def observe(publication: Any, relative_name: str) -> None:
+        observed.append(
+            (
+                publication.staging.name,
+                final.exists(),
+                paths.resolve_artifact(
+                    f"{TREE_PARENT_DIR_NAME}/{publication.staging.name}/"
+                    f"{OVERVIEW_INDEX}",
+                    tmp_artifact_root,
+                ),
+                paths.resolve_artifact(TREE_PARENT_DIR_NAME, tmp_artifact_root),
+            )
+        )
+
+    probe_publication(monkeypatch, before_write=observe)
+
+    root = pretty_reports.write_pretty_reports(
+        sample_result_set, base=tmp_artifact_root, environment=pretty_env
+    )
+
+    assert len(observed) == len(SAMPLE_PAGES)
+    staging_name, published_existed, staged_request, directory_request = observed[0]
+    assert staging_name.startswith(".")
+    assert paths.PUBLICATION_STAGING_INFIX in staging_name
+    assert not published_existed
+    assert staged_request is None
+    assert directory_request is None
+
+    assert paths.resolve_artifact(TREE_PARENT_DIR_NAME, tmp_artifact_root) == (
+        paths.pretty_reports_index_path(tmp_artifact_root).resolve()
+    )
+    assert publication_scratch(root) == frozenset()
+    assert page_files(root) == frozenset(SAMPLE_PAGES)
+
+
+def test_no_publication_scratch_survives_a_successful_publication(
+    sample_tree: Path,
+) -> None:
+    """The parent of a published tree holds the tree and nothing else.
+
+    The staging directory and the renamed-aside copy are both removed by the
+    call that made them, so a successful run leaves no dot-directory in the
+    build output for ``--clean`` to have to sweep.
+    """
+    assert publication_scratch(sample_tree) == frozenset()
+    assert listed_names(sample_tree.parent) == frozenset({sample_tree.name})
+
+
+def test_a_missing_asset_fault_leaves_the_previous_tree_and_no_scratch(
+    sample_result_set: Any,
+    tmp_path: Path,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The asset check fails the publication, not the published tree.
+
+    The third fault the writer must survive with a tree already on disk: a
+    damaged installation, driven by pointing the vendor accessor at a directory
+    holding one file.  The fault is raised inside the staging tree before
+    anything is renamed, so the previous generation is still byte-for-byte
+    itself and no scratch is left behind.
+    """
+    root = pretty_reports.write_pretty_reports(
+        sample_result_set, base=tmp_artifact_root, environment=pretty_env
+    )
+    before = tree_digests(root)
+    incomplete = tmp_path / "incomplete-vendor"
+    (incomplete / "css").mkdir(parents=True)
+    (incomplete / "css" / "cucumber.css").write_bytes(b"/* partial install */\n")
+    monkeypatch.setattr(pretty_reports, "vendor_dir", lambda: incomplete)
+
+    with pytest.raises(FileNotFoundError):
+        pretty_reports.write_pretty_reports(
+            sample_result_set, base=tmp_artifact_root, environment=pretty_env
+        )
+
+    assert tree_digests(root) == before
+    assert publication_scratch(root) == frozenset()
+
+
+def test_a_fault_after_the_first_rename_restores_the_renamed_aside_tree(
+    sample_result_set: Any,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one instant the swap cannot remove is survivable, and survived.
+
+    The swap is two renames, and this occupies the gap between them: the
+    previous generation has been renamed aside and the staging tree fails to
+    take its place.  The renamed-aside copy is then **the only complete
+    generation in existence**, so the writer renames it back before it reports
+    anything, and what a reader finds afterwards is the earlier tree in full
+    with no scratch beside it.
+
+    Driven by making the publication's second rename fail.  That instant cannot
+    be reached from outside the process any other way -- there is no public
+    call that stops between the two renames -- so the rename helper is the seam
+    the fault is injected at, with the first rename left to do its real work so
+    the state under test is the real one.
+    """
+    root = pretty_reports.write_pretty_reports(
+        sample_result_set, base=tmp_artifact_root, environment=pretty_env
+    )
+    before = tree_digests(root)
+    original = paths.ArtifactDirectoryPublication._rename_scratch
+
+    def failing_rename(self: Any, source: str, destination: str) -> None:
+        if source == self.staging.name:
+            raise OSError(errno.EXDEV, os.strerror(errno.EXDEV), source)
+        original(self, source, destination)
+
+    monkeypatch.setattr(
+        paths.ArtifactDirectoryPublication, "_rename_scratch", failing_rename
+    )
+
+    with pytest.raises(OSError) as failure:
+        pretty_reports.write_pretty_reports(
+            sample_result_set, base=tmp_artifact_root, environment=pretty_env
+        )
+
+    assert failure.value.errno == errno.EXDEV
+    assert tree_digests(root) == before
+    assert publication_scratch(root) == frozenset()
+
+
+def refuse_the_asset_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the publication fail at its asset copy.
+
+    The seam a "this publication then failed" case is injected at.  It has to
+    be a step *inside* the publication, because the fan-out budgets and the
+    whole render are settled before one begins -- that being what keeps an
+    over-budget document free of filesystem effects -- so a render fault never
+    reaches the recovery step under test.  The asset copy is the first step
+    after it, and the exception is the one
+    :func:`app.reporting.pretty_reports.copy_pretty_assets` really raises for
+    an asset that is not there.
+
+    :param monkeypatch: The active patcher.
+    """
+
+    def refuse(*_args: Any, **_kwargs: Any) -> None:
+        """Raise as a missing vendored asset does."""
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), "main.css")
+
+    monkeypatch.setattr(pretty_reports, "copy_pretty_assets", refuse)
+
+
+def test_an_orphaned_renamed_aside_tree_is_restored_and_never_removed(
+    sample_result_set: Any,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A publication killed between the two renames is put back together.
+
+    The state a killed process leaves is built by hand -- a renamed-aside tree
+    under the scratch name a publication of this tree recognises, and no
+    published tree at all -- and then a publication is started that cannot get
+    past its asset copy.  The restore happens **first**, before anything else
+    in the call touches the filesystem, so the tree is published again even
+    though this run then fails: a reader gets the previous generation rather
+    than nothing.  It is renamed, never removed, which is the rule that makes
+    the interrupted-publication window recoverable at all.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    aside = plant_scratch(
+        final,
+        scratch_name(final, paths.PUBLICATION_SUPERSEDED_INFIX, os.getpid()),
+    )
+    assert not final.exists()
+    refuse_the_asset_copy(monkeypatch)
+
+    with caplog.at_level("WARNING", logger=pretty_reports.logger.name):
+        with pytest.raises(FileNotFoundError):
+            pretty_reports.write_pretty_reports(
+                sample_result_set,
+                base=tmp_artifact_root,
+                environment=pretty_env,
+            )
+
+    assert final.is_dir()
+    assert tree_files(final) == frozenset({"marker.txt"})
+    assert (final / "marker.txt").read_text(encoding="utf-8") == aside.name
+    assert not aside.exists()
+    assert publication_scratch(final) == frozenset()
+    assert any(
+        "Restored" in record.getMessage() for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+
+
+def test_the_newest_renamed_aside_tree_is_the_one_restored(
+    sample_result_set: Any,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two candidates, and the choice is deterministic: newest, then name.
+
+    Two interrupted publications can each leave a renamed-aside copy, and the
+    later one is the later generation of the report.  A copy carrying another
+    process's identifier is a candidate too -- it is a complete generation of
+    this artifact whoever produced it, and the alternative is publishing
+    nothing where a report exists -- while *staging* scratch of another process
+    is not, which is what the test below covers.
+
+    The copy that loses is this process's own, so it is also cleared by the
+    same call, and the one that wins is left published.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    older = plant_scratch(
+        final,
+        scratch_name(final, paths.PUBLICATION_SUPERSEDED_INFIX, os.getpid()),
+    )
+    newer = plant_scratch(
+        final,
+        scratch_name(final, paths.PUBLICATION_SUPERSEDED_INFIX, FOREIGN_PID),
+    )
+    os.utime(older, (1_600_000_000, 1_600_000_000))
+    os.utime(newer, (1_700_000_000, 1_700_000_000))
+    refuse_the_asset_copy(monkeypatch)
+
+    with pytest.raises(FileNotFoundError):
+        pretty_reports.write_pretty_reports(
+            sample_result_set,
+            base=tmp_artifact_root,
+            environment=pretty_env,
+        )
+
+    assert (final / "marker.txt").read_text(encoding="utf-8") == newer.name
+    assert not newer.exists()
+    assert not older.exists()
+    assert publication_scratch(final) == frozenset()
+
+
+def test_another_process_s_scratch_is_left_exactly_where_it_is(
+    sample_result_set: Any,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Staging scratch carrying another process's id is reported, not swept.
+
+    Removing it would be the one way this writer could destroy a concurrent
+    publication's work, and no publisher can tell a dead process's leavings
+    from a live one's portably.  So it is logged and left: it is dot-prefixed,
+    so no request can reach it, and ``app/cli.py``'s ``--clean`` empties the
+    build output on the next ordinary run.
+
+    The publication around it completes normally, which is the other half of
+    the claim: another process's scratch neither blocks this one nor appears
+    in its output.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    foreign = plant_scratch(
+        final, scratch_name(final, paths.PUBLICATION_STAGING_INFIX, FOREIGN_PID)
+    )
+
+    with caplog.at_level("WARNING", logger=pretty_reports.logger.name):
+        root = pretty_reports.write_pretty_reports(
+            sample_result_set, base=tmp_artifact_root, environment=pretty_env
+        )
+
+    assert foreign.is_dir()
+    assert (foreign / "marker.txt").read_text(encoding="utf-8") == foreign.name
+    assert page_files(root) == frozenset(SAMPLE_PAGES)
+    assert asset_files(root) == EXPECTED_ASSETS
+    assert publication_scratch(root) == frozenset({foreign.name})
+    assert any(
+        "Leaving" in record.getMessage() and foreign.name in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+
+
+def test_this_process_s_own_stale_scratch_is_cleared(
+    sample_result_set: Any,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A previous run of this process cannot still own its scratch names.
+
+    So they are removed on the way in, rather than built over: a staging tree
+    left half-written by an earlier run of this process would otherwise
+    contribute its files to this publication's inventory, and the inventory is
+    what the swap is authorised by.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    own = plant_scratch(
+        final, scratch_name(final, paths.PUBLICATION_STAGING_INFIX, os.getpid())
+    )
+    (own / "css").mkdir()
+    (own / "css" / "leftover.css").write_text("/* half a run */\n", encoding="utf-8")
+
+    with caplog.at_level("WARNING", logger=pretty_reports.logger.name):
+        root = pretty_reports.write_pretty_reports(
+            sample_result_set, base=tmp_artifact_root, environment=pretty_env
+        )
+
+    assert not own.exists()
+    assert page_files(root) == frozenset(SAMPLE_PAGES)
+    assert asset_files(root) == EXPECTED_ASSETS
+    assert "leftover.css" not in tree_files(root)
+    assert publication_scratch(root) == frozenset()
+    assert any(
+        "Removing" in record.getMessage() and own.name in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+
+
+def test_a_link_inside_cleared_scratch_is_unlinked_not_followed(
+    sample_result_set: Any,
+    tmp_path: Path,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+) -> None:
+    """A link inside a scratch tree is unlinked, never descended.
+
+    The publication's removal is descriptor-relative and no-follow at every
+    step: a directory is entered only through a descriptor opened on the entry
+    itself, so a symbolic link -- or, on Windows, a junction, which
+    ``Path.is_dir`` follows and a directory walk treats as a directory --
+    planted inside the scratch is unlinked rather than turned into a recursive
+    delete of whatever it addresses (CWE-59/CWE-22).
+
+    Both shapes are planted, a link to a directory and a link to a file, inside
+    this process's own stale scratch, which the publication clears on the way
+    in.  The scratch goes; the prepared directory outside the artifact root,
+    its file and its nested directory are all exactly as they were.
+
+    This pins the contract; the *deletion* the review's probe achieved came
+    through a swapped path **component** rather than through a planted link,
+    and :func:`test_a_symlinked_build_output_component_is_refused` below
+    reproduces that one.
+    """
+    outside = tmp_path / "prepared-elsewhere"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("not the writer's to delete\n", encoding="utf-8")
+    (outside / "nested").mkdir()
+    (outside / "nested" / "deeper.txt").write_text("also not\n", encoding="utf-8")
+    before = tree_digests(outside)
+
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    own = plant_scratch(
+        final, scratch_name(final, paths.PUBLICATION_STAGING_INFIX, os.getpid())
+    )
+    (own / "escape-dir").symlink_to(outside, target_is_directory=True)
+    (own / "escape-file").symlink_to(outside / "keep.txt")
+
+    root = pretty_reports.write_pretty_reports(
+        sample_result_set, base=tmp_artifact_root, environment=pretty_env
+    )
+
+    assert not own.exists()
+    assert outside.is_dir()
+    assert tree_digests(outside) == before
+    assert listed_names(outside) == frozenset({"keep.txt", "nested"})
+    assert page_files(root) == frozenset(SAMPLE_PAGES)
+    assert publication_scratch(root) == frozenset()
+
+
+def test_a_link_planted_in_staging_mid_publication_is_unlinked_not_followed(
+    sample_result_set: Any,
+    tmp_path: Path,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same probe against the failure path's own cleanup.
+
+    The staging tree is removed on every failure, and a failing publication is
+    precisely when something may already have been planted inside it.  The link
+    is created from inside the publication, at the last page write, and that
+    same write then fails -- so the cleanup that runs is the failure path's,
+    with a link sitting in the tree it is about to remove.
+
+    Nothing outside is touched, no scratch survives, and the fault itself still
+    propagates: the run's exit table needs the writer failure reported.
+    """
+    outside = tmp_path / "prepared-elsewhere"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("not the writer's to delete\n", encoding="utf-8")
+    before = tree_digests(outside)
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+
+    def plant_link(publication: Any, relative_name: str) -> None:
+        if relative_name != SMOKE_TAG_PAGE:
+            return
+        (publication.staging / "escape-dir").symlink_to(
+            outside, target_is_directory=True
+        )
+
+    probe_publication(
+        monkeypatch, fail_on=SMOKE_TAG_PAGE, before_write=plant_link
+    )
+
+    with pytest.raises(IsADirectoryError):
+        pretty_reports.write_pretty_reports(
+            sample_result_set, base=tmp_artifact_root, environment=pretty_env
+        )
+
+    assert outside.is_dir()
+    assert tree_digests(outside) == before
+    assert not final.exists()
+    assert publication_scratch(final) == frozenset()
+
+
+def test_a_link_where_the_published_tree_belongs_is_refused(
+    sample_result_set: Any,
+    tmp_path: Path,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+) -> None:
+    """A link standing in for the tree is refused before a page is rendered.
+
+    The published tree is a directory this writer produced.  A link in its
+    place is a redirection out of the artifact root, so it is refused, and it
+    is refused **before** a staging tree is built.  The previous behaviour was
+    to treat it as the tree to replace: the link was renamed aside like any
+    previous generation and the new tree published over the name, which
+    destroyed the entry the operator put there and left a link the cleanup
+    could not remove sitting in the build output as scratch.
+
+    The link, its destination and the build output are therefore all asserted
+    afterwards: the destination is still empty, the entry is still the link,
+    and no scratch was created.
+    """
+    outside = tmp_path / "link-destination"
+    outside.mkdir()
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    final.parent.mkdir(parents=True)
+    final.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(paths.ArtifactPathError):
+        pretty_reports.write_pretty_reports(
+            sample_result_set, base=tmp_artifact_root, environment=pretty_env
+        )
+
+    assert listed_names(outside) == frozenset()
+    assert final.is_symlink()
+    assert publication_scratch(final) == frozenset()
+
+
+def test_a_symlinked_build_output_component_is_refused(
+    sample_result_set: Any,
+    tmp_path: Path,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+) -> None:
+    """The review's probe, reproduced: nothing outside the root is removed.
+
+    This is the case that made the finding blocking.  Every filesystem step of
+    the publication used to be resolved from a pathname, and the *first* of
+    them was the interrupted-publication recovery -- which listed the parent of
+    the tree and removed any scratch carrying this process's id.  With a link
+    standing in for ``target/``, that listing and that removal happened inside
+    the link's destination, so a prepared directory **outside the artifact
+    root** whose name looked like publication scratch was deleted, and deleted
+    before the hardened directory creation further down ever got to refuse the
+    write.
+
+    Every component from the build output directory inward is now verified by
+    opening it under the descriptor of its already verified parent, before
+    anything is listed or removed, so the publication is refused at ``target``
+    and the prepared directory -- and the file inside it -- are untouched.
+    """
+    outside = tmp_path / "prepared-elsewhere"
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    prepared = outside.joinpath(
+        TREE_PARENT_DIR_NAME,
+        scratch_name(final, paths.PUBLICATION_STAGING_INFIX, os.getpid()),
+    )
+    prepared.mkdir(parents=True)
+    (prepared / "keep.txt").write_text(
+        "not the writer's to delete\n", encoding="utf-8"
+    )
+    build_output = paths.target_root(tmp_artifact_root)
+    build_output.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(paths.ArtifactPathError):
+        pretty_reports.write_pretty_reports(
+            sample_result_set, base=tmp_artifact_root, environment=pretty_env
+        )
+
+    assert prepared.is_dir()
+    assert (prepared / "keep.txt").read_text(encoding="utf-8") == (
+        "not the writer's to delete\n"
+    )
+    assert build_output.is_symlink()
+    assert not final.exists()
+
+
+def test_a_renamed_aside_tree_that_cannot_be_restored_is_left_in_place(
+    sample_result_set: Any,
+    tmp_artifact_root: Path,
+    pretty_env: Environment,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A restore that fails leaves the copy where the log record says it is.
+
+    The recovery rule is "restored, never removed", and the case that tests it
+    is the one where the rename back cannot be made: the copy is then still
+    the only complete generation in existence, and this call's own scratch
+    names are otherwise cleared on sight -- so a renamed-aside copy carrying
+    this process's id would have been removed moments after the log record
+    said it was intact and could be renamed back by hand.
+
+    It is skipped instead.  Driven by making the restore fail, with an
+    asset-copy fault behind it so the call does not go on to publish a tree of
+    its own and the copy is what a reader is left with.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    aside = plant_scratch(
+        final,
+        scratch_name(final, paths.PUBLICATION_SUPERSEDED_INFIX, os.getpid()),
+    )
+
+    def refuse_restore(self: Any, name: str) -> None:
+        raise OSError(errno.EPERM, os.strerror(errno.EPERM), name)
+
+    monkeypatch.setattr(
+        paths.ArtifactDirectoryPublication, "restore_superseded", refuse_restore
+    )
+    refuse_the_asset_copy(monkeypatch)
+
+    with caplog.at_level("WARNING", logger=pretty_reports.logger.name):
+        with pytest.raises(FileNotFoundError):
+            pretty_reports.write_pretty_reports(
+                sample_result_set,
+                base=tmp_artifact_root,
+                environment=pretty_env,
+            )
+
+    assert aside.is_dir()
+    assert (aside / "marker.txt").read_text(encoding="utf-8") == aside.name
+    assert not final.exists()
+    assert any(
+        "can be renamed back by hand" in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+
+# Hook results in the report tree
+#
+# The port registers the scenario-lifecycle teardown as a real hook, so a hook
+# can fail on its own account, and the status this tree presents for an element
+# folds every hook outcome into its verdict.  A tree that rendered only the
+# steps therefore showed a red element above a column of green steps with
+# nothing anywhere to explain it.
+#
+# The hooks of an element are reported in the generator's own two section
+# containers, .hooks-before and .hooks-after, on every page that shows that
+# element -- its feature page and each of its tag pages.  What is asserted
+# below is the same three properties the sibling artifact is held to: every
+# hook that did not pass is reported, a hook that passed is reported nowhere,
+# and a hook is not a step -- not counted as one, not timed as one, and not a
+# filter unit of its own.
+# --------------------------------------------------------------------------
+
+#: The two hook section containers, as the vendored stylesheet names them.
+HOOKS_BEFORE_CLASS: Final[str] = "hooks-before"
+HOOKS_AFTER_CLASS: Final[str] = "hooks-after"
+
+#: The group labels the element tree writes into a hook brief's keyword span.
+BEFORE_HOOK_LABEL: Final[str] = "Before hook"
+AFTER_HOOK_LABEL: Final[str] = "After hook"
+
+#: Where the port's own scenario-lifecycle hook lives, dotted as the model
+#: records it.
+AFTER_HOOK_LOCATION: Final[str] = "features.environment.after_scenario"
+
+#: behave's hook-failure status, which is outside Cucumber's vocabulary and so
+#: normalises to ``unknown``.
+BEHAVE_HOOK_ERROR_STATUS: Final[str] = "hook_error"
+
+#: A hook duration distinct from the step durations these cases use, so an
+#: assertion that it is absent cannot be satisfied by a coincidence.
+HOOK_DURATION_NS: Final[int] = 412_000_000
+
+
+def build_hook(
+    status: str,
+    location: str | None = AFTER_HOOK_LOCATION,
+    duration: int | None = HOOK_DURATION_NS,
+    error_message: str | None = None,
+    embeddings: tuple[dict[str, Any], ...] = (),
+) -> dict[str, Any]:
+    """Build one hook entry, in the shape ``app/reporting/events.py`` records.
+
+    :param status: The hook's own outcome, in behave's vocabulary.
+    :param location: Dotted path of the hook implementation; ``None`` yields an
+        empty ``match``, which is how the model records a hook without one.
+    :param duration: Nanoseconds, or ``None`` to omit the key.
+    :param error_message: The hook's failure text, omitted when ``None``.
+    :param embeddings: Attachments hanging off the hook.
+    :returns: The hook entry.
+    """
+    result: dict[str, Any] = {"status": status}
+    if duration is not None:
+        result["duration"] = duration
+    if error_message is not None:
+        result["error_message"] = error_message
+    entry: dict[str, Any] = {
+        "match": {"location": location} if location else {},
+        "result": result,
+    }
+    if embeddings:
+        entry["embeddings"] = [dict(embedding) for embedding in embeddings]
+    return entry
+
+
+def document_with_hooks(
+    step_status: str = "passed",
+    before: tuple[dict[str, Any], ...] = (),
+    after: tuple[dict[str, Any], ...] = (),
+    tags: tuple[dict[str, Any], ...] = ({"name": "@Hooked"},),
+) -> dict[str, Any]:
+    """A one-scenario, one-tag document whose element carries those hooks.
+
+    One tag, so the same element is presented on a feature page and on a tag
+    page and a hook report can be required on both.
+
+    :param step_status: The status of the element's single step.
+    :param before: Before-hook entries.
+    :param after: After-hook entries.
+    :param tags: Element-level tags.
+    :returns: The merged result document.
+    """
+    element = build_element(
+        "A scenario whose hooks are the story",
+        (build_step("acts", step_status, duration=3_000_000),),
+        tags=tags,
+    )
+    if before:
+        element["before"] = list(before)
+    if after:
+        element["after"] = list(after)
+    return {
+        "features": [
+            build_feature("Hooked.feature", "Hooked", (element,), tags=("@Hooked",))
+        ]
+    }
+
+
+def hook_sections(page: ParsedPage, group_class: str) -> tuple[dict[str, str], ...]:
+    """Every hook section of one group on ``page``, in document order.
+
+    :param page: A parsed page.
+    :param group_class: :data:`HOOKS_BEFORE_CLASS` or
+        :data:`HOOKS_AFTER_CLASS`.
+    :returns: The attributes of each matching container.
+    """
+    return tuple(
+        attributes
+        for _tag, attributes in page.elements
+        if group_class in attributes.get("class", "").split()
+    )
+
+
+def test_a_hook_that_did_not_pass_is_reported_wherever_its_scenario_is(
+    pretty_env: Environment,
+) -> None:
+    """The failing hook's group, implementation, badge and text, on both pages.
+
+    Driven with a scenario whose only step passed, which is the case the gap
+    was about: the element is presented failed on the strength of the hook
+    alone, so the hook's own brief is the only thing on either page that can
+    account for it.  The failure text is hostile, so one assertion covers the
+    text reaching the reader and the markup in it not reaching the browser.
+    """
+    document = document_with_hooks(
+        after=(build_hook("failed", error_message=HOSTILE_ERROR_MESSAGE),)
+    )
+    pages = parse_pages(pretty_reports.render_pretty_pages(document, environment=pretty_env))
+    detail_pages = [
+        page
+        for name, page in pages.items()
+        if name.startswith((FEATURE_PAGE_PREFIX, TAG_PAGE_PREFIX))
+    ]
+    assert len(detail_pages) == 2, sorted(pages)
+
+    for page in detail_pages:
+        sections = hook_sections(page, HOOKS_AFTER_CLASS)
+        assert len(sections) == 1, page.name
+        assert sections[0].get("data-report-status") == "failed", page.name
+
+        text = page.normalized_text
+        assert AFTER_HOOK_LABEL in text, page.name
+        assert AFTER_HOOK_LOCATION in text, page.name
+        assert HOSTILE_ERROR_MESSAGE in text, page.name
+
+        # The dangerous spelling, not the bare tag name: every page carries
+        # legitimate inline script of its own, so what proves the hook's text
+        # was escaped is the absence of the fragment only the model supplies.
+        assert 'alert("e")' not in page.html, page.name
+        assert "&lt;script&gt;" in page.html, page.name
+        assert "49" not in text.replace(HOSTILE_ERROR_MESSAGE, ""), page.name
+        assert ("failed", "Failed") in {
+            (badge.status, badge.label) for badge in page.badges
+        }, page.name
+
+
+def test_a_hook_status_outside_the_vocabulary_keeps_the_word_the_model_recorded(
+    pretty_env: Environment,
+) -> None:
+    """A behave-only hook status is graded once, and an unreadable one keeps its word.
+
+    Two halves, because the shared status model decides the first of them.
+    ``hook_error`` is behave's name for an exception in hook code and
+    ``app/reporting/aggregation.py``'s ``STATUS_ALIASES`` folds it onto
+    ``failed``, which is the same answer ``target/cucumber.json`` publishes for
+    it -- the whole point of that table being that one run is not graded
+    differently depending on which artifact a reader opens.  The fold happens
+    at ingress, in the decorated copy this folder renders, so the page badges
+    such a hook **Failed** and the recorded word is simply not on it.
+
+    The second half is the clause that word reaches when nothing in the
+    project can read the status: the group is still reported rather than
+    dropped, the badge reads Unknown because a badge's label is its status's
+    accessible name on every surface of this port, and the recorded word
+    travels as TEXT after the implementation, since a brief reading only
+    "Unknown" would withhold the one word naming what happened.  It is
+    asserted against the macro directly, with an undecorated element, because
+    that is the only shape the clause is reachable from once the authority
+    canonicalises every status it can name.
+    """
+    document = document_with_hooks(
+        before=(build_hook(BEHAVE_HOOK_ERROR_STATUS, location=None),),
+        after=(
+            build_hook(
+                BEHAVE_HOOK_ERROR_STATUS,
+                error_message="RuntimeError: teardown exploded",
+            ),
+        ),
+    )
+    pages = pretty_reports.render_pretty_pages(document, environment=pretty_env)
+    page = parse_page(
+        *next(
+            (name, html)
+            for name, html in pages.items()
+            if name.startswith(FEATURE_PAGE_PREFIX)
+        )
+    )
+
+    assert len(hook_sections(page, HOOKS_BEFORE_CLASS)) == 1
+    assert len(hook_sections(page, HOOKS_AFTER_CLASS)) == 1
+    for group_class in (HOOKS_BEFORE_CLASS, HOOKS_AFTER_CLASS):
+        assert (
+            hook_sections(page, group_class)[0].get("data-report-status")
+            == "failed"
+        ), group_class
+
+    text = page.normalized_text
+    assert BEFORE_HOOK_LABEL in text
+    assert AFTER_HOOK_LOCATION in text
+    assert "RuntimeError: teardown exploded" in text
+    assert STATUS_LABELS["failed"] in page.badge_labels()
+    assert aggregation.status_token(BEHAVE_HOOK_ERROR_STATUS) == "failed"
+    assert aggregation.STATUS_ALIASES[BEHAVE_HOOK_ERROR_STATUS] == "failed"
+
+    # The unreadable status, through the macro and with no decoration in
+    # front of it: reported, badged Unknown, and the word kept.  The
+    # location-less hook is what shows the word standing in for the
+    # implementation it has not got.
+    tree = pretty_env.get_template("pretty/_element_tree.html").module
+    fragment = parse_page(
+        "hooks",
+        str(
+            tree.hooks_group(
+                {
+                    "type": SCENARIO_TYPE,
+                    "keyword": "Scenario",
+                    "name": "an unreadable hook status",
+                    "steps": [build_step("acts", "passed", duration=1)],
+                    "before": [build_hook(UNRECOGNISED_STATUS, location=None)],
+                    "after": [
+                        build_hook(
+                            UNRECOGNISED_STATUS,
+                            error_message="RuntimeError: teardown exploded",
+                        )
+                    ],
+                }
+            )
+        ),
+    )
+
+    assert len(hook_sections(fragment, HOOKS_BEFORE_CLASS)) == 1
+    assert len(hook_sections(fragment, HOOKS_AFTER_CLASS)) == 1
+    for group_class in (HOOKS_BEFORE_CLASS, HOOKS_AFTER_CLASS):
+        assert (
+            hook_sections(fragment, group_class)[0].get("data-report-status")
+            == pretty_reports.UNKNOWN_STATUS
+        ), group_class
+
+    fragment_text = fragment.normalized_text
+    assert f"{BEFORE_HOOK_LABEL} {UNRECOGNISED_STATUS}" in fragment_text
+    assert f"{AFTER_HOOK_LOCATION} ({UNRECOGNISED_STATUS})" in fragment_text
+    assert STATUS_LABELS[pretty_reports.UNKNOWN_STATUS] in fragment.badge_labels()
+    assert pretty_reports.status_token(UNRECOGNISED_STATUS) == (
+        pretty_reports.UNKNOWN_STATUS
+    )
+
+
+def test_a_hook_that_passed_adds_no_section_and_its_screenshot_still_renders(
+    sample_result_set: Any, pretty_env: Environment
+) -> None:
+    """The ordinary shape adds not one node, and the embedding is unaffected.
+
+    Every scenario of a healthy run carries a passed after-hook, and the sample
+    document's failing scenario carries one with a screenshot on it, so a
+    section emitted for a hook that passed would appear on nearly every element
+    of every page.  The sample document is used for exactly that reason: it is
+    the shape a real run produces, and its one embedding must still be inlined.
+    """
+    pages = parse_pages(
+        pretty_reports.render_pretty_pages(sample_result_set, environment=pretty_env)
+    )
+    for name, page in pages.items():
+        assert hook_sections(page, HOOKS_BEFORE_CLASS) == (), name
+        assert hook_sections(page, HOOKS_AFTER_CLASS) == (), name
+        assert AFTER_HOOK_LABEL not in page.text, name
+
+    assert any(
+        PNG_DATA_URI_PREFIX in page.html for page in pages.values()
+    ), "the sample document's screenshot is no longer inlined"
+
+
+def test_hook_reports_are_not_steps_and_carry_no_duration(
+    pretty_env: Environment,
+) -> None:
+    """The section is outside the step vocabulary, and prints no duration.
+
+    Two properties of one decision: a hook is not a step.  So the section is
+    neither a ``.steps`` group nor a ``.step`` -- nothing that counts or walks
+    steps can pick a hook up, and the steps overview's own exclusion of hook
+    entries stays true of this tree as well -- and it prints no duration, since
+    an element's duration here is the sum of its step durations alone, exactly
+    as the authority's ``Element.getDuration()`` sums them.  The duration
+    assertion is made against the same document rendered without the hook, so
+    it is the hook's own duration that is absent.
+    """
+    after = build_hook("failed", error_message="teardown failed")
+    hooked = pretty_reports.render_pretty_pages(
+        document_with_hooks(after=(after,)), environment=pretty_env
+    )
+    plain = pretty_reports.render_pretty_pages(
+        document_with_hooks(), environment=pretty_env
+    )
+    name = next(page for page in hooked if page.startswith(FEATURE_PAGE_PREFIX))
+    page = parse_page(name, hooked[name])
+
+    sections = hook_sections(page, HOOKS_AFTER_CLASS)
+    assert len(sections) == 1
+    classes = sections[0]["class"].split()
+    assert "steps" not in classes
+    assert "step" not in classes
+    assert "data-report-filterable" not in sections[0]
+
+    def step_containers(markup: str) -> int:
+        """Count the step containers of one page."""
+        return sum(
+            1
+            for _tag, attributes in parse_page("counted", markup).elements
+            if "step" in attributes.get("class", "").split()
+        )
+
+    plain_name = next(page for page in plain if page.startswith(FEATURE_PAGE_PREFIX))
+    assert step_containers(hooked[name]) == step_containers(plain[plain_name])
+
+    text = page.normalized_text
+    for rendering in (
+        str(HOOK_DURATION_NS),
+        f"{HOOK_DURATION_NS / 1_000_000_000:.3f}",
+        f"{HOOK_DURATION_NS / 1_000_000_000:.2f}",
+    ):
+        assert rendering not in text, rendering

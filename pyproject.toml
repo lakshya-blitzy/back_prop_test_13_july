@@ -1,34 +1,18 @@
-# Python build manifest for Testinium-QA.
-#
-# Translated from pom.xml, which stays in the tree as historical reference only
-# and is no longer a supported build configuration:
-#   pom.xml:8  <artifactId>testinium-qa</artifactId>  -> [project] name
-#   pom.xml:9  <version>1.0-SNAPSHOT</version>        -> [project] version
-# Fields the POM does not declare (licence, authors, urls, keywords) are
-# deliberately absent rather than guessed.
-#
-# This manifest plus requirements.txt / requirements-test.txt are the only
-# supported build inputs after the port.
+# Python build manifest for Testinium-QA. pom.xml stays in the tree as
+# historical reference only and is no longer a supported build configuration.
 
 [build-system]
-# The build backend is exact-pinned like every application and test pin, and
-# for the same reason: a floating requirement lets a later clean build silently
-# select a different backend version, and the backend is what turns this
+# Exact-pinned like every other pin in the port: the backend is what turns this
 # manifest - including the dynamic dependency table below - into metadata, so a
-# different version can change the distribution without a change to any file.
-# 84.0.0 is the version verified on the pinned 3.14.6 interpreter. `wheel` is
-# deliberately not listed: setuptools.build_meta builds the wheel itself and no
-# longer needs that distribution, and an unused build requirement is one more
-# thing to float. This remains a pin and not a lockfile: the backend's own
-# transitive closure is left unpinned and unhashed, exactly as for the runtime
-# and test pins.
+# floating requirement could change the distribution with no file changing.
+# 84.0.0 is the version verified on the pinned 3.14.6 interpreter.
 requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "testinium-qa"
-# PEP 440 mapping of the source build's 1.0-SNAPSHOT, preserving pre-release
-# semantics (pom.xml <version>1.0-SNAPSHOT</version>).
+# PEP 440 mapping of the source build's 1.0-SNAPSHOT, preserving its
+# pre-release semantics.
 version = "1.0.0.dev0"
 description = "Behave-driven Selenium browser test-automation suite for the Testinium/Odoo web application, with a read-only Flask viewer over the generated report artifacts"
 readme = "README.md"
@@ -36,64 +20,32 @@ readme = "README.md"
 # development must not drift apart (see .python-version).
 requires-python = "==3.14.*"
 
-# Direct runtime dependencies are not written out here. requirements.txt is the
-# one authoritative list - it is what every installer in the port already
-# consumes (both runner scripts run
-# `pip install -r requirements.txt -r requirements-test.txt`) - and this
-# manifest derives its metadata from that file through the
-# [tool.setuptools.dynamic] table below, so the two consumed declarations
-# cannot state different versions. Restating the pins as a literal array here
-# is what made drift possible, since nothing mechanically compared the copies.
-# The regime the pins themselves follow is unchanged: direct dependencies only,
-# exact `==`, and the resolved transitive closure intentionally left unpinned,
-# matching the source POM, which pins direct artifacts only. No lockfile and no
-# hashes.
+# requirements.txt is the one authoritative runtime list, resolved into
+# Requires-Dist through [tool.setuptools.dynamic] below, so it has to stay
+# committed beside this manifest: a build whose source tree lacks that file
+# emits no warning and simply declares no dependencies at all.
 dynamic = ["dependencies"]
 
-# No extras table is declared. The test-only pins (pytest, pytest-cov) live in
-# requirements-test.txt, which stays a separate test-only list: it is not
-# chained from the runtime list, not restated here, and not part of the dynamic
-# metadata above, so an installed distribution never carries the test tooling.
-
-# The single command surface: the Gherkin suite runner. Invoked from
-# scripts/run_tests.sh, scripts/run_tests.ps1, the Makefile and the README via
-# the virtual environment's bin/Scripts directory - never through the Flask CLI.
 [project.scripts]
 run-tests = "app.cli:run_tests"
 
-# Resolves the dynamic `dependencies` field declared above. The backend reads
-# the file at build time, discards comment and blank lines, and emits each
-# surviving requirement line as a Requires-Dist entry - which is what lets
-# requirements.txt be the single authoritative runtime list with no generator,
-# no check script and no second copy of the pins to maintain. The path is
-# relative to this manifest, and requirements.txt has to stay committed beside
-# it: a build whose source tree lacks that file emits no warning and simply
-# declares no dependencies at all, so the file is load-bearing here and not
-# merely a convenience for `pip install -r`.
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 
-# Flat layout: `app` and its sub-packages are the only installable code.
-# features/, tests/ and scripts/ sit alongside app/ at the repository root and
-# are not distributions - behave loads features/environment.py and
-# features/steps/*.py by path relative to the features directory, pytest
-# discovers tests/ from the repository root, and scripts/ holds shell entry
-# points. `namespaces = false` keeps the resource directories under app/
-# (templates/, static/ and their sub-directories, none of which carry an
-# __init__.py) from being picked up as implicit namespace packages; they ship
-# as package data instead, declared below.
+# Flat layout: `app` and its sub-packages are the only installable code, while
+# features/, tests/ and scripts/ sit beside it at the repository root and are
+# not distributions. `namespaces = false` keeps the __init__-less resource
+# directories under app/ from being picked up as implicit namespace packages;
+# they ship as the package data below instead.
 [tool.setuptools.packages.find]
 include = ["app*"]
 exclude = ["features*", "tests*", "scripts*"]
 namespaces = false
 
-# Non-Python resources that must travel with the installed package. The report
-# writers render the artifact and PrettyReports templates and copy the vendored
-# asset set into the generated report tree so those pages render offline from a
-# CI workspace; a wheel missing them produces unstyled reports with broken
-# href/src references. Patterns are relative to the app/ package directory and
-# are deliberately not restricted to text extensions, because the vendored set
-# includes binary fonts (.otf, .eot, .ttf, .woff, .woff2) and a PNG favicon.
+# Deliberately not restricted to text extensions: the vendored asset set
+# includes binary fonts (.otf, .eot, .ttf, .woff, .woff2) and a PNG favicon, and
+# a wheel missing them produces unstyled reports with broken href/src
+# references.
 [tool.setuptools.package-data]
 app = [
     "templates/*.html",

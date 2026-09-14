@@ -3,9 +3,9 @@
   index.html - the GET / landing page of the read-only report viewer.
   ===========================================================================
 
-  ROUTE CONTRACT - one row of the HTTP surface, and the whole of it: presence
-  and modification time of each of the four report artifacts, with links.
-  Status 200 always, including before any run has ever happened.
+  ROUTE CONTRACT - one row of the HTTP surface, and the whole of it:
+  servability and modification time of each of the four report artifacts, with
+  links. Status 200 always, including before any run has ever happened.
 
   This is the only report-ish route with no data-availability precondition.
   The four report views answer 404 when the JSON report is absent, unreadable
@@ -25,14 +25,28 @@
       label               Required. Human-readable name, e.g. "Cucumber HTML
                           report", "Cucumber JSON", "Rerun manifest",
                           "PrettyReports tree".
-      name                Required. The artifact key, which is ArtifactSpec.key
-                          and doubles as the allowlisted name the artifact
-                          route accepts. The directory artifact resolves with
-                          or without a trailing slash and is served its
-                          overview page, so either spelling round-trips.
+      route_name          Required. The value to pass as the artifact route's
+                          name argument for this artifact. The view function
+                          decides it: the three single-file artifacts are named
+                          by their own key, while the PrettyReports tree is
+                          named by the overview PAGE inside it and never by the
+                          directory. The route answers the directory's two
+                          authorized spellings with a redirect to that page
+                          precisely so a browser's base URL ends up inside the
+                          tree, where the page's relative stylesheet, script,
+                          image and sibling-page references resolve; a link to
+                          the directory would deliver the same bytes under a
+                          base URL one level too high and break all of them.
       relpath             Required. ArtifactSpec.relpath - the repository-
                           relative path, for display only.
-      exists              Bool.
+      servable            Bool. True only when a request for route_name would
+                          be served right now - the view function establishes
+                          it by opening the artifact through the same authority
+                          the artifact route serves from, so a link offered
+                          here resolves. Being on disk is NOT the same
+                          question: a symlinked or hard-linked artifact, and a
+                          report tree whose overview page was never written,
+                          are all present and all refused by that route.
       modified_iso        str or None. Millisecond-precision UTC ISO-8601
                           ending in a literal Z, e.g. 2022-09-07T13:37:26.297Z,
                           which is the form the artifacts themselves carry.
@@ -48,29 +62,32 @@
   descriptor without them describes no artifact.
 
   This template computes nothing. It performs no filesystem access, formats no
-  timestamp and holds no path literal of its own: presence and both timestamp
-  forms are read by the view function, and every path string it displays
-  arrives in the context from the path module that owns it.
+  timestamp, decides no availability and holds no path literal of its own:
+  servability, the name to link and both timestamp forms are all settled by the
+  view function, and every path string it displays arrives in the context from
+  the path module that owns it.
 
   URLS - built with url_for only, never by hand. The one endpoint used here is
   web.artifact, per the endpoint contract in base.html and app/web/__init__.py.
-  An absent artifact is rendered without a link, because the artifact route
-  answers 404 for anything not on disk and a link that is certain to fail is
-  worse than no link.
+  An artifact that is not servable is rendered without a link, because a link
+  that is certain to 404 is worse than no link. Its card reads "Not generated
+  yet" whichever reason the route would refuse it: this page distinguishes no
+  causes, exactly as the 404 itself does not.
 
   NO REPORT DESTINATION IS OFFERED FROM THIS PAGE, and that is a decision
   rather than an omission. The four report routes share one data-availability
   rule - results that are absent, UNREADABLE or UNPARSEABLE all answer 404
   alike - so a link to any of them is actionable only when the results are
-  known to be usable. This page cannot know that. It is handed presence and
-  modification times, nothing else, and presence is not usability: a complete
-  artifact set whose results file will not parse answers 404 on every report
-  route while every card above still reports the artifact as on disk. Gating a
-  link on presence would therefore put an actionable certain-404 back on the one
-  page a reader reaches before anything has run, which is the defect the shell
-  was corrected for; and a template cannot settle the question itself, because
-  it cannot parse the results file and may not name one artifact - those names
-  belong to app/utils/paths.py and no template restates one.
+  known to be usable. This page cannot know that. It is handed servability and
+  modification times, nothing else, and servability is not usability: a
+  complete artifact set whose results file will not parse answers 404 on every
+  report route while every card above still offers that artifact as a download.
+  Gating a report link on servability would therefore put a certain-404 back
+  on the one page a reader reaches before anything has run, which is the defect
+  the shell was corrected for; and a template cannot settle the question
+  itself, because it cannot parse the results file and may not name one
+  artifact - those names belong to app/utils/paths.py and no template restates
+  one.
 
   So the shell offers no report destination here (base.html, ACTIVE
   NAVIGATION), and neither does this body. What would change that is one
@@ -80,14 +97,14 @@
   app/web/routes.py, and with it in the context this page would emit the two
   report links under that key and nothing else would need to change. Until then
   the rendered report the reader can open from here is the HTML artifact itself,
-  linked in its card above like every other artifact on disk.
+  linked in its card above like every other artifact this viewer can serve.
 
   CLASSES - app/static/css/main.css, used as written there: tqa-artifacts is a
   responsive grid list, tqa-artifact one card in it, tqa-artifact-missing the
   warning variant, tqa-empty the guidance box, with tqa-link and tqa-timestamp
   for the anchor and the time. No class is invented here and no style is
-  inlined. Presence is never signalled by colour alone: every card states its
-  condition in words as well.
+  inlined. Servability is never signalled by colour alone: every card states
+  its condition in words as well.
 
   Headings start at h2. base.html renders the page's single h1 from the title
   block, so this template must not emit another one.
@@ -108,32 +125,32 @@
 
     <p>
         Each entry below is one of the four artifacts a test run writes: the
-        path it is written to, whether it is on disk now, and when it last
-        changed. An entry that is on disk links to the artifact itself. This
-        view only reads what a run has already produced - it never starts a
-        run and never writes.
+        path it is written to, whether this viewer can serve it now, and when
+        it last changed. An entry it can serve links to the artifact itself.
+        This view only reads what a run has already produced - it never starts
+        a run and never writes.
     </p>
 
     {#- A missing or empty sequence is not an error: the tally stays at zero
         and the guidance box below is rendered on its own. -#}
     {%- set rows = artifacts|default([], true) -%}
-    {%- set tally = namespace(present=0) -%}
+    {%- set tally = namespace(servable=0) -%}
 
     {% if rows %}
     <ul class="tqa-artifacts">
         {%- for a in rows %}
-        {%- set present = a.exists|default(false, true) -%}
+        {%- set servable = a.servable|default(false, true) -%}
         {%- set modified_iso = a.modified_iso|default(none, true) -%}
         {%- set modified_display = a.modified_display|default(none, true) -%}
-        {%- if present %}{% set tally.present = tally.present + 1 %}{% endif %}
-        <li class="tqa-artifact{% if not present %} tqa-artifact-missing{% endif %}">
-            {% if present -%}
-            <a class="tqa-link" href="{{ url_for('web.artifact', name=a.name) }}">{{ a.label }}</a>
+        {%- if servable %}{% set tally.servable = tally.servable + 1 %}{% endif %}
+        <li class="tqa-artifact{% if not servable %} tqa-artifact-missing{% endif %}">
+            {% if servable -%}
+            <a class="tqa-link" href="{{ url_for('web.artifact', name=a.route_name) }}">{{ a.label }}</a>
             {%- else -%}
             <span>{{ a.label }}</span>
             {%- endif %}
             <code>{{ a.relpath }}</code>
-            {% if not present -%}
+            {% if not servable -%}
             <span class="tqa-timestamp">Not generated yet</span>
             {%- elif modified_iso and modified_display -%}
             <span class="tqa-timestamp">Modified <time datetime="{{ modified_iso }}">{{ modified_display }}</time></span>
@@ -145,7 +162,7 @@
     </ul>
     {%- endif %}
 
-    {%- if tally.present == 0 %}
+    {%- if tally.servable == 0 %}
     <p class="tqa-empty">
         No report artifact has been generated yet. Start a run from the command
         line with <code>run-tests</code>, or with <code>make test</code>, which

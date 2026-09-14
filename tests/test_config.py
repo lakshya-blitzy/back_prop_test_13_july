@@ -3,8 +3,8 @@
 This module owns the *read surface* of the port of
 ``com.testinium.utilities.ConfigurationReader``: the six configuration key
 names, the six named accessors, the shared ``get_property`` guard in front of
-them, and the behave-userdata override precedence layered over the properties
-file (AAP 0.4.1, ``app/config.py`` row and the ``--browser`` row).
+them, and the behave-userdata precedence layered over the properties file.
+``tests/test_properties.py`` owns the reader underneath it.
 
 What it asserts, and why each assertion exists
 ----------------------------------------------
@@ -30,42 +30,47 @@ What it asserts, and why each assertion exists
    0.6 and 0.8 leave the browser locale unresolved and invent no key for it.
    Both absences are asserted positively - behaviourally with
    ``monkeypatch.setenv``, and structurally over the module's own AST.
-5. **No validation and no case folding of any value.**  ``Driver.java:29-42``
-   switches on the ``browser`` string with cases for ``"chrome"`` and
-   ``"firefox"`` and **no default branch**, so an unrecognised value must reach
-   the driver and fail at first use (AAP 0.4.1: "Any other value fails at first
-   driver use, as today").  This module asserts the configuration half - the
-   value is returned untouched; ``tests/test_driver.py`` asserts the driver
-   half.
-6. **The import boundary.**  AAP 0.4.2: ``app.config`` is the only module
+5. **No validation and no case folding of the four non-URL values.**
+   ``Driver.java:29-42`` switches on the ``browser`` string with cases for
+   ``"chrome"`` and ``"firefox"`` and **no default branch**, so an
+   unrecognised value must reach the driver and fail at first use (AAP 0.4.1:
+   "Any other value fails at first driver use, as today").  This module
+   asserts the configuration half - the value is returned untouched;
+   ``tests/test_driver.py`` asserts the driver half.
+6. **The navigation policy over the two URL keys, and only those two.**
+   ``web.table.url`` and ``url`` are the configured values that become a
+   browser request, so a present value of either is returned only if it
+   satisfies the policy ``app/config.py`` documents.  Phase 6 drives every
+   rejection class and every accepted shape through both keys and both supply
+   paths, and holds the two contracts that policy must not break: ``None``
+   still passes through untouched, and loopback and private hosts are still
+   accepted, because the system under test's address is supplied by neither
+   repository (AAP 0.2.2) and an allowlist would need a seventh key that AAP
+   0.4.1 and AAP 0.6 forbid.
+7. **The import boundary.**  AAP 0.4.2: ``app.config`` is the only module
    importing ``app/utils/properties.py``.  The scan is AST-based over real
    import statements rather than a text grep, because the tree carries the
    reader's name in docstring prose in several places and ``app/cli.py:651``
    carries the properties filename in an executable ``show_default`` string -
    a substring grep would report either as a violation.
 
-Isolation this module relies on, and the one it must provide itself
--------------------------------------------------------------------
-``tests/conftest.py``'s autouse ``isolate_process_state`` fixture resets
-``app/utils/properties.py``'s process-wide cache before *and* after every test,
-which is what lets each test below decide, through ``monkeypatch.chdir``, which
-properties file - or none - the reader sees.  Every file-based test writes into
-``tmp_path``: none writes a ``configuration.properties`` into the repository
-root, and none relies on the root lacking one.
+Inventories and wiring are stated as literals rather than derived from the
+module under test, because an expectation built out of the constant it checks
+cannot fail.  Each accessor is driven from a properties file defining its key
+alone, so one wired to a neighbouring key fails instead of passing on a shared
+value: ``web.table.url`` (the sign-in page) and ``url`` (the Employee module)
+address different pages, and a swap between them is what these tests catch.
 
-That fixture deliberately does **not** reset ``app/config.py``'s installed
-userdata, because most tests never touch it.  A leaked userdata slot is
-process-global and would silently corrupt every later test in the session, so
-this module installs userdata only through the :fixture:`install_userdata`
-fixture, whose clearing finalizer is registered *before* anything is
-installed - the idiom ``isolate_process_state``'s own docstring prescribes -
-so that a failing assertion cannot leak the slot.  The last test in the file is
-a canary for exactly that failure.
-
-No configured value is asserted anywhere.  No ``configuration.properties``
-exists at either revision, so no real value is known and the committed template
-ships all six keys empty (AAP 0.4.1); every value used below is obviously
-synthetic and lives only under ``tmp_path``.
+``tests/conftest.py``'s autouse ``isolate_process_state`` resets the reader's
+process-wide cache around every test, which is what lets each test decide
+through ``monkeypatch.chdir`` which properties file - or none - is seen.  It
+deliberately leaves installed userdata alone, and a leaked slot is
+process-global, so userdata is installed only through the
+:fixture:`install_userdata` fixture, whose clearing finalizer is registered
+*before* anything is installed; the last test in the file is the canary for
+that leak.  Every file-based test writes into ``tmp_path``, and no configured
+value is asserted anywhere - none is known, and the committed template carries
+all six keys empty (AAP 0.4.1).
 """
 
 from __future__ import annotations
@@ -288,6 +293,13 @@ def _write_properties(directory: Path, values: Mapping[str, str]) -> Path:
     key is appended afterwards, which is what lets a test write a deliberately
     mis-cased name such as ``empltitle``.
 
+    The file is left **owner-only**.  The reader refuses a configuration file
+    that is readable beyond its owner - it holds the ``password`` key, so a
+    0644 copy in a traversable checkout is a credential disclosure - and
+    ``tmp_path`` inherits the session's umask, which on this platform yields
+    0644.  Without the ``chmod`` every file-based test in this module would be
+    driven by a refused file and would see six ``None`` values.
+
     :param directory: Directory to write into - always a ``tmp_path``, never
         the repository root.
     :param values: Key/value pairs to write, used verbatim.
@@ -299,6 +311,7 @@ def _write_properties(directory: Path, values: Mapping[str, str]) -> Path:
     path = directory / properties.PROPERTIES_FILENAME
     body = "".join(f"{key}={values[key]}\n" for key in ordered)
     path.write_text(body, encoding=properties.DEFAULT_ENCODING)
+    os.chmod(path, 0o600)
     return path
 
 
@@ -732,11 +745,11 @@ def test_unconfigured_key_reads_as_none_and_never_raises(
     """A key among the six that is not configured returns ``None``.
 
     ``Properties.getProperty`` returns ``null`` for a name the file does not
-    define (``ConfigurationReader:27-29``), so a configuration problem surfaces
-    at the point of use rather than at start-up.  Note the asymmetry with the
-    previous phase, which is the whole design of the guard: a name outside the
-    six raises, because it can never be satisfied; a name among the six that is
-    simply unset does not.
+    define, and ``ConfigurationReader.java:27-29`` hands that through untouched,
+    so a configuration problem surfaces at the point of use, not at start-up.
+    Note the asymmetry with the previous phase, which is the whole design of the
+    guard: a name outside the six raises, because it can never be satisfied; a
+    name among the six that is simply unset does not.
     """
     _use_directory(monkeypatch, tmp_path)
 
@@ -750,11 +763,11 @@ def test_every_accessor_tolerates_a_missing_properties_file(
 ) -> None:
     """With no properties file at all, all six accessors return ``None`` quietly.
 
-    ``ConfigurationReader:21-24`` catches the missing file, logs and continues,
-    and AAP 0.1.1 records that "that tolerance is behaviour".  Nothing raises
-    and nothing exits, which is what lets the unit suite, the viewer, the
-    artifact writers and dry runs all work without the file (AAP 0.4.1: "None
-    is required at startup").
+    ``ConfigurationReader.java:21-24`` catches the missing file, logs and
+    continues, and AAP 0.1.1 records that "that tolerance is behaviour".
+    Nothing raises and nothing exits, which is what lets the unit suite, the
+    viewer, the artifact writers and dry runs all work without the file (AAP
+    0.4.1: "None is required at startup").
     """
     _use_directory(monkeypatch, tmp_path)
     assert not (tmp_path / properties.PROPERTIES_FILENAME).exists()
@@ -831,10 +844,10 @@ def test_the_missing_file_warning_belongs_to_the_reader_not_to_this_module(
 
     The responsibility split of AAP 0.4.2: the file, its one-time load and its
     single missing-file warning belong to ``app/utils/properties.py``, whose
-    message is ``ConfigurationReader:22``'s verbatim.  ``app/config.py`` owns
-    the key names and the precedence and performs no I/O, so reading through it
-    must produce no record of its own - not even when every one of the six
-    reads comes back empty.
+    message is ``ConfigurationReader.java:22``'s verbatim.  ``app/config.py``
+    owns the key names and the precedence and performs no I/O, so reading
+    through it must produce no record of its own - not even when every one of
+    the six reads comes back empty.
     """
     config_records = log_capture(CONFIG_MODULE)
     reader_records = log_capture(READER_MODULE)
@@ -1573,6 +1586,585 @@ def test_create_app_copies_no_configured_value_into_flask_config(
     }
     leaked = sorted(value for value in SYNTHETIC_VALUES.values() if value in flat)
     assert leaked == [], f"Flask config carries configured values: {leaked}"
+
+
+# ==========================================================================
+# Phase 6 - the navigation policy over the two URL keys
+#
+# ``web.table.url`` and ``url`` are the only configured values that become a
+# browser request: five navigation sites hand them to ``driver.get``, and
+# ``features/steps/session_steps.py`` types the configured user name and
+# password into whatever the page that answers presents.  So a *present* value
+# of either key is returned only if it satisfies the policy ``app/config.py``
+# documents, and the four other keys stay entirely unvalidated.
+#
+# Two contracts are asserted alongside the policy, because a fix that broke
+# either would be worse than the finding it closed:
+#
+#   * ``None`` still passes through untouched, for an absent key and for a
+#     missing properties file alike - AAP 0.4.1 ("a missing key returns null so
+#     failures surface at the point of use") and AAP 0.8 freeze it.
+#   * Loopback and private hosts are still accepted.  The system under test is
+#     an Odoo instance whose address neither repository supplies (AAP 0.2.2)
+#     and a QA instance routinely sits on localhost or an internal network; an
+#     origin allowlist would need a seventh key, which AAP 0.4.1 and AAP 0.6
+#     forbid.
+# ==========================================================================
+
+#: The two keys the policy governs, paired with the accessor that must apply
+#: it.  Both are driven through every case below: a policy wired into one
+#: accessor and not the other would leave three of the five navigation sites
+#: open.
+URL_ACCESSORS: Final[dict[str, Callable[[], str | None]]] = {
+    "web.table.url": config.get_web_table_url,
+    "url": config.get_url,
+}
+
+#: The four keys the policy must leave alone, with a value that would be
+#: rejected outright if the policy ever reached them.  ``browser`` is the
+#: pointed case: ``Driver.java:29-42`` has no default branch and AAP 0.4.1
+#: requires "Any other value fails at first driver use, as today".
+UNVALIDATED_KEYS: Final[dict[str, str]] = {
+    "browser": "file:///etc/passwd",
+    "username": "user@169.254.169.254",
+    "password": "pass phrase with a space and a\ttab",
+    "EmplTitle": "Employees - Odoo\nwith a newline",
+}
+
+#: Every rejection class of the policy, one parameter each.  Written as
+#: literals rather than generated, so that each case names the concrete shape
+#: a properties file could plausibly carry - a copied browser address bar, a
+#: pasted line with its newline, an SSRF probe at the cloud metadata service.
+REJECTED_URLS: Final[tuple[tuple[str, str], ...]] = (
+    ("over-2048-characters", "https://sign-in.invalid/" + "a" * 2048),
+    ("newline", "https://sign-in.invalid/web/login\n"),
+    ("embedded-newline", "https://sign-in.invalid/web\nX-Injected: 1"),
+    ("carriage-return", "https://sign-in.invalid/web\rlogin"),
+    ("tab", "https://sign-in.invalid/web\tlogin"),
+    ("nul", "https://sign-in.invalid/web\x00login"),
+    ("space", "https://sign-in.invalid/web login"),
+    ("leading-space", " https://sign-in.invalid/web/login"),
+    ("no-break-space", "https://sign-in.invalid/web\u00a0login"),
+    ("zero-width-space", "https://sign-in.invalid/web\u200blogin"),
+    ("right-to-left-override", "https://sign-in.invalid/web\u202elogin"),
+    ("line-separator", "https://sign-in.invalid/web\u2028login"),
+    ("paragraph-separator", "https://sign-in.invalid/web\u2029login"),
+    ("next-line", "https://sign-in.invalid/web\u0085login"),
+    ("file-scheme", "file:///etc/passwd"),
+    ("file-scheme-with-host", "file://sign-in.invalid/etc/passwd"),
+    ("data-scheme", "data:text/html,<script>fetch('/')</script>"),
+    ("javascript-scheme", "javascript:alert(document.cookie)"),
+    ("about-scheme", "about:blank"),
+    ("view-source-scheme", "view-source:https://sign-in.invalid/web/login"),
+    ("ftp-scheme", "ftp://sign-in.invalid/web/login"),
+    ("uppercase-file-scheme", "FILE:///etc/passwd"),
+    ("no-scheme", "//sign-in.invalid/web/login"),
+    ("bare-host", "sign-in.invalid/web/login"),
+    ("empty", ""),
+    ("userinfo-with-password", "https://qa:secret@sign-in.invalid/web/login"),
+    ("userinfo-without-password", "https://qa@sign-in.invalid/web/login"),
+    ("empty-userinfo", "https://@sign-in.invalid/web/login"),
+    ("no-host", "https:///web/login"),
+    ("authority-only", "https://"),
+    ("non-ascii-host", "https://b\u00fccher.example/web/login"),
+    ("port-out-of-range", "https://sign-in.invalid:70000/web/login"),
+    ("port-not-a-number", "https://sign-in.invalid:https/web/login"),
+    ("negative-port", "https://sign-in.invalid:-1/web/login"),
+    ("unterminated-ipv6-literal", "https://[::1/web/login"),
+    ("ipv4-metadata-address", "http://169.254.169.254/latest/meta-data/"),
+    ("ipv4-link-local", "http://169.254.1.1/web/login"),
+    ("ipv6-link-local", "http://[fe80::1]/web/login"),
+    ("ipv4-mapped-metadata", "http://[::ffff:169.254.169.254]/latest/"),
+    ("six-to-four-metadata", "http://[2002:a9fe:a9fe::]/latest/"),
+    # A Teredo literal tunnelling the same destination: the client half of
+    # ``2001:0:c000:201::5601:5601`` is 169.254.169.254 - the obfuscated
+    # ``5601:5601`` is its ones complement - behind the benign server half
+    # 192.0.2.1, so only a policy that reads the embedding turns it away.
+    ("teredo-metadata", "http://[2001:0:c000:201::5601:5601]/latest/"),
+    ("ipv4-unspecified", "http://0.0.0.0/web/login"),
+    ("ipv6-unspecified", "http://[::]/web/login"),
+    ("ipv4-multicast", "http://224.0.0.1/web/login"),
+    ("ipv6-multicast", "http://[ff02::1]/web/login"),
+    ("ipv4-reserved", "http://240.0.0.1/web/login"),
+    ("metadata-bare-name", "http://metadata/computeMetadata/v1/"),
+    ("metadata-google-internal", "http://metadata.google.internal/v1/"),
+    ("metadata-goog", "http://metadata.goog/v1/"),
+    ("instance-data", "http://instance-data/latest/meta-data/"),
+    # The alternative spellings of a blocked destination.  A browser resolves
+    # every one of these to the address or the name immediately above it, so a
+    # policy that tested the configured host as written - which is what an
+    # exact comparison against an IP literal or a name is - accepted them all
+    # while the request still reached the instance-metadata service.  The
+    # spellings, worked out:
+    #
+    #   169.254.169.254 = 2852039166 = 0xa9fea9fe = 0251.0376.0251.0376
+    #                   = 0xa9.0xfe.0xa9.0xfe = 169.254.43518 = 169.16689662
+    #   169.254.0.1     = 2851995649, the same link-local block by another
+    #                     address, so the block and not one address is policed
+    #   0.0.0.0         = 0 = 0x = 00.00.00.00 = 0x0.0x0.0x0.0x0 = 0.0 = 0.0.0
+    ("metadata-address-as-integer", "http://2852039166/latest/meta-data/"),
+    ("metadata-address-as-hexadecimal", "http://0xa9fea9fe/latest/"),
+    ("metadata-address-as-dotted-octal", "http://0251.0376.0251.0376/latest/"),
+    ("metadata-address-as-dotted-hex", "http://0xa9.0xfe.0xa9.0xfe/latest/"),
+    ("metadata-address-in-two-parts", "http://169.16689662/latest/"),
+    ("metadata-address-in-three-parts", "http://169.254.43518/latest/"),
+    ("metadata-address-with-root-dot", "http://169.254.169.254./latest/"),
+    ("unspecified-as-integer", "http://0/web/login"),
+    ("unspecified-as-hexadecimal-prefix", "http://0x/web/login"),
+    ("unspecified-as-dotted-octal", "http://00.00.00.00/web/login"),
+    ("unspecified-as-dotted-hex", "http://0x0.0x0.0x0.0x0/web/login"),
+    ("unspecified-in-two-parts", "http://0.0/web/login"),
+    ("unspecified-in-three-parts", "http://0.0.0/web/login"),
+    ("link-local-as-integer", "http://2851995649/web/login"),
+    ("metadata-name-with-root-dot", "http://metadata.google.internal./v1/"),
+    ("metadata-name-as-subdomain", "http://a.metadata.google.internal/v1/"),
+    ("metadata-bare-name-as-subdomain", "http://a.metadata/computeMetadata/"),
+    ("percent-encoded-host", "http://%6d%65%74%61%64%61%74%61/v1/"),
+    ("ipv6-zone-identifier", "http://[::1%eth0]:8069/web/login"),
+    ("encoded-ipv6-zone-identifier", "http://[fe80::1%25eth0]/web/login"),
+    ("numeric-host-overflowing-four-bytes", "http://4294967296/web/login"),
+    ("numeric-host-with-too-many-digits", "http://999999999999/web/login"),
+    ("numeric-host-in-five-parts", "http://1.2.3.4.5/web/login"),
+    ("numeric-host-with-oversized-part", "http://256.0.2.10/web/login"),
+    ("numeric-host-with-oversized-last-part", "http://192.16777216/web/login"),
+    ("numeric-host-with-no-octal-reading", "http://09/web/login"),
+    ("doubled-dot-host", "http://sign-in..invalid/web/login"),
+    ("two-trailing-dots-host", "http://sign-in.invalid../web/login"),
+    ("leading-dot-host", "http://.sign-in.invalid/web/login"),
+    ("root-dot-only-host", "http://./web/login"),
+)
+
+#: Every shape the policy must keep accepting, returned byte for byte.  The
+#: loopback and private entries are the deliberate permits; the punycoded
+#: entry is how an internationalized host is supplied, since the policy
+#: encodes nothing on the caller's behalf.
+ACCEPTED_URLS: Final[tuple[tuple[str, str], ...]] = (
+    ("http-hostname", "http://sign-in.invalid/web/login"),
+    ("https-hostname", "https://sign-in.invalid/web/login"),
+    ("uppercase-scheme", "HTTPS://sign-in.invalid/web/login"),
+    ("explicit-port", "https://sign-in.invalid:8069/web/login"),
+    ("path-query-fragment", "https://sign-in.invalid/web?db=qa&x=1#top"),
+    ("no-path", "https://sign-in.invalid"),
+    ("trailing-dot-host", "https://sign-in.invalid./web/login"),
+    ("punycoded-host", "https://xn--bcher-kva.example/web/login"),
+    ("ipv4-literal", "http://192.0.2.10/web/login"),
+    ("ipv6-literal", "http://[2001:db8::1]:8069/web/login"),
+    ("loopback-name", "http://localhost:8069/web/login"),
+    ("loopback-ipv4", "http://127.0.0.1:8069/web/login"),
+    ("loopback-ipv6", "http://[::1]:8069/web/login"),
+    ("private-ipv4", "http://10.0.0.5/web/login"),
+    ("private-ipv4-172", "http://172.16.0.9:8069/web/login"),
+    ("private-ipv4-192", "http://192.168.1.5:8069/web/login"),
+    ("shared-address-space", "http://100.64.0.1/web/login"),
+    ("private-ipv6", "http://[fc00::1]:8069/web/login"),
+    ("public-ipv4", "http://93.184.216.34/web/login"),
+    # The other half of the host normalization: it turns away the spellings of
+    # a *blocked* destination and nothing else.  The four numeric entries here
+    # are the same legacy forms the rejection table carries, over an address
+    # the policy permits - 2130706433 and 0177.0.0.1 are 127.0.0.1, 167772165
+    # and 012.0.0.5 are 10.0.0.5 - so they are accepted for exactly the reason
+    # the dotted forms above are, and a normalization that refused numeric
+    # hosts wholesale instead of reading them would fail here.
+    ("loopback-as-integer", "http://2130706433:8069/web/login"),
+    ("loopback-as-dotted-octal", "http://0177.0.0.1:8069/web/login"),
+    ("private-as-integer", "http://167772165/web/login"),
+    ("private-as-dotted-octal", "http://012.0.0.5/web/login"),
+    # And a registered name is left alone however numeric it looks: the first
+    # is the integer form of 127.0.0.1 followed by two ordinary labels, the
+    # second opens with a label that is all digits, the third opens with one
+    # that begins ``0x`` but is no hexadecimal number, and the fourth *ends*
+    # with an all-digit label.  A browser resolves all four by name, and a
+    # normalization that read any of them as an address would send the suite
+    # somewhere the configuration never named.
+    ("numeric-looking-hostname", "http://2130706433.example.invalid/web/login"),
+    ("digit-label-hostname", "http://09.sign-in.invalid/web/login"),
+    ("hex-looking-label-hostname", "http://0xg.sign-in.invalid/web/login"),
+    ("numeric-last-label-hostname", "http://sign-in.invalid.123/web/login"),
+)
+
+
+def _properties_file_can_carry(value: str) -> bool:
+    """Return whether a properties file hands ``value`` back byte for byte.
+
+    Not every rejected value can be *delivered* by the file channel, and the
+    two reasons are the file format rather than the policy:
+
+    * The file is ISO-8859-1 (``java.util.Properties.load(InputStream)`` on the
+      Java 8 level ``pom.xml:12-13`` pins), so a value carrying a character
+      outside that range cannot be written into it at all.
+    * The ``java.util`` grammar strips the whitespace between the separator and
+      the value, and ends the entry at a line terminator, so a value with
+      leading whitespace or an embedded ``\\n``/``\\r`` is not the value the
+      reader returns - the reader would hand back a *different*, in-policy
+      string, and the test would be asserting against a value the file never
+      held.
+
+    Every host-shaped case is carried: a host cannot contain a line
+    terminator, leading whitespace or a non-Latin-1 character without being
+    rejected by the policy's character test instead, which the userdata
+    parametrization covers for every case in the table.
+
+    :param value: A configured URL from :data:`REJECTED_URLS`.
+    :returns: ``True`` when a properties file written by ``_write_properties``
+        delivers exactly this string to the accessor.
+    """
+    try:
+        value.encode(properties.DEFAULT_ENCODING)
+    except UnicodeEncodeError:
+        return False
+
+    return (
+        value == value.lstrip()
+        and "\n" not in value
+        and "\r" not in value
+    )
+
+
+#: The rejection cases the properties-file channel can deliver unchanged, and
+#: therefore the cases the file-path test below is driven over.  Derived from
+#: the one table rather than written out again, so a case added above reaches
+#: both channels by itself.
+FILE_CARRIED_REJECTED_URLS: Final[tuple[tuple[str, str], ...]] = tuple(
+    (case, value)
+    for case, value in REJECTED_URLS
+    if _properties_file_can_carry(value)
+)
+
+
+def _assert_withholds_the_value(
+    excinfo: pytest.ExceptionInfo[ValueError],
+    key: str,
+    value: str,
+) -> None:
+    """Assert the raised message names ``key``, the reason, and not the value.
+
+    The message reaches two durable places - the console log and, through the
+    failing step, the published report artifacts - so it must carry no part of
+    a configured value: ``password`` is one of the six keys and the two URLs
+    routinely carry a database name or a token in their query string.
+
+    :param excinfo: The captured :class:`ValueError`.
+    :param key: The configuration key that must be named.
+    :param value: The rejected value, which must not appear.
+    :returns: ``None``.
+    """
+    message = str(excinfo.value)
+
+    assert key in message, f"the message must name the key: {message!r}"
+    assert "not navigable" in message, f"no reason was given: {message!r}"
+
+    # The empty value is skipped rather than special-cased away: ``"" in text``
+    # is true of every string, so the containment test says nothing about it,
+    # and the two assertions above are the whole of what that case can be held
+    # to.
+    if value:
+        assert value not in message, "the rejected value was reported back"
+
+    # The tail of a long value is the part a truncating implementation would
+    # keep, and a host is the part a helpful one would quote.
+    if len(value) > 16:
+        assert value[-16:] not in message, "part of the value was reported"
+    assert "sign-in.invalid" not in message, "the host was reported"
+
+
+@pytest.mark.parametrize("key", tuple(URL_ACCESSORS))
+@pytest.mark.parametrize(
+    "value",
+    [pytest.param(value, id=case) for case, value in REJECTED_URLS],
+)
+def test_a_url_outside_the_navigation_policy_is_rejected(
+    key: str,
+    value: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_userdata: Callable[[Mapping[str, str] | None], None],
+) -> None:
+    """Every rejection class raises, for both keys, at the accessor.
+
+    One parameter per class, so a policy that lost a class - a scheme test
+    narrowed to ``file:``, a character test that only looked for ``\\n`` -
+    fails on the case it stopped covering rather than passing on the
+    twenty-odd it still holds.  Both keys are driven because the two are read
+    at five navigation sites between them and a policy wired into one accessor
+    alone would leave three of those sites open.
+    """
+    _use_directory(monkeypatch, tmp_path)
+    install_userdata({key: value})
+
+    with pytest.raises(ValueError) as excinfo:
+        URL_ACCESSORS[key]()
+
+    _assert_withholds_the_value(excinfo, key, value)
+
+
+@pytest.mark.parametrize("key", tuple(URL_ACCESSORS))
+@pytest.mark.parametrize(
+    "value",
+    [pytest.param(value, id=case) for case, value in ACCEPTED_URLS],
+)
+def test_a_url_within_the_navigation_policy_is_returned_unchanged(
+    key: str,
+    value: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_userdata: Callable[[Mapping[str, str] | None], None],
+) -> None:
+    """An in-policy URL is returned byte for byte, loopback and private ones too.
+
+    The other half of the policy, and the half that keeps it usable: the
+    address of the system under test is supplied by neither repository (AAP
+    0.2.2), so a QA instance on ``localhost``, on ``10.0.0.0/8`` or behind a
+    shared-address-space address must still be reachable.  Equality is
+    asserted, not truthiness, because a normalizing accessor - one that added
+    a trailing slash or re-encoded the query - would hand the browser a
+    different address from the one the file holds.
+    """
+    _use_directory(monkeypatch, tmp_path)
+    install_userdata({key: value})
+
+    assert URL_ACCESSORS[key]() == value
+
+
+@pytest.mark.parametrize("key", tuple(URL_ACCESSORS))
+@pytest.mark.parametrize(
+    "rejected",
+    [pytest.param(value, id=case) for case, value in FILE_CARRIED_REJECTED_URLS],
+)
+def test_the_policy_applies_to_a_value_from_the_properties_file(
+    key: str,
+    rejected: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The file path is policed exactly as the userdata path is.
+
+    The properties file is the channel a real run uses - userdata carries only
+    ``--browser`` (AAP 0.4.1) - so a policy applied to overrides alone would
+    police the one path that is not the threat.  Both outcomes are asserted
+    from the file: a rejected value raises and an accepted one comes back
+    unchanged.
+
+    Driven over every rejection class the file format can deliver rather than
+    one representative of it, because the policy runs after the value has been
+    read and the two channels differ only in where the string came from: a
+    class policed on the userdata path and not on this one would be a gap in
+    the channel that actually carries these two keys.  The classes the file
+    cannot deliver are held to the userdata path alone, for the format reasons
+    :func:`_properties_file_can_carry` states, and the test below pins that
+    the ones left out are only ever those.
+    """
+    _use_directory(monkeypatch, tmp_path, {key: rejected})
+
+    with pytest.raises(ValueError) as excinfo:
+        URL_ACCESSORS[key]()
+
+    _assert_withholds_the_value(excinfo, key, rejected)
+
+    properties.reset_cache()
+    _use_directory(monkeypatch, tmp_path, {key: SYNTHETIC_VALUES[key]})
+
+    assert URL_ACCESSORS[key]() == SYNTHETIC_VALUES[key]
+
+
+def test_every_ordinary_rejection_class_reaches_the_properties_file_path() -> None:
+    """Only the exotic-character classes are held to the userdata path alone.
+
+    The guard on the filter above, and the reason the filter can be trusted:
+    every case whose value is plain printable ASCII with no surrounding
+    whitespace - which is every scheme, authority, host and port case, and so
+    every class the review's host-normalization finding concerns - must be
+    driven through the properties file as well.  Written as an independent
+    predicate rather than as a restatement of
+    :func:`_properties_file_can_carry`, so a filter that grew too broad and
+    quietly dropped a host case fails here.
+    """
+    carried = {case for case, _value in FILE_CARRIED_REJECTED_URLS}
+
+    dropped = [
+        case
+        for case, value in REJECTED_URLS
+        if case not in carried
+        and value.isascii()
+        and value.isprintable()
+        and value == value.strip()
+    ]
+
+    assert dropped == [], (
+        f"{dropped} are ordinary printable URLs and must be policed on the "
+        f"properties-file path, not on the userdata path alone"
+    )
+
+
+@pytest.mark.parametrize("key", tuple(URL_ACCESSORS))
+def test_an_absent_url_key_is_returned_as_none_without_raising(
+    key: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``None`` passes through the policy untouched - AAP 0.4.1 and AAP 0.8.
+
+    The tolerance the policy must not regress, asserted both ways a key can be
+    absent: a properties file that omits it, and no properties file at all.
+    AAP 0.4.1 fixes that "a missing key returns null so failures surface at the
+    point of use", so the ``None`` has to reach ``driver.get`` and fail there;
+    a pre-emptive rejection here would fail the scenario in a different place
+    and turn an absent file into a different failure from the one the reference
+    produces.
+    """
+    other = next(name for name in URL_ACCESSORS if name != key)
+    _use_directory(monkeypatch, tmp_path, {other: SYNTHETIC_VALUES[other]})
+
+    assert URL_ACCESSORS[key]() is None
+
+    # The second arrangement: no properties file whatever, which the reader
+    # tolerates with one warning (``ConfigurationReader:21-24``).  A fresh
+    # directory, because the cache is keyed to the first read's outcome.
+    empty = tmp_path / "no-configuration-here"
+    empty.mkdir()
+    properties.reset_cache()
+    _use_directory(monkeypatch, empty, None)
+
+    assert URL_ACCESSORS[key]() is None
+
+
+def test_the_rejection_is_logged_by_key_and_reason_and_never_by_value(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_userdata: Callable[[Mapping[str, str] | None], None],
+    log_capture: Callable[[str], list[logging.LogRecord]],
+) -> None:
+    """The record a CI console shows carries the key and the reason only.
+
+    The raise reaches the report artifact through the failing step; this record
+    is what the engineer who wrote the properties file reads in the console.
+    Both are held to the same hygiene rule as every other record this module
+    emits - key names, never values - and the record's ``args`` are checked as
+    well as its rendered message, because a lazily formatted record carries the
+    value in the tuple even when the message reads clean.
+    """
+    records = log_capture(CONFIG_MODULE)
+    value = "https://qa:secret@169.254.169.254/latest/meta-data/"
+    _use_directory(monkeypatch, tmp_path)
+    install_userdata({"web.table.url": value})
+
+    with pytest.raises(ValueError):
+        config.get_web_table_url()
+
+    rejections = [
+        record for record in records if record.levelno >= logging.WARNING
+    ]
+    assert len(rejections) == 1, "the rejection must be reported exactly once"
+    message = rejections[0].getMessage()
+    assert "web.table.url" in message
+    assert "not navigable" in message
+    assert value not in message
+    assert value not in str(rejections[0].args)
+    assert "secret" not in message
+    assert "169.254.169.254" not in message
+
+
+@pytest.mark.parametrize("key", tuple(UNVALIDATED_KEYS))
+def test_the_other_four_keys_are_returned_without_any_validation(
+    key: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_userdata: Callable[[Mapping[str, str] | None], None],
+) -> None:
+    """``browser``, ``username``, ``password`` and ``EmplTitle`` stay untouched.
+
+    The policy is scoped to the two values that become a browser request, and
+    the four that do not must not acquire one: ``Driver.java:29-42`` switches
+    on ``browser`` with no default branch, so AAP 0.4.1 requires "Any other
+    value fails at first driver use, as today", and the credentials and the
+    expected title are compared by the browser and by an assertion, not
+    navigated to.  Each value here would be rejected on sight by the URL
+    policy, which is what makes this test able to detect one that leaked into
+    the wrong accessor.
+    """
+    value = UNVALIDATED_KEYS[key]
+    _use_directory(monkeypatch, tmp_path)
+    install_userdata({key: value})
+
+    assert ACCESSORS[key]() == value
+    assert config.get_property(key) == value
+
+
+def test_the_shared_reader_returns_a_rejected_url_unchanged(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    install_userdata: Callable[[Mapping[str, str] | None], None],
+) -> None:
+    """The gate is the accessor, not :func:`app.config.get_property`.
+
+    Deliberate, and worth pinning: ``get_property`` is the port of
+    ``ConfigurationReader.getProperty`` one method for one method, and the
+    navigation policy belongs to the two named accessors the navigation steps
+    call.  The three step modules reach the two URL keys only through those
+    accessors - ``tests/test_steps_registration.py`` pins their import sets -
+    so this is not a bypass, and keeping the policy out of the shared reader is
+    what leaves the other four keys unvalidated by construction rather than by
+    exception.
+    """
+    rejected = dict(REJECTED_URLS)["file-scheme"]
+    _use_directory(monkeypatch, tmp_path)
+    install_userdata({"url": rejected})
+
+    assert config.get_property("url") == rejected
+    with pytest.raises(ValueError):
+        config.get_url()
+
+
+def test_no_module_outside_app_config_calls_the_shared_reader(
+    repo_root: Path,
+) -> None:
+    """Nothing in the port reads a configured key around the named accessors.
+
+    What makes the previous test a scoping decision rather than a hole in the
+    navigation policy.  ``get_property`` returns a rejected URL unchanged, so
+    the policy would be bypassable by any caller that read ``url`` or
+    ``web.table.url`` through it; this asserts structurally that no caller
+    does, and that a future one cannot arrive unnoticed.
+
+    The scan is over every module in ``app/`` and ``features/`` except
+    ``app/config.py`` itself, which owns the shared reader and calls it from
+    the six accessors by design.  It is AST-based and looks for the *call*
+    rather than the name, so this module's own prose - and the docstrings in
+    ``app/config.py``'s consumers, which discuss the accessors at length -
+    cannot register as a violation.
+
+    Enforced rather than assumed because the four consumers AAP 0.4.2 names
+    reach exactly the keys their Java originals read, through the six named
+    accessors: ``employee_steps`` (``url``, ``EmplTitle``), ``session_steps``
+    (``web.table.url``, ``username``, ``password``), ``login_steps``
+    (``web.table.url``) and ``app/automation/driver.py`` (``browser``).
+    """
+    owner = (repo_root / "app" / "config.py").resolve()
+    sources = [
+        path
+        for directory in ("app", "features")
+        for path in sorted((repo_root / directory).rglob("*.py"))
+        if path.resolve() != owner
+    ]
+    assert sources, "no port modules were scanned"
+
+    offenders = [
+        f"{path.relative_to(repo_root)}:{node.lineno}"
+        for path in sources
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.Call)
+        and (
+            (isinstance(node.func, ast.Name) and node.func.id == "get_property")
+            or (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get_property"
+            )
+        )
+    ]
+
+    assert offenders == [], (
+        f"the shared reader is called outside app/config.py at {offenders}; "
+        f"a configured URL read that way would skip the navigation policy"
+    )
 
 
 def test_no_userdata_is_left_installed_by_this_module(

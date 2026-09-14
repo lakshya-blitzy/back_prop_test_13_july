@@ -1,66 +1,36 @@
 """Tests for the read-only viewer's HTTP surface: all six routes, and only six.
 
-This module is the gate for the whole HTTP contract AAP 0.3.1 calls *"the
-complete contract"* - the six blueprint endpoints, their success bodies, every
-cause of a 404, the artifact allowlist and its hostile-path rejections, the
-read-only guarantee, and the two error handlers ``app/errors.py`` registers.
+The gate for the whole HTTP contract AAP 0.3.1 calls *"the complete contract"*:
+the six blueprint endpoints and their success bodies, every cause of a 404, the
+artifact allowlist and its hostile-path rejections, the read-only guarantee, and
+the two error handlers ``app/errors.py`` registers.
 
-Where the application under test comes from
--------------------------------------------
-From ``tests/conftest.py``'s :fixture:`flask_app` and :fixture:`client`
-fixtures, which call ``app.create_app()``, and from nowhere else.  Nothing here
-constructs ``Flask(...)``, registers a blueprint, installs an error handler or
-probes whether the factory is importable, and there is no ``pytest.skip``,
-``importorskip`` or ``xfail`` anywhere in the file.  That is deliberate and it
-is the point: a missing, unimportable or signature-broken ``create_app`` must
-make every test below **fail**.  A module that assembled a stand-in application
-would keep passing while the production wiring was gone, which is exactly the
-regression this suite exists to catch.
+The application comes from ``tests/conftest.py``'s :fixture:`flask_app` and
+:fixture:`client`, which call ``app.create_app()``, and from nowhere else: no
+test builds a stand-in, registers a blueprint, installs a handler, skips or
+xfails, so a missing or signature-broken factory fails every test here.  What
+:fixture:`error_app` adds is strict Jinja undefined and the test-only
+:data:`PROBE_RULE`, which makes the 500 handler reachable without any
+production route being capable of raising.
 
-One test-only URL rule is added to that factory-built application - the probe
-at :data:`PROBE_RULE` - because the 500 handler cannot be reached otherwise: no
-production route may be capable of raising, so provoking the handler needs a
-rule that exists only here.  Every other request in this module goes to a
-production route.
-
-How the data a route reads is controlled
-----------------------------------------
 The views call ``app.utils.paths`` accessors with no ``base``, and those read
-``Path.cwd()`` fresh on every call, so the working directory *is* the artifact
-root a request sees.  Every route test therefore runs inside
-:fixture:`results_root`, which ``chdir``s into conftest's
-:fixture:`tmp_artifact_root` - an empty directory with no ``target/`` - through
-``monkeypatch``, so the change is undone at teardown and the repository's own
-``target/`` is never read and never written.
+``Path.cwd()`` per call, so the working directory *is* the artifact root a
+request sees: every route test runs inside :fixture:`results_root`, which
+``monkeypatch``es the cwd into an empty :fixture:`tmp_artifact_root`, undoes it
+at teardown and leaves the repository's ``target/`` unread.  Results come from
+``app.reporting.cucumber_json.build_cucumber_json``, so the viewer meets what
+the writer emits, and the four shapes that writer cannot produce are written
+directly, as data-availability causes the viewer answers identically.
 
-The on-disk results file is produced by
-``app.reporting.cucumber_json.build_cucumber_json``, from conftest's
-:fixture:`sample_result_set` or from an internal-schema document built by the
-helpers below, so the viewer is exercised against exactly what the writer
-emits.  Four shapes that writer cannot produce - a directory standing where the
-file belongs, undecodable bytes, text that is not JSON, and a document that
-parses but is not a list - are written directly, because they are the
-data-availability causes the viewer must answer identically.
-
-What is asserted, and what is deliberately not
-----------------------------------------------
-Structure and contract, never bytes of a generated artifact: the pages this
-module reads are rendered from a fixed input, so the assertions are on the
-names, indices, statuses, links, content types and status codes the contract
-fixes.  The one place byte-identity *is* asserted is the error bodies, where
-AAP 0.3.1 requires every cause of a 404 to be indistinguishable from every
-other.
-
-The 500-handler tests parametrize :fixture:`flask_app` indirectly, which
-conftest supports by merging the mapping over its own ``{"TESTING": True}``:
-exceptions must reach the handler rather than the test, so ``TESTING`` is
-turned back off and propagation disabled explicitly, because Flask propagates
-when either testing or debug is on.
+Assertions are on structure and contract - names, indices, statuses, links,
+content types, status codes - never on an artifact's bytes, the one exception
+being the 404 bodies AAP 0.3.1 requires to be indistinguishable from each other.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Iterator
@@ -68,6 +38,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Final
+from urllib.parse import urljoin
 
 import pytest
 from flask import Flask, render_template, url_for
@@ -86,8 +57,10 @@ from app.utils import (
     RERUN_TXT_NAME,
     TARGET_DIR_NAME,
     WORKERS_DIR_NAME,
+    ArtifactSpec,
     cucumber_json_path,
-    resolve_artifact,
+    open_artifact_read,
+    open_resolved_artifact,
 )
 
 # --------------------------------------------------------------------------
@@ -97,7 +70,7 @@ from app.utils import (
 #: The template name the 500 handler resolves, and the name this suite uses.
 ERROR_500_TEMPLATE: Final[str] = "errors/500.html"
 
-#: The path of the test-only rule used to provoke a handler exception.  It is
+#: The path of the test-only rule that provokes a handler exception.  It is
 #: added to the factory-built application inside :fixture:`error_app` and
 #: exists nowhere else, so no production route has to be able to fail for the
 #: handler tests to run.
@@ -150,6 +123,37 @@ HTML_REPORT_ENDPOINT_ARGS: Final[tuple[tuple[str, dict[str, Any]], ...]] = (
 #: why a page that spelled it differently would render uncoloured and unfilterable
 #: while still carrying the right words.
 STATUS_HOOK: Final[str] = "data-report-status"
+
+#: The one module outside ``app/utils`` that ``app/web/routes.py`` may reach:
+#: the normalized result model AAP 0.4.2's invariant list requires every report
+#: surface to render over.  Permitted by its exact name and never by the
+#: ``app.reporting`` prefix, so a writer cannot arrive beside it.
+PERMITTED_REPORTING_EDGE: Final[str] = "app.reporting.aggregation"
+
+#: The report modules the viewer must never reach, each named individually
+#: because the permitted edge above punches a hole in the package prefix.  The
+#: event collector owns the schema and every one of the others WRITES: the four
+#: artifact writers and the screenshot module, which encodes captured bytes.
+FORBIDDEN_REPORTING_MODULES: Final[tuple[str, ...]] = (
+    "app.reporting.events",
+    "app.reporting.cucumber_json",
+    "app.reporting.rerun_report",
+    "app.reporting.html_report",
+    "app.reporting.pretty_reports",
+    "app.reporting.screenshots",
+)
+
+#: The cache policy every sensitive response must carry (CWE-525).  Report
+#: pages quote the step and assertion text of a suite whose fixtures are
+#: credentials, the scenario page embeds the failure screenshot, and the
+#: artifact route serves the results file itself - so a copy must not outlive
+#: the artifacts the clean step removes.  ``no-store`` rather than
+#: ``no-cache``: RFC 9111 makes the latter a revalidation requirement, under
+#: which the representation is still written to disk.
+NO_STORE_POLICY: Final[str] = "no-store, private, max-age=0"
+
+#: The HTTP/1.0 spelling that accompanies it.
+NO_STORE_PRAGMA: Final[str] = "no-cache"
 
 #: Methods no route accepts.  The surface is read-only, so each of the six
 #: answers 405 for all four.
@@ -268,6 +272,32 @@ OUTSIDE_FILE_NAME: Final[str] = "blitzy-outside-the-root.txt"
 #: argument; the route's own prefix still comes from ``url_for`` against the
 #: endpoint name, and only the segment is substituted.
 ARTIFACT_NAME_SENTINEL: Final[str] = "blitzy-artifact-name-sentinel"
+
+#: The two spellings of the report tree's directory AAP 0.3.1 authorizes, and
+#: the longer trailing-separator variants it does not.  Written out rather than
+#: derived, so a change to the path module's allowlist fails here instead of
+#: quietly moving what this suite calls authorized.
+TREE_DIRECTORY_SPELLINGS: Final[tuple[str, ...]] = ("cucumber", "cucumber/")
+TREE_DIRECTORY_OVER_SPELLINGS: Final[tuple[str, ...]] = (
+    "cucumber//",
+    "cucumber///",
+    "cucumber////",
+)
+
+#: A results document planted **outside** the artifact root, list-shaped so
+#: that nothing but its provenance can be what a route objects to, and carrying
+#: a canary that no response may ever contain.  Reached through a symbolic link
+#: and through a hard link at the results path, which is the pair of
+#: arrangements a pathname read follows and a verified descriptor refuses.
+EXTERNAL_RESULTS_NAME: Final[str] = "blitzy-external-results.json"
+EXTERNAL_RESULTS_CANARY: Final[str] = "blitzy-external-results-canary"
+
+#: Planted in a file the artifact route has already validated, to be swapped in
+#: after validation: what the response carries decides whether the route serves
+#: the object it checked or whatever the pathname names by the time the bytes
+#: are read.
+VALIDATED_ARTIFACT_CONTENT: Final[str] = "blitzy-the-artifact-that-was-validated"
+SWAPPED_ARTIFACT_CONTENT: Final[str] = "blitzy-swapped-in-after-validation"
 
 
 # --------------------------------------------------------------------------
@@ -471,6 +501,47 @@ def _results_document(features: list[dict[str, Any]]) -> list[dict[str, Any]]:
     )
 
 
+def _linked_artifact_name(spec: ArtifactSpec) -> str:
+    """The artifact-route name the landing page must link for one spec.
+
+    The three single-file artifacts are linked by their own allowlisted key.
+    The report tree is linked by the overview **page** inside it, because the
+    route answers the tree's directory spellings with a redirect to that page
+    and a page reached at the directory alias would resolve its relative
+    references one level too high.
+
+    :param spec: One member of ``ARTIFACT_SPECS``.
+    :returns: The value the page must pass as ``web.artifact``'s ``name``.
+    """
+    return PRETTY_OVERVIEW_RELPATH if spec.is_dir else spec.key
+
+
+def _external_results_document() -> list[dict[str, Any]]:
+    """A valid results document carrying :data:`EXTERNAL_RESULTS_CANARY`.
+
+    Produced by the writer, so the only thing wrong with it is where it lives:
+    a route that refuses it is refusing its provenance and not its shape, and a
+    route that renders it puts the canary in a response.
+
+    :returns: The Cucumber-JVM document, as a run would have written it.
+    """
+    return _results_document(
+        [
+            _feature(
+                EXTERNAL_RESULTS_CANARY,
+                "features/External.feature",
+                [
+                    _scenario(
+                        EXTERNAL_RESULTS_CANARY,
+                        steps=[_step(EXTERNAL_RESULTS_CANARY, "passed")],
+                        started="2022-09-07T13:37:26.297Z",
+                    )
+                ],
+            )
+        ]
+    )
+
+
 def _results_path(root: Path) -> Path:
     """Where the results artifact belongs inside one artifact root.
 
@@ -552,6 +623,59 @@ def _install_unusable_results(root: Path, cause: str) -> None:
         path.write_text('{"features": []}', encoding="utf-8")
         return
     raise AssertionError(f"unknown unusable-results cause: {cause!r}")
+
+
+# --------------------------------------------------------------------------
+# Foreign provenance.  Two ways a file outside the artifact root can answer at
+# the results path: a symbolic link, which a pathname read follows, and a hard
+# link, which no symlink check can even see.  Both are the same state as far as
+# the viewer is concerned - the thing at that path is not what a run wrote -
+# and both must be refused by every route that reads it.
+# --------------------------------------------------------------------------
+
+#: The two arrangements, each of which must be indistinguishable from an absent
+#: artifact in every response.
+FOREIGN_RESULTS_ARRANGEMENTS: Final[tuple[str, ...]] = ("symlink", "hardlink")
+
+
+def _install_foreign_results(root: Path, arrangement: str) -> Path:
+    """Make an external results document answer at the results path.
+
+    The external file is written **above** the artifact root and carries a
+    perfectly valid, list-shaped document, so nothing about its content can be
+    the reason a route refuses it.
+
+    :param root: The artifact root to arrange.
+    :param arrangement: One of :data:`FOREIGN_RESULTS_ARRANGEMENTS`.
+    :returns: The external file's path, so a test can prove it is readable and
+        valid before asserting that no response contains it.
+    :raises AssertionError: If the arrangement is not one of the two, so that a
+        mistyped parametrization fails loudly instead of testing nothing.
+    """
+    external = root / EXTERNAL_RESULTS_NAME
+    external.write_text(
+        json.dumps(_external_results_document(), ensure_ascii=False),
+        encoding="utf-8",
+    )
+    path = _results_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_dir():
+        path.rmdir()
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+    if arrangement == "symlink":
+        os.symlink(external, path)
+        assert path.is_symlink()
+        return external
+    if arrangement == "hardlink":
+        os.link(external, path)
+        assert not path.is_symlink()
+        assert path.stat().st_nlink == 2, (
+            "the hard link was not created, so the case would prove nothing"
+        )
+        return external
+    raise AssertionError(f"unknown foreign-results arrangement: {arrangement!r}")
 
 
 # --------------------------------------------------------------------------
@@ -1384,15 +1508,16 @@ def test_index_lists_the_four_artifacts_in_specification_order(
     assert positions == sorted(positions)
 
 
-def test_index_links_every_present_artifact_to_its_artifact_route(
+def test_index_links_every_servable_artifact_to_its_artifact_route(
     client: FlaskClient, flask_app: Flask, artifact_tree: Path
 ) -> None:
-    """Each present artifact links to ``web.artifact``, and the link works.
+    """Each servable artifact links to ``web.artifact``, and the link works.
 
-    The href is compared against the URL ``url_for`` builds for that
-    artifact's own key, and then requested: a page that linked a name the
-    route does not allowlist would render a link that 404s, which is worse
-    than no link, so both halves are asserted.
+    The href is compared against the URL ``url_for`` builds for the name that
+    artifact must be linked by - its own key for the three files, the nested
+    overview page for the report tree - and then requested: a page that linked
+    a name the route does not serve at 200 would render a link that 404s or
+    redirects, which is worse than no link, so both halves are asserted.
 
     The tree also holds the worker intermediates, an unlisted file and a
     directory that is not the report tree, so "exactly one link per artifact"
@@ -1402,11 +1527,18 @@ def test_index_links_every_present_artifact_to_its_artifact_route(
     hrefs = _hrefs(body)
 
     for spec in ARTIFACT_SPECS:
-        expected = _url(flask_app, "web.artifact", name=spec.key)
+        expected = _url(
+            flask_app, "web.artifact", name=_linked_artifact_name(spec)
+        )
         assert hrefs.count(expected) == 1, f"{spec.key} is not linked exactly once"
         followed = client.get(expected)
         assert followed.status_code == 200, (
             f"the link the page offers for {spec.key} does not resolve"
+        )
+        assert followed.location is None, (
+            f"the link the page offers for {spec.key} redirects rather than "
+            "serving the artifact, so its relative references resolve against "
+            "the wrong base URL"
         )
     assert "tqa-artifact-missing" not in body
     assert "Not generated yet" not in body
@@ -1434,7 +1566,10 @@ def test_index_reports_presence_both_ways_within_one_page(
     }
 
     present_row = rows[present.key]
-    assert _url(flask_app, "web.artifact", name=present.key) in present_row
+    assert (
+        _url(flask_app, "web.artifact", name=_linked_artifact_name(present))
+        in present_row
+    )
     assert "tqa-artifact-missing" not in present_row
     assert "Not generated yet" not in present_row
     assert "<time datetime=" in present_row
@@ -1529,6 +1664,80 @@ def test_index_answers_200_while_the_report_routes_answer_404(
     assert _url(flask_app, "web.artifact", name=json_spec.key) in _hrefs(body), (
         "an unparseable artifact is still a downloadable one"
     )
+
+
+@pytest.mark.parametrize("arrangement", FOREIGN_RESULTS_ARRANGEMENTS)
+def test_index_does_not_advertise_an_artifact_linked_in_from_outside(
+    client: FlaskClient, flask_app: Flask, results_root: Path, arrangement: str
+) -> None:
+    """A symlinked or hard-linked artifact is listed as unavailable.
+
+    The page's availability question has to be the artifact route's own, or it
+    advertises what that route refuses.  The file is there, it is readable and
+    it is valid; the route still answers 404 for it, so the row must carry the
+    missing variant, the words the missing card uses and no link at all - and
+    the row's own assertion is made, not merely the page's, so a page that
+    dropped the row entirely would fail too.
+    """
+    _install_foreign_results(results_root, arrangement)
+    json_spec = next(
+        spec for spec in ARTIFACT_SPECS if spec.key == CUCUMBER_JSON_NAME
+    )
+
+    response = client.get(_url(flask_app, "web.index"))
+
+    assert response.status_code == 200
+    body = _text_of(response)
+    rows = dict(
+        zip((s.key for s in ARTIFACT_SPECS), _index_rows(body), strict=True)
+    )
+    row = rows[json_spec.key]
+    assert "tqa-artifact-missing" in row
+    assert "Not generated yet" in row
+    assert "<time datetime=" not in row
+    assert _url(flask_app, "web.artifact", name=json_spec.key) not in _hrefs(body)
+    assert client.get(
+        _url(flask_app, "web.artifact", name=json_spec.key)
+    ).status_code == 404
+
+
+def test_index_does_not_advertise_a_report_tree_without_its_overview_page(
+    client: FlaskClient, flask_app: Flask, results_root: Path
+) -> None:
+    """A half-written report tree is listed as unavailable, not linked.
+
+    The tree is a directory, and its presence is not the question: what the
+    route serves for it is the overview page inside it, so a tree whose
+    generator wrote its assets but never got as far as that page is refused.
+    The assets are written first, so the directory genuinely exists and this is
+    the overview page being verified rather than the parent.
+    """
+    assets = results_root / TARGET_DIR_NAME / PRETTY_ASSET_RELPATH
+    assets.parent.mkdir(parents=True)
+    assets.write_text(PRETTY_ASSET_CONTENT, encoding="utf-8")
+    overview = results_root / TARGET_DIR_NAME / PRETTY_OVERVIEW_RELPATH
+    assert not overview.exists(), "the overview page must be the missing part"
+    tree_spec = next(spec for spec in ARTIFACT_SPECS if spec.is_dir)
+
+    response = client.get(_url(flask_app, "web.index"))
+
+    assert response.status_code == 200
+    body = _text_of(response)
+    rows = dict(
+        zip((s.key for s in ARTIFACT_SPECS), _index_rows(body), strict=True)
+    )
+    row = rows[tree_spec.key]
+    assert "tqa-artifact-missing" in row
+    assert "Not generated yet" in row
+    assert PRETTY_OVERVIEW_RELPATH not in row
+    assert not [href for href in _hrefs(body) if "/artifacts/" in href], (
+        "the landing page linked an artifact route with nothing servable"
+    )
+    for spelling in TREE_DIRECTORY_SPELLINGS:
+        assert client.get(_artifact_url(flask_app, spelling)).status_code == 404, (
+            "an absent overview page must stay a 404 and not become a "
+            "redirect into one"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -1680,6 +1889,512 @@ def test_html_report_route_404_negotiates_json_on_request(
         assert response.status_code == 404
         assert response.headers["Content-Type"].startswith("text/html")
         assert "Nothing to show here" in _text_of(response)
+
+
+# --------------------------------------------------------------------------
+# Where the results a report route renders came from.  The document is read
+# through the path module's verified-descriptor reader, so the routes render
+# the artifact a run wrote and not whatever the results pathname happens to
+# address: a symbolic link to an external file, and an entry hard-linked to
+# one, are both refused, and neither the report routes nor the artifact route
+# nor the landing page may disclose or advertise them.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("arrangement", FOREIGN_RESULTS_ARRANGEMENTS)
+@pytest.mark.parametrize(("endpoint", "values"), REPORT_ENDPOINT_ARGS)
+def test_report_routes_refuse_results_linked_in_from_outside_the_root(
+    client: FlaskClient,
+    flask_app: Flask,
+    results_root: Path,
+    endpoint: str,
+    values: dict[str, Any],
+    arrangement: str,
+) -> None:
+    """All four report routes 404 on a results file that is not the artifact.
+
+    The external document is valid and its bytes are readable, which is
+    asserted first: the refusal is therefore about where the file came from and
+    not about its shape, and a route that read the pathname instead of a
+    verified descriptor would render the canary at 200.  The canary is checked
+    against the whole body, so an escaped or partial disclosure fails too.
+    """
+    external = _install_foreign_results(results_root, arrangement)
+    assert isinstance(json.loads(external.read_text(encoding="utf-8")), list), (
+        "the external document must be a valid feature list, or the refusal "
+        "below would prove nothing about provenance"
+    )
+
+    response = client.get(_url(flask_app, endpoint, **values))
+
+    assert response.status_code == 404
+    assert EXTERNAL_RESULTS_CANARY not in _text_of(response)
+    assert EXTERNAL_RESULTS_CANARY not in response.data.decode("utf-8")
+
+
+@pytest.mark.parametrize("arrangement", FOREIGN_RESULTS_ARRANGEMENTS)
+def test_linked_in_results_are_refused_identically_everywhere(
+    client: FlaskClient, flask_app: Flask, results_root: Path, arrangement: str
+) -> None:
+    """One arrangement, every surface: refused, cause-neutral, unadvertised.
+
+    The three surfaces that could leak the file are asserted together because
+    it is their agreement that matters: the report route answers the canonical
+    404 page, the artifact route answers the same page rather than serving the
+    bytes, and the landing page - which answers 200 always - neither links the
+    artifact nor mentions the external file.
+    """
+    external = _install_foreign_results(results_root, arrangement)
+    canonical = _not_found_page(client, flask_app)
+
+    overview = client.get(_url(flask_app, "web.reports_overview"))
+    served = client.get(_url(flask_app, "web.artifact", name=CUCUMBER_JSON_NAME))
+    index = client.get(_url(flask_app, "web.index"))
+
+    _assert_rejected(
+        overview,
+        canonical=canonical,
+        forbidden=(EXTERNAL_RESULTS_CANARY, EXTERNAL_RESULTS_NAME),
+    )
+    _assert_rejected(
+        served,
+        canonical=canonical,
+        forbidden=(EXTERNAL_RESULTS_CANARY, EXTERNAL_RESULTS_NAME),
+    )
+    assert external.is_file(), "the external file must survive every request"
+    assert index.status_code == 200
+    body = _text_of(index)
+    assert EXTERNAL_RESULTS_CANARY not in body
+    assert EXTERNAL_RESULTS_NAME not in body
+    assert _url(flask_app, "web.artifact", name=CUCUMBER_JSON_NAME) not in _hrefs(
+        body
+    ), "the landing page linked an artifact the route refuses"
+    json_spec = next(
+        spec for spec in ARTIFACT_SPECS if spec.key == CUCUMBER_JSON_NAME
+    )
+    rows = dict(
+        zip((s.key for s in ARTIFACT_SPECS), _index_rows(body), strict=True)
+    )
+    assert "tqa-artifact-missing" in rows[json_spec.key]
+    assert "Not generated yet" in rows[json_spec.key]
+
+
+# --------------------------------------------------------------------------
+# Resource budgets.  The results artifact is read and materialised on every
+# request to four routes, so its size and shape are bounded; each budget's
+# breach is one more cause of the same 404, and a legitimately large report
+# still renders.
+# --------------------------------------------------------------------------
+
+#: The four breaches, each of which must be indistinguishable from the others
+#: and from the five causes above.
+BUDGET_BREACHES: Final[tuple[str, ...]] = (
+    "numeric-token",
+    "bytes",
+    "depth",
+    "collection",
+)
+
+#: The figures this suite breaches each budget by, written out rather than
+#: derived from the view module, so that every test below fails on a status
+#: code when the budgets are gone rather than on a missing constant.  Each is
+#: chosen to be over its budget and, deliberately, within what an unguarded
+#: ``json.loads`` handles without complaint: a document nested 5,000 deep would
+#: exhaust the parser's own recursion and be refused for that reason instead,
+#: which would prove nothing about a depth budget.  The relationship between
+#: these figures and the budgets themselves is asserted separately.
+OVER_BUDGET_NUMBER_DIGITS: Final[int] = 5_000
+OVER_BUDGET_BYTES: Final[int] = 65 * 1024 * 1024
+OVER_BUDGET_DEPTH: Final[int] = 256
+OVER_BUDGET_COLLECTION_ITEMS: Final[int] = 200_000
+
+
+def _budget_breaching_results(breach: str) -> bytes:
+    """The bytes of a results file that breaks exactly one budget.
+
+    Every one of them is a **usable report with one pathological member
+    appended**: a real feature carrying a real scenario sits at position zero,
+    so each of the four report routes has something to render and a 404 from
+    any of them can only be the budget answering rather than an index that was
+    out of range anyway.  The pathological member is spliced into the JSON text
+    rather than built as objects, because a 256-deep structure cannot be
+    serialised by a recursive encoder in the first place.
+
+    :param breach: One of :data:`BUDGET_BREACHES`.
+    :returns: The file's bytes, ready to be written at the results path.
+    :raises AssertionError: If the breach is not one of the four.
+    """
+    usable = json.dumps(
+        _results_document(
+            [
+                _feature(
+                    "a budget test feature",
+                    "features/Budget.feature",
+                    [
+                        _scenario(
+                            "a budget test scenario",
+                            steps=[_step("a step", "passed")],
+                            started="2022-09-07T13:37:26.297Z",
+                        )
+                    ],
+                )
+            ]
+        )
+    )
+    assert usable.endswith("]"), "the document must be the top-level list"
+
+    if breach == "numeric-token":
+        # A 5,000-digit integer, the reviewer's own case: past any plausible
+        # numeric-token cap, and past CPython's integer-string conversion
+        # limit, which is what made an unguarded parse raise ValueError and
+        # answer 500 where the contract has a 404.
+        extra = "9" * OVER_BUDGET_NUMBER_DIGITS
+    elif breach == "bytes":
+        # Over the byte budget in total while every single string stays tiny,
+        # so it is the file's size that is refused and nothing else.
+        chunk = json.dumps("b" * 1024)
+        extra = ",".join([chunk] * ((OVER_BUDGET_BYTES // 1024) + 1))
+    elif breach == "depth":
+        extra = "[" * OVER_BUDGET_DEPTH + "]" * OVER_BUDGET_DEPTH
+    elif breach == "collection":
+        extra = json.dumps([0] * OVER_BUDGET_COLLECTION_ITEMS)
+    else:
+        raise AssertionError(f"unknown budget breach: {breach!r}")
+    return f"{usable[:-1]},{extra}]".encode("utf-8")
+
+
+def test_the_readers_budgets_sit_between_a_real_report_and_these_breaches(
+) -> None:
+    """Each budget is above what a run writes and below what is breached here.
+
+    Two properties, and both have to hold for the tests around this one to mean
+    anything.  Above: the per-string budget is compared with the **writer's**
+    own inline-embedding ceiling, so a screenshot the report writer is entitled
+    to embed can never be a document the viewer refuses to render - a
+    relationship neither side can quietly break while this holds.  Below: each
+    figure this suite breaches a budget by really is over it, so a passing 404
+    elsewhere is the budget answering and not a coincidence.
+    """
+    from app.reporting.screenshots import MAX_EMBEDDING_BASE64_CHARS
+    from app.web import routes as view_module
+
+    assert view_module._MAX_STRING_CHARS >= MAX_EMBEDDING_BASE64_CHARS, (
+        "the viewer would refuse a screenshot the writer is allowed to embed"
+    )
+    assert view_module._MAX_NUMBER_CHARS < OVER_BUDGET_NUMBER_DIGITS
+    assert view_module._MAX_RESULTS_BYTES < OVER_BUDGET_BYTES
+    assert view_module._MAX_NESTING_DEPTH < OVER_BUDGET_DEPTH
+    assert view_module._MAX_COLLECTION_ITEMS < OVER_BUDGET_COLLECTION_ITEMS
+    # And the byte budget is generous enough to hold a real report: the JSON
+    # the writer produces for this suite's ten features is measured in tens of
+    # kilobytes before embeddings, and one embedding at the writer's ceiling
+    # has to fit beside it.
+    assert view_module._MAX_RESULTS_BYTES > MAX_EMBEDDING_BASE64_CHARS
+
+
+@pytest.mark.parametrize("breach", BUDGET_BREACHES)
+@pytest.mark.parametrize(("endpoint", "values"), REPORT_ENDPOINT_ARGS)
+def test_report_routes_answer_404_for_every_budget_breach(
+    client: FlaskClient,
+    flask_app: Flask,
+    results_root: Path,
+    endpoint: str,
+    values: dict[str, Any],
+    breach: str,
+) -> None:
+    """A document over a budget is one more unusable-results cause, not a 500.
+
+    Every breach must answer 404 on every report route.  The status is the
+    point: a numeric token CPython refuses to convert used to escape the
+    parse guard entirely and produce a sanitized 500, which told a reader the
+    viewer had failed rather than that the results were unusable.
+    """
+    path = _results_path(results_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_budget_breaching_results(breach))
+
+    response = client.get(_url(flask_app, endpoint, **values))
+
+    assert response.status_code == 404, (
+        f"{endpoint} answered {response.status_code} for the {breach} breach"
+    )
+
+
+def test_every_budget_breach_is_answered_byte_identically(
+    client: FlaskClient, flask_app: Flask, results_root: Path
+) -> None:
+    """The budgets add causes to the one rule, and no response of their own.
+
+    One body across the four breaches and the five original causes, on the
+    three HTML report routes, and one of its own on the summary route: a budget
+    that reported itself - a distinct page, a message, a different code - would
+    show up here as a second distinct body.
+    """
+    path = _results_path(results_root)
+    html_bodies: set[bytes] = set()
+    json_bodies: set[bytes] = set()
+
+    for breach in BUDGET_BREACHES:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_budget_breaching_results(breach))
+        for endpoint, values in HTML_REPORT_ENDPOINT_ARGS:
+            response = client.get(_url(flask_app, endpoint, **values))
+            assert response.status_code == 404
+            html_bodies.add(response.data)
+        summary = client.get(_url(flask_app, "web.reports_summary"))
+        assert summary.status_code == 404
+        json_bodies.add(summary.data)
+    for cause in UNUSABLE_RESULTS_CAUSES:
+        _install_unusable_results(results_root, cause)
+        html_bodies.add(client.get(_url(flask_app, "web.reports_overview")).data)
+        json_bodies.add(client.get(_url(flask_app, "web.reports_summary")).data)
+
+    assert len(html_bodies) == 1, (
+        f"{len(html_bodies)} distinct 404 pages across the breaches and causes"
+    )
+    assert len(json_bodies) == 1, (
+        f"{len(json_bodies)} distinct 404 bodies for the summary route"
+    )
+
+
+def test_a_legitimately_large_report_still_renders(
+    client: FlaskClient, flask_app: Flask, results_root: Path
+) -> None:
+    """The budgets are set above a real report, not around the sample one.
+
+    A document an order of magnitude larger than anything this suite produces -
+    sixty features, each with ten scenarios of ten steps, and one embedded
+    screenshot-sized base64 string - must answer 200 on the overview and be
+    counted in full by the summary.  A budget tight enough to refuse this would
+    refuse a real full-suite run with screenshots.
+    """
+    features = [
+        _feature(
+            f"large feature {index}",
+            f"features/Large{index}.feature",
+            [
+                _scenario(
+                    f"scenario {position}",
+                    steps=[
+                        _step(f"step {number}", "passed")
+                        for number in range(10)
+                    ],
+                    started="2022-09-07T13:37:26.297Z",
+                )
+                for position in range(10)
+            ],
+        )
+        for index in range(60)
+    ]
+    document = _results_document(features)
+    # One value the size of a real inlined screenshot, to prove the per-string
+    # budget is above what the writer is entitled to embed.
+    document[0]["description"] = "s" * (2 * 1024 * 1024)
+    path = _write_results(results_root, document)
+    assert path.stat().st_size > 2 * 1024 * 1024
+
+    overview = client.get(_url(flask_app, "web.reports_overview"))
+    summary = client.get(_url(flask_app, "web.reports_summary"))
+
+    assert overview.status_code == 200
+    assert summary.status_code == 200
+    assert summary.get_json()["features"]["total"] == 60
+    assert summary.get_json()["scenarios"]["total"] == 600
+    assert summary.get_json()["steps"]["total"] == 6_000
+
+
+def _one_scenario_results() -> list[dict[str, Any]]:
+    """A minimal usable results document: one feature, one scenario, one step.
+
+    :returns: A document every one of the four report routes answers 200 for,
+        which is what lets a later refusal be attributed to the thing under
+        test rather than to an index that was out of range anyway.
+    """
+    return _results_document(
+        [
+            _feature(
+                "a budget test feature",
+                "features/Budget.feature",
+                [
+                    _scenario(
+                        "a budget test scenario",
+                        steps=[_step("a step", "passed")],
+                        started="2022-09-07T13:37:26.297Z",
+                    )
+                ],
+            )
+        ]
+    )
+
+
+#: The three structural budgets whose real breaching figure is too large to
+#: write into a unit suite - a million values, a forty-eight-megabyte string, a
+#: hundred-thousand-member mapping - each paired with a figure an ordinary
+#: report already exceeds.  The budget is lowered rather than the document
+#: inflated because the property under test is "a document over budget B is
+#: refused", which does not depend on B's production value; those values are
+#: asserted separately, against the writer's own ceiling, by
+#: :func:`test_the_readers_budgets_sit_between_a_real_report_and_these_breaches`.
+LOWERED_BUDGETS: Final[tuple[tuple[str, int], ...]] = (
+    ("_MAX_NODES", 4),
+    ("_MAX_STRING_CHARS", 3),
+    ("_MAX_COLLECTION_ITEMS", 2),
+)
+
+
+@pytest.mark.parametrize(("constant", "lowered"), LOWERED_BUDGETS)
+def test_every_structural_budget_refuses_a_document_that_breaks_it(
+    client: FlaskClient,
+    flask_app: Flask,
+    results_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    constant: str,
+    lowered: int,
+) -> None:
+    """Each structural budget, exercised on the document shape it guards.
+
+    The byte, numeric-token, depth and list budgets are breached at their real
+    figures elsewhere in this section.  The remaining three cannot be: a
+    million-value document, a forty-eight-megabyte string and a
+    hundred-thousand-key mapping would each make this suite cost more than the
+    property is worth.  Lowering the constant under what one ordinary scenario
+    already holds asserts the same thing - the walk reaches that budget,
+    refuses the document there, and the refusal arrives as the one
+    cause-neutral 404 rather than as a 500 - and it fails just as loudly if a
+    budget is deleted or stops being enforced.  The same document is proved to
+    render on all four routes first, so the 404s below are the budget's answer
+    and not the shape of the input.
+
+    :param constant: The budget attribute of the view module to lower.
+    :param lowered: The value to lower it to, below what the document holds.
+    """
+    from app.web import routes as view_module
+
+    canonical = _not_found_page(client, flask_app)
+    _write_results(results_root, _one_scenario_results())
+    for endpoint, values in REPORT_ENDPOINT_ARGS:
+        assert client.get(_url(flask_app, endpoint, **values)).status_code == 200, (
+            f"{endpoint} must render before {constant} is lowered, or the "
+            "refusal below would prove nothing"
+        )
+    monkeypatch.setattr(view_module, constant, lowered)
+
+    for endpoint, values in REPORT_ENDPOINT_ARGS:
+        response = client.get(_url(flask_app, endpoint, **values))
+        assert response.status_code == 404, (
+            f"{endpoint} answered {response.status_code} for a document over "
+            f"{constant}"
+        )
+        if (endpoint, values) in HTML_REPORT_ENDPOINT_ARGS:
+            assert response.data == canonical, (
+                f"{endpoint} rendered a page of its own for {constant}"
+            )
+
+
+def test_a_timestamp_that_cannot_be_read_is_reported_as_unavailable(
+    results_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A descriptor that will not ``fstat`` costs a timestamp, never a page.
+
+    The modification time beside an artifact is decoration, and the helper that
+    reads it promises that no failure to read one can turn a working page into
+    an error.  That promise is only visible on the failing path, which no
+    request can drive - an artifact with no openable descriptor is refused by
+    the call that would have produced one - so the helper is exercised
+    directly, with a stream that has been closed under it.  Both halves are
+    asserted: the two ``None`` values the pages render in words, and the
+    WARNING record that is the only place the cause appears.
+
+    :param results_root: The artifact root, for a real file to open and close.
+    :param caplog: pytest's log capture, to prove the cause is recorded.
+    """
+    from app.web import routes as view_module
+
+    path = _write_results(results_root, [])
+    handle = open(path, "rb")  # noqa: SIM115 - closed deliberately below
+    handle.close()
+
+    with caplog.at_level(logging.WARNING, logger="app.web.routes"):
+        modified_iso, modified_display = view_module._modification_times(
+            handle, path.name
+        )
+
+    assert (modified_iso, modified_display) == (None, None)
+    assert any(
+        record.levelno == logging.WARNING and path.name in record.getMessage()
+        for record in caplog.records
+    ), "the unreadable timestamp was not recorded"
+
+
+@pytest.mark.parametrize(
+    ("arrangement", "level"),
+    [(None, logging.DEBUG), ("symlink", logging.WARNING)],
+)
+def test_the_report_views_timestamp_follows_the_same_read_authority(
+    results_root: Path,
+    caplog: pytest.LogCaptureFixture,
+    arrangement: str | None,
+    level: int,
+) -> None:
+    """The views' artifact timestamp is refused exactly as the read is.
+
+    Two states the report pages must survive with an em dash where the time
+    would be, and which no route can reach - the absent artifact 404s before a
+    view renders, and a linked-in one is refused by the read - so the helper is
+    called directly.  The log level separates them, because it is the only
+    thing that distinguishes the viewer's ordinary pre-run state from an object
+    standing in the artifact's place: absent is DEBUG, refused is WARNING.
+
+    :param results_root: The artifact root to arrange.
+    :param caplog: pytest's log capture, for the level assertion.
+    :param arrangement: ``None`` for an absent artifact, or an arrangement of
+        :func:`_install_foreign_results`.
+    :param level: The level the cause must be recorded at.
+    """
+    from app.web import routes as view_module
+
+    if arrangement is not None:
+        _install_foreign_results(results_root, arrangement)
+
+    with caplog.at_level(logging.DEBUG, logger="app.web.routes"):
+        assert view_module._artifact_modified() is None
+
+    assert [
+        record.levelno
+        for record in caplog.records
+        if "Modification time unavailable" in record.getMessage()
+    ] == [level]
+
+
+def test_a_fractional_duration_is_parsed_and_a_vast_one_is_refused(
+    client: FlaskClient, flask_app: Flask, results_root: Path
+) -> None:
+    """The numeric-token budget covers floats as well as integers.
+
+    The JSON writer emits nanosecond integers, so a fractional number reaches
+    the reader only from a document this port did not write - which is exactly
+    the input the budget exists for.  Both halves are asserted, because a cap
+    that refused an ordinary decimal would turn a legitimate third-party
+    document into a 404: a plain fractional duration renders, and a token of
+    five thousand characters is refused with the same 404 as its integer twin.
+    """
+    canonical = _not_found_page(client, flask_app)
+    document = _one_scenario_results()
+    document[0]["elements"][0]["steps"][0]["result"]["duration"] = 0.0302
+    path = _write_results(results_root, document)
+
+    assert client.get(_url(flask_app, "web.reports_overview")).status_code == 200
+    assert client.get(_url(flask_app, "web.reports_summary")).status_code == 200
+
+    usable = path.read_text(encoding="utf-8")
+    assert usable.endswith("]")
+    vast = f"{usable[:-1]},0.{'9' * OVER_BUDGET_NUMBER_DIGITS}]"
+    path.write_text(vast, encoding="utf-8")
+
+    response = client.get(_url(flask_app, "web.reports_overview"))
+
+    assert response.status_code == 404
+    assert response.data == canonical
 
 
 # --------------------------------------------------------------------------
@@ -1860,16 +2575,26 @@ def test_summary_agrees_with_the_counts_the_overview_page_renders(
     assert body["start_timestamp"] in meta["First scenario started"]
 
 
-def test_summary_counts_a_background_step_without_failing_its_scenario(
+def test_summary_counts_a_background_step_and_folds_it_into_its_scenario(
     client: FlaskClient, flask_app: Flask, results_root: Path
 ) -> None:
-    """A background-only failure moves the feature, never the scenario.
+    """A background-only failure moves the scenario it precedes, and the feature.
 
     The rule that is easiest to get backwards, so it is asserted against an
     input built for it: one feature, one Background whose step fails, one
     scenario whose own step passes.  The step total must be two - a repeated
-    background genuinely ran - the scenario must still be reported as passed,
-    and the feature must be reported as failed.
+    background genuinely ran.
+
+    The scenario is counted FAILED, because this route reads
+    ``app/reporting/aggregation.py``'s effective scenario-unit status, which
+    folds a Background occurrence into the scenario in front of it.  That is
+    the measured Cucumber-JVM reading: for a failing Background the JVM names
+    the **scenario** lines in ``rerun.txt`` and marks the scenario's own steps
+    skipped, so the run's scenario tally there reports a failure.  The
+    element's own reading is a separate question and stays its own - the
+    scenario's ``element_status`` is still ``passed`` from its own steps, which
+    is what keeps the badge on a feature page describing the element rather
+    than the unit.
     """
     document = _results_document(
         [
@@ -1892,7 +2617,7 @@ def test_summary_counts_a_background_step_without_failing_its_scenario(
     body = client.get(_url(flask_app, "web.reports_summary")).get_json()
 
     assert body["steps"] == {"total": 2, "by_status": {"passed": 1, "failed": 1}}
-    assert body["scenarios"] == {"total": 1, "by_status": {"passed": 1}}
+    assert body["scenarios"] == {"total": 1, "by_status": {"failed": 1}}
     assert body["features"] == {"total": 1, "by_status": {"failed": 1}}
 
 
@@ -2594,25 +3319,63 @@ def test_report_views_render_a_malformed_document_without_failing(
 def test_summary_folds_every_unrecognised_status_to_unknown(
     client: FlaskClient, flask_app: Flask, results_root: Path
 ) -> None:
-    """A status the model never produced is never reported as a pass.
+    """The route's answer for a malformed document IS the authority's answer.
 
-    The presentation vocabulary folds anything unrecognised to ``unknown``, and
-    that has to reach the counts: the malformed document's two scenario
-    elements - the one with an unusable step list and the one whose five steps
-    all carry an unusable status - must be counted as scenarios and as unknown,
-    the three features likewise, and the element that carries no type at all
-    must be counted as neither.
+    The rules belong to ``app/reporting/aggregation.py``, so the comparison is
+    against that module reading the same document rather than against tokens
+    typed here: this test pins the contract that moved - viewer equals
+    authority - and stays correct when the authority refines a fold, which is
+    the whole reason the viewer no longer keeps a copy of one.  A hard-coded
+    element-level token would instead pin today's fold and fail the next time
+    the empty-element or hook-inclusive rule is stated more precisely.
+
+    The structural facts are asserted alongside, because they hold whatever
+    the fold says: three features (the string member is a feature-shaped
+    position and keeps it), two scenarios (the element with no type at all is
+    counted as neither), four steps (the member that is a string is not a step
+    and is dropped rather than counted as unknown), every ``by_status`` map
+    summing to its own total, no zero count anywhere, and - the substance of
+    "a status the model never produced is never a pass" - nothing counted as
+    ``passed`` at step level, where all four statuses are unrecognised.
     """
+    from app.reporting.aggregation import (
+        SUMMARY_BY_STATUS_KEY,
+        SUMMARY_GROUPS,
+        SUMMARY_START_KEY,
+        SUMMARY_TOTAL_KEY,
+        as_mapping,
+        build_summary,
+    )
+
     _write_results(results_root, MALFORMED_DOCUMENT)
+    authority = build_summary([as_mapping(member) for member in MALFORMED_DOCUMENT])
 
     body = client.get(_url(flask_app, "web.reports_summary")).get_json()
 
-    assert body == {
-        "features": {"total": 3, "by_status": {"unknown": 3}},
-        "scenarios": {"total": 2, "by_status": {"unknown": 2}},
-        "steps": {"total": 5, "by_status": {"unknown": 5}},
-        "start_timestamp": None,
-    }
+    assert set(body) == SUMMARY_KEYS
+    for group in SUMMARY_GROUPS:
+        assert set(body[group]) == SUMMARY_BLOCK_KEYS, group
+        expected = authority[group]
+        assert body[group][SUMMARY_TOTAL_KEY] == expected[SUMMARY_TOTAL_KEY], group
+        assert (
+            body[group][SUMMARY_BY_STATUS_KEY] == expected[SUMMARY_BY_STATUS_KEY]
+        ), group
+    assert body[SUMMARY_START_KEY] == authority[SUMMARY_START_KEY]
+    assert body[SUMMARY_START_KEY] is None, (
+        "the document carries a number and an unparseable string, and neither "
+        "is a run start"
+    )
+
+    assert body["features"]["total"] == 3
+    assert body["scenarios"]["total"] == 2
+    assert body["steps"]["total"] == 4
+    for group in SUMMARY_GROUPS:
+        counts = body[group][SUMMARY_BY_STATUS_KEY]
+        assert all(count > 0 for count in counts.values()), f"{group} carries a zero"
+        assert sum(counts.values()) == body[group][SUMMARY_TOTAL_KEY], group
+    assert "passed" not in body["steps"][SUMMARY_BY_STATUS_KEY], (
+        "a status the result model never produced was reported as a pass"
+    )
 
 
 def test_summary_drops_a_start_timestamp_it_cannot_use(
@@ -2659,6 +3422,663 @@ def test_summary_drops_a_start_timestamp_it_cannot_use(
 
     assert with_usable["start_timestamp"] == "2022-09-07T10:00:00.000Z"
     assert without_usable["start_timestamp"] is None
+
+
+# --------------------------------------------------------------------------
+# One normalized result model, across every surface.
+#
+# AAP 0.4.2's invariant list requires it - "Both HTML artifacts and the HTTP
+# views render over one normalized result model ... so no view contradicts an
+# artifact" - and these are the two readings that used to disagree, plus the
+# malformed shapes that used to make the page and the summary route answer
+# differently.  Each test therefore asserts the SAME fact on every surface
+# that states it, which is what a reader comparing two of them would do.
+# --------------------------------------------------------------------------
+
+#: The status hooks a page may carry for an element with nothing in it.  The
+#: authority folds such an element to ``passed`` - measured from the reference
+#: generator's rendering of the step-less Background in ``EmployeeFc.feature``
+#: - and ``unknown`` is kept for a status the model never produced, so
+#: ``unknown`` appearing on one of these pages is the defect itself.
+EMPTY_ELEMENT_HOOK: Final[str] = "passed"
+
+
+def _status_hooks(html: str) -> list[str]:
+    """Every status hook value the page's own region carries, in order.
+
+    Scoped to ``<main>`` because the shell emits a hook of its own on that
+    element, and read as one list because the question these tests ask is
+    "does any surface on this page grade this element differently".
+
+    :param html: A rendered report page.
+    :returns: One token per occurrence of :data:`STATUS_HOOK`, in document
+        order, badges and filterable sections alike.
+    """
+    return re.findall(rf'{STATUS_HOOK}="([a-z]+)"', _main_region(html))
+
+
+def _overview_row_statuses(html: str) -> list[str]:
+    """The status of every statistics-table row, in page order.
+
+    :param html: The rendered overview page.
+    :returns: One token per feature row.
+    :raises AssertionError: If the page carries no table body, so a
+        restructured table fails here rather than yielding an empty list.
+    """
+    body = re.search(r"<tbody>(.*?)</tbody>", html, re.DOTALL)
+    assert body is not None, "the overview page has no statistics table body"
+    return re.findall(
+        rf'<tr data-report-filterable {STATUS_HOOK}="([a-z]+)">', body.group(1)
+    )
+
+
+def _section_status(html: str, element_id: str) -> str:
+    """The status of one page section, addressed by its own DOM id.
+
+    :param html: A rendered feature page.
+    :param element_id: The section's id, which the page derives from the two
+        positional keys and never from an identifier slug.
+    :returns: That section's status token.
+    :raises AssertionError: If no such section carries a status, so a renamed
+        id or a dropped hook fails here.
+    """
+    match = re.search(
+        rf'id="{re.escape(element_id)}" {STATUS_HOOK}="([a-z]+)"', html
+    )
+    assert match is not None, (
+        f"no section with id {element_id!r} carries a status hook"
+    )
+    return match.group(1)
+
+
+def _scenario_page_status(html: str) -> str:
+    """The status the scenario page badges its scenario with.
+
+    :param html: The rendered scenario page.
+    :returns: The status token on the page's scenario section.
+    :raises AssertionError: If that section carries none.
+    """
+    match = re.search(
+        rf'<section class="tqa-scenario" {STATUS_HOOK}="([a-z]+)"', html
+    )
+    assert match is not None, "the scenario page's section carries no status"
+    return match.group(1)
+
+
+def _feature_with_failed_teardown() -> list[dict[str, Any]]:
+    """One feature whose scenario passed every step and failed its teardown.
+
+    Written directly rather than through the JSON writer, and the reason is
+    the writer's own documented rule: it emits an ``after`` entry only for a
+    hook that produced an attachment, so a failed teardown whose capture was
+    suppressed leaves no entry to grade.  A document from the reference
+    producer carries the hook either way, and how the viewer grades one is
+    exactly the defect under test - so the shape is stated here, as the
+    Cucumber-JVM schema defines it.
+
+    :returns: A one-feature document: a Background that passed, and a scenario
+        whose single step passed while its after-hook failed.
+    """
+    return [
+        {
+            "uri": "file:features/Teardown.feature",
+            "keyword": "Feature",
+            "line": 1,
+            "name": "Teardown failure feature",
+            "description": "",
+            "tags": [],
+            "elements": [
+                {
+                    "type": "background",
+                    "keyword": "Background",
+                    "line": 3,
+                    "name": "shared setup",
+                    "description": "",
+                    "steps": [_step("the background step", "passed")],
+                },
+                {
+                    "type": "scenario",
+                    "keyword": "Scenario",
+                    "line": 5,
+                    "id": "teardown-failure-feature;passes-until-its-teardown",
+                    "name": "passes until its teardown",
+                    "description": "",
+                    "start_timestamp": "2022-09-07T13:00:00.000Z",
+                    "tags": [],
+                    "steps": [_step("its own step", "passed")],
+                    "after": [
+                        {
+                            "match": {
+                                "location": "features.environment.after_scenario"
+                            },
+                            "result": {"status": "failed", "duration": 5_000_000},
+                        }
+                    ],
+                },
+            ],
+        }
+    ]
+
+
+def test_a_failed_after_hook_is_reported_by_every_surface(
+    client: FlaskClient, flask_app: Flask, results_root: Path
+) -> None:
+    """A failed teardown is a failed scenario on all four surfaces.
+
+    This is the divergence the normalized model exists to remove: the viewer
+    derived a scenario's status from its steps alone, so a scenario whose
+    steps all passed but whose after-hook failed read *passed* at
+    ``/reports/summary``, in the overview row, on the feature page's element
+    badge and on the scenario page's badge, while both generated HTML
+    artifacts read *failed* for the same element.
+
+    The expected token is taken from ``aggregation.element_status``, the one
+    place that fold is implemented, so this asserts agreement with the
+    authority rather than agreement with a word typed here.  The step tally is
+    asserted alongside, because a hook must move the status without becoming a
+    step: two steps, both passed.
+    """
+    from app.reporting.aggregation import element_status
+
+    document = _feature_with_failed_teardown()
+    scenario = document[0]["elements"][1]
+    expected = element_status(scenario)
+    assert expected == "failed", (
+        "the authority no longer grades a failed after-hook as a failure; "
+        "this input no longer exercises the divergence"
+    )
+    _write_results(results_root, document)
+
+    summary = client.get(_url(flask_app, "web.reports_summary")).get_json()
+    overview = _text_of(client.get(_url(flask_app, "web.reports_overview")))
+    feature_page = _text_of(
+        client.get(_url(flask_app, "web.report_feature", findex=0))
+    )
+    scenario_page = _text_of(
+        client.get(_url(flask_app, "web.report_scenario", findex=0, sindex=0))
+    )
+
+    assert summary["scenarios"] == {"total": 1, "by_status": {expected: 1}}
+    assert summary["features"] == {"total": 1, "by_status": {expected: 1}}
+    assert summary["steps"] == {"total": 2, "by_status": {"passed": 2}}, (
+        "a hook is not a step"
+    )
+    assert _overview_row_statuses(overview) == [expected]
+    assert _section_status(feature_page, "tqa-scenario-0-0") == expected
+    assert _scenario_page_status(scenario_page) == expected
+    # And the step rows still say what they are: the scenario failed, its
+    # steps did not.
+    assert [status for status, _keyword, _name in _step_rows(scenario_page)] == [
+        "passed",
+        "passed",
+    ]
+
+
+def test_an_element_with_nothing_in_it_is_passed_on_every_surface(
+    client: FlaskClient, flask_app: Flask, results_root: Path
+) -> None:
+    """An element with neither steps nor hooks is passed, never unknown.
+
+    The second half of the same divergence, in the other direction: the viewer
+    folded an empty element to ``unknown`` while the writers fold it to
+    ``passed``.  That is not a preference - ``EmployeeFc.feature`` declares a
+    Background with an empty body, 5.6.1's ``StatusCounter`` answers
+    ``PASSED`` for an empty counter, and the reference generator renders those
+    occurrences as passed - so ``unknown`` must not appear as a status
+    anywhere on these pages.
+    """
+    from app.reporting.aggregation import element_status
+
+    document = [
+        {
+            "uri": "file:features/Empty.feature",
+            "keyword": "Feature",
+            "line": 1,
+            "name": "Empty element feature",
+            "description": "",
+            "tags": [],
+            "elements": [
+                {
+                    "type": "background",
+                    "keyword": "Background",
+                    "line": 3,
+                    "name": "a background with an empty body",
+                    "description": "",
+                    "steps": [],
+                },
+                {
+                    "type": "scenario",
+                    "keyword": "Scenario",
+                    "line": 5,
+                    "id": "empty-element-feature;nothing-at-all",
+                    "name": "nothing at all",
+                    "description": "",
+                    "start_timestamp": "2022-09-07T13:00:00.000Z",
+                    "tags": [],
+                    "steps": [],
+                },
+            ],
+        }
+    ]
+    for element in document[0]["elements"]:
+        assert element_status(element) == EMPTY_ELEMENT_HOOK, (
+            "the authority no longer folds an empty element to passed"
+        )
+    _write_results(results_root, document)
+
+    summary = client.get(_url(flask_app, "web.reports_summary")).get_json()
+    overview = _text_of(client.get(_url(flask_app, "web.reports_overview")))
+    feature_page = _text_of(
+        client.get(_url(flask_app, "web.report_feature", findex=0))
+    )
+    scenario_page = _text_of(
+        client.get(_url(flask_app, "web.report_scenario", findex=0, sindex=0))
+    )
+
+    assert summary["scenarios"] == {
+        "total": 1,
+        "by_status": {EMPTY_ELEMENT_HOOK: 1},
+    }
+    assert summary["features"] == {
+        "total": 1,
+        "by_status": {EMPTY_ELEMENT_HOOK: 1},
+    }
+    assert summary["steps"] == {"total": 0, "by_status": {}}
+    assert _overview_row_statuses(overview) == [EMPTY_ELEMENT_HOOK]
+    assert _section_status(feature_page, "tqa-scenario-0-0") == EMPTY_ELEMENT_HOOK
+    assert _scenario_page_status(scenario_page) == EMPTY_ELEMENT_HOOK
+    for page, name in (
+        (overview, "the overview"),
+        (feature_page, "the feature page"),
+        (scenario_page, "the scenario page"),
+    ):
+        assert set(_status_hooks(page)) <= {EMPTY_ELEMENT_HOOK}, (
+            f"{name} grades an empty element as something other than passed: "
+            f"{sorted(set(_status_hooks(page)))}"
+        )
+
+
+def _summary_totals(client: FlaskClient, flask_app: Flask) -> dict[str, int]:
+    """The three totals ``GET /reports/summary`` reports.
+
+    :param client: A client bound to the application under test.
+    :param flask_app: That application, for URL generation.
+    :returns: A mapping of group name to its total.
+    """
+    body = client.get(_url(flask_app, "web.reports_summary")).get_json()
+    return {group: body[group]["total"] for group in ("features", "scenarios", "steps")}
+
+
+def _overview_totals(html: str) -> dict[str, int]:
+    """The three totals the overview page displays, read back out of it.
+
+    :param html: The rendered overview page.
+    :returns: A mapping with the same keys :func:`_summary_totals` answers
+        with, so the two can be compared directly.
+    """
+    meta = _meta_values(html)
+    return {
+        "features": int(meta["Features"]),
+        "scenarios": int(meta["Scenarios"]),
+        "steps": int(meta["Steps"]),
+    }
+
+
+@pytest.mark.parametrize("scalar_key", ["elements", "steps", "tags"])
+def test_a_scalar_where_a_list_belongs_renders_at_200(
+    client: FlaskClient, flask_app: Flask, results_root: Path, scalar_key: str
+) -> None:
+    """A number where a list belongs is a poorer page, never a 500.
+
+    Each of these three documents parses, so the data-availability rule admits
+    it, and each used to raise ``TypeError: 'int' object is not iterable``
+    inside the overview template - turning ``/reports`` into a 500 while
+    ``/reports/summary`` answered 200 with neutral counts for the very same
+    file.  Both surfaces must now answer 200 and must agree, which is what
+    reading one coercing model rather than iterating raw members gives.
+    """
+    element: dict[str, Any] = {
+        "type": "scenario",
+        "keyword": "Scenario",
+        "line": 5,
+        "name": "a scenario",
+        "description": "",
+        "steps": [],
+    }
+    feature: dict[str, Any] = {
+        "uri": "file:features/Scalar.feature",
+        "keyword": "Feature",
+        "line": 1,
+        "name": "Scalar member feature",
+        "description": "",
+        "elements": [element],
+    }
+    if scalar_key == "elements":
+        feature["elements"] = 1
+    elif scalar_key == "steps":
+        element["steps"] = 1
+    else:
+        feature["tags"] = 1
+        element["tags"] = 1
+    _write_results(results_root, [feature])
+
+    response = client.get(_url(flask_app, "web.reports_overview"))
+
+    assert response.status_code == 200, f"{scalar_key} as a scalar took the page down"
+    assert _overview_totals(_text_of(response)) == _summary_totals(client, flask_app)
+    # The two detail views read the same model, so neither may fail either.
+    feature_response = client.get(_url(flask_app, "web.report_feature", findex=0))
+    assert feature_response.status_code == 200
+
+
+def test_a_string_step_list_renders_no_step_and_agrees_with_the_summary(
+    client: FlaskClient, flask_app: Flask, results_root: Path
+) -> None:
+    """``steps: "nope"`` is no steps, not four unknown ones.
+
+    A string is iterable, so a template iterating the raw member rendered one
+    phantom step per character - four unknown steps for this value - while
+    ``/reports/summary`` counted none.  The model rejects a string outright
+    rather than iterating it, so the page shows no step row, its step total is
+    zero, and the two surfaces state the same number.
+    """
+    _write_results(
+        results_root,
+        [
+            {
+                "uri": "file:features/Strings.feature",
+                "keyword": "Feature",
+                "line": 1,
+                "name": "String step list feature",
+                "description": "",
+                "tags": [],
+                "elements": [
+                    {
+                        "type": "scenario",
+                        "keyword": "Scenario",
+                        "line": 5,
+                        "id": "string-step-list-feature;nope",
+                        "name": "its step list is a string",
+                        "description": "",
+                        "start_timestamp": "2022-09-07T13:00:00.000Z",
+                        "tags": [],
+                        "steps": "nope",
+                    }
+                ],
+            }
+        ],
+    )
+
+    overview = _text_of(client.get(_url(flask_app, "web.reports_overview")))
+    feature_page = _text_of(
+        client.get(_url(flask_app, "web.report_feature", findex=0))
+    )
+    scenario_page = _text_of(
+        client.get(_url(flask_app, "web.report_scenario", findex=0, sindex=0))
+    )
+
+    totals = _summary_totals(client, flask_app)
+    assert totals["steps"] == 0
+    assert _overview_totals(overview) == totals
+    assert _step_rows(feature_page) == [], "the feature page rendered a phantom step"
+    assert _step_rows(scenario_page) == [], "the scenario page rendered a phantom step"
+    # The statistics table's own step total is the same reading.
+    assert re.search(
+        rf'{STATUS_HOOK}="[a-z]+">\s*<th scope="row">.*?</th>'
+        r"(?:\s*<td>0</td>){6}",
+        overview,
+        re.DOTALL,
+    ), "the feature's row does not report six zero step counts"
+
+
+@pytest.mark.parametrize(
+    "unusable", ["not-a-timestamp", 12345], ids=["unparseable", "not-a-string"]
+)
+def test_an_unusable_start_timestamp_is_never_displayed(
+    client: FlaskClient, flask_app: Flask, results_root: Path, unusable: Any
+) -> None:
+    """A timestamp the model cannot parse is shown by no page at all.
+
+    The summary route dropped such a value and answered ``null`` while the
+    pages accepted any string lexically and displayed it, so one surface
+    reported a run start the other denied.  Every page now shows a timestamp
+    only where the model could parse it, which for these two values means the
+    em dash the absent state renders.
+    """
+    _write_results(
+        results_root,
+        [
+            {
+                "uri": "file:features/Timestamps.feature",
+                "keyword": "Feature",
+                "line": 1,
+                "name": "Timestamp feature",
+                "description": "",
+                "tags": [],
+                "elements": [
+                    {
+                        "type": "scenario",
+                        "keyword": "Scenario",
+                        "line": 5,
+                        "id": "timestamp-feature;unusable",
+                        "name": "its start timestamp is unusable",
+                        "description": "",
+                        "start_timestamp": unusable,
+                        "tags": [],
+                        "steps": [_step("a step", "passed")],
+                    }
+                ],
+            }
+        ],
+    )
+
+    body = client.get(_url(flask_app, "web.reports_summary")).get_json()
+    assert body["start_timestamp"] is None
+
+    for endpoint, values, label in (
+        ("web.reports_overview", {}, "First scenario started"),
+        ("web.report_feature", {"findex": 0}, "First scenario started"),
+        ("web.report_scenario", {"findex": 0, "sindex": 0}, "Started"),
+    ):
+        page = _text_of(client.get(_url(flask_app, endpoint, **values)))
+        shown = _meta_values(page)[label]
+        assert "&mdash;" in shown, f"{endpoint} displayed {shown!r}"
+        assert str(unusable) not in page, (
+            f"{endpoint} rendered the unusable timestamp {unusable!r}"
+        )
+
+
+# --------------------------------------------------------------------------
+# Cache policy (CWE-525).  Every response of this surface carries run
+# evidence: a report page quotes the step and assertion text of a suite whose
+# fixtures are credentials, the scenario page embeds the failure screenshot,
+# and the artifact route serves the results file itself.  A run's artifacts
+# are removed by the clean step, so a copy kept by a browser or a private
+# intermediary outlives what it describes.
+#
+# no-store rather than no-cache, and the distinction is the finding: RFC 9111
+# makes no-cache a revalidation requirement, under which the representation is
+# still written to disk and merely checked before reuse.
+# --------------------------------------------------------------------------
+
+
+def _assert_no_store(response: TestResponse, what: str) -> None:
+    """Assert one response forbids storage, in both spellings.
+
+    :param response: The response to check.
+    :param what: What produced it, for the failure message.
+    :raises AssertionError: If either header is absent or weakened.
+    """
+    assert response.headers.get("Cache-Control") == NO_STORE_POLICY, (
+        f"{what} answered Cache-Control "
+        f"{response.headers.get('Cache-Control')!r}"
+    )
+    assert response.headers.get("Pragma") == NO_STORE_PRAGMA, (
+        f"{what} answered Pragma {response.headers.get('Pragma')!r}"
+    )
+
+
+@pytest.mark.parametrize(("endpoint", "values"), [
+    ("web.index", {}),
+    ("web.reports_overview", {}),
+    ("web.report_feature", {"findex": 0}),
+    ("web.report_scenario", {"findex": 0, "sindex": 0}),
+    ("web.reports_summary", {}),
+    ("web.artifact", {"name": "cucumber.json"}),
+])
+def test_every_successful_response_forbids_caching(
+    client: FlaskClient,
+    flask_app: Flask,
+    artifact_tree: Path,
+    sample_document: list[dict[str, Any]],
+    endpoint: str,
+    values: dict[str, Any],
+) -> None:
+    """All six routes, in the state where each one succeeds.
+
+    Run against a fully served workspace on purpose: a header asserted on a
+    404 would prove nothing about the responses that actually carry the
+    evidence.  The artifact route is included because its framework default
+    was ``no-cache`` alone, which permits storage.
+    """
+    _fully_served_state(artifact_tree, sample_document)
+
+    response = client.get(_url(flask_app, endpoint, **values))
+
+    assert response.status_code == 200
+    _assert_no_store(response, f"{endpoint} {values}")
+
+
+@pytest.mark.parametrize(("endpoint", "values"), list(REPORT_ENDPOINT_ARGS))
+def test_every_report_route_404_forbids_caching(
+    client: FlaskClient,
+    flask_app: Flask,
+    results_root: Path,
+    endpoint: str,
+    values: dict[str, Any],
+) -> None:
+    """The data-availability 404, HTML and JSON alike.
+
+    That 404 is the answer for a run whose artifacts have just been removed,
+    so a cached copy of the page a reader saw before the removal is exactly
+    what must not be kept.
+    """
+    response = client.get(_url(flask_app, endpoint, **values))
+
+    assert response.status_code == 404
+    _assert_no_store(response, f"{endpoint} {values}")
+
+
+def test_an_unmatched_url_404_forbids_caching(
+    client: FlaskClient, results_root: Path
+) -> None:
+    """An unmatched URL too, which no blueprint hook can reach.
+
+    A request that matches no rule is answered by the application's own error
+    handler with no endpoint at all, so the policy has to be stated by
+    ``app/errors.py`` as well as by the blueprint - this is the request that
+    proves it is.
+    """
+    response = client.get("/blitzy-no-such-url")
+
+    assert response.status_code == 404
+    _assert_no_store(response, "an unmatched URL")
+
+
+def test_a_json_negotiated_404_forbids_caching(
+    client: FlaskClient, flask_app: Flask, results_root: Path
+) -> None:
+    """The JSON error body, which the handler builds rather than renders."""
+    response = client.get(
+        _url(flask_app, "web.reports_summary"),
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 404
+    assert response.mimetype == "application/json"
+    _assert_no_store(response, "the JSON 404")
+
+
+@handler_app
+def test_the_internal_error_response_forbids_caching(
+    error_client: FlaskClient, results_root: Path
+) -> None:
+    """The 500 page, served for a request that broke mid-render.
+
+    Whatever it broke on, the response is a page about a run, and the handler
+    that renders it is outside the blueprint - so this is the second body
+    ``app/errors.py`` has to state the policy on itself.
+    """
+    response = error_client.get(PROBE_RULE)
+
+    assert response.status_code == 500
+    _assert_no_store(response, "the internal-error page")
+
+
+@handler_app
+def test_a_json_negotiated_500_forbids_caching(
+    error_client: FlaskClient, results_root: Path
+) -> None:
+    """The JSON internal-error body states the policy too.
+
+    ``app/errors.py`` builds three shapes and each one has to carry it: the
+    page above, this body, and the plain-text fallback below.  A client that
+    asked for JSON gets a JSON 500, and a 500 is rendered for a request that
+    broke while handling run evidence, so the storage prohibition cannot
+    depend on which shape the negotiation chose.
+    """
+    response = error_client.get(PROBE_RULE, headers={"Accept": "application/json"})
+
+    assert response.status_code == 500
+    assert response.mimetype == "application/json"
+    _assert_no_store(response, "the JSON internal-error body")
+
+
+def test_a_render_failure_still_forbids_caching(
+    client: FlaskClient, results_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The last-resort plain-text body carries the policy as well.
+
+    The handler guards its own render, because a page that will not render
+    must still answer at the right status rather than turning a 404 into a
+    500.  That fallback is the one error shape no negotiation reaches, so it
+    is provoked directly - the render is made to raise - and it is exactly the
+    shape most likely to be served while something is already wrong, which is
+    when a cached copy of it would be least welcome.
+    """
+    from app import errors
+
+    def _fail(*_args: object, **_kwargs: object) -> str:
+        raise RuntimeError("the error page will not render")
+
+    monkeypatch.setattr(errors, "render_template", _fail)
+
+    response = client.get("/no-such-url-at-all")
+
+    assert response.status_code == 404
+    assert response.mimetype == "text/plain"
+    _assert_no_store(response, "the plain-text error fallback")
+
+
+def test_the_packaged_static_asset_stays_cacheable(
+    client: FlaskClient, flask_app: Flask, results_root: Path
+) -> None:
+    """The stylesheet and the script are not run evidence and are not sealed.
+
+    The hook is registered on the blueprint rather than on the application for
+    this reason: Flask's own static route carries the shell's stylesheet and
+    behaviour script, which describe no run and are the same bytes for every
+    reader, so sealing them would cost a fetch per page for no benefit.  What
+    must not happen is those two ending up *more* protected than a report -
+    the assertion is only that no storage prohibition is claimed there.
+    """
+    for filename in ("css/main.css", "js/report.js"):
+        response = client.get(_url(flask_app, "static", filename=filename))
+
+        assert response.status_code == 200, filename
+        assert "no-store" not in (response.headers.get("Cache-Control") or ""), (
+            f"{filename} is served with a storage prohibition it does not need"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -2726,23 +4146,85 @@ def test_artifact_serves_a_page_beneath_the_report_tree(
     assert _text_of(response) == PRETTY_DETAIL_CONTENT
 
 
-@pytest.mark.parametrize("spelling", ["cucumber", "cucumber/"])
-def test_artifact_serves_the_tree_overview_for_either_spelling(
+@pytest.mark.parametrize("spelling", TREE_DIRECTORY_SPELLINGS)
+def test_artifact_redirects_the_tree_directory_to_its_overview_url(
     client: FlaskClient, flask_app: Flask, artifact_tree: Path, spelling: str
 ) -> None:
-    """Naming the report tree serves its overview page, slash or no slash.
+    """Naming the report tree canonicalizes to the overview page's own URL.
 
-    The landing page links the tree by its bare key and a reader may type the
-    slash, so both must answer the same page - and neither may list the
-    directory, which is why the body is compared with the overview file's own
-    content rather than merely checked for a 200.
+    Both authorized spellings - the bare key the landing page once linked, and
+    the slash a reader may type - answer a redirect to the nested page rather
+    than the page's bytes, because the bytes alone are not the artifact: the
+    generated pages reference their assets and each other relatively, so a
+    reader served at the directory alias has a base URL one level too high and
+    every one of those references 404s.  Both halves are asserted: the
+    destination, and that a relative reference resolved against it reaches the
+    asset that is genuinely there.
+
+    Following the redirect must then serve the overview page itself - not a
+    listing of the directory, and not another page from the tree.
     """
     response = client.get(_artifact_url(flask_app, spelling))
 
-    assert response.status_code == 200
-    assert _text_of(response) == PRETTY_OVERVIEW_CONTENT
-    assert PRETTY_DETAIL_CONTENT not in _text_of(response)
-    assert "Index of" not in _text_of(response)
+    assert response.status_code == 302
+    destination = _url(
+        flask_app, "web.artifact", name=PRETTY_OVERVIEW_RELPATH
+    )
+    assert response.headers["Location"] == destination
+    assert urljoin(destination, "css/cucumber.css") == _url(
+        flask_app, "web.artifact", name=PRETTY_ASSET_RELPATH
+    ), "a relative asset reference does not resolve under the redirect target"
+    assert client.get(urljoin(destination, "css/cucumber.css")).status_code == 200
+
+    followed = client.get(_artifact_url(flask_app, spelling), follow_redirects=True)
+
+    assert followed.status_code == 200
+    assert _text_of(followed) == PRETTY_OVERVIEW_CONTENT
+    assert PRETTY_DETAIL_CONTENT not in _text_of(followed)
+    assert "Index of" not in _text_of(followed)
+
+
+def test_the_tree_alias_is_not_where_the_overview_page_is_served(
+    client: FlaskClient, flask_app: Flask, artifact_tree: Path
+) -> None:
+    """The alias carries no artifact bytes of its own, at either spelling.
+
+    The defect this pins is not the status code but the base URL: a response
+    that carried the page's bytes *at the alias* would render, and every
+    relative reference in it would then be requested one directory too high.
+    So the redirect body must not be the page, and the URL a relative
+    reference would produce from the alias must be one nothing serves.
+    """
+    for spelling in TREE_DIRECTORY_SPELLINGS:
+        alias = _artifact_url(flask_app, spelling)
+        response = client.get(alias)
+
+        assert response.status_code == 302
+        assert PRETTY_OVERVIEW_CONTENT not in _text_of(response)
+        assert client.get(urljoin(alias, "css/cucumber.css")).status_code == 404
+
+
+@pytest.mark.parametrize("spelling", TREE_DIRECTORY_OVER_SPELLINGS)
+def test_artifact_rejects_every_longer_trailing_separator_spelling(
+    client: FlaskClient, flask_app: Flask, artifact_tree: Path, spelling: str
+) -> None:
+    """Two spellings of the tree are authorized; a third slash is not one.
+
+    AAP 0.3.1 authorizes the bare key and exactly one trailing slash, and the
+    path module refuses everything else because a second slash leaves an empty
+    component behind.  A route that collapsed trailing separators before
+    validating - ``rstrip("/")`` - would broaden that allowlist to every
+    variant, so each is asserted to be the plain 404 and neither a redirect nor
+    a served page.
+    """
+    canonical = _not_found_page(client, flask_app)
+
+    response = client.get(_artifact_url(flask_app, spelling))
+
+    assert response.location is None, "the rejection redirected instead of refusing"
+    _assert_rejected(
+        response, canonical=canonical, forbidden=(PRETTY_OVERVIEW_CONTENT,)
+    )
 
 
 def test_artifact_serves_a_results_file_the_report_routes_refuse(
@@ -2884,7 +4366,7 @@ def test_artifact_rejects_parent_directory_traversal(
     """``..`` cannot climb out of the artifact root.
 
     The file above the root exists and carries a distinctive payload, so the
-    assertion is that the route refused to serve something it could have
+    assertion is that the route declined to serve something it could have
     reached, not that the path was empty.
     """
     assert (artifact_tree / OUTSIDE_FILE_NAME).is_file()
@@ -3054,6 +4536,179 @@ def test_artifact_rejects_an_empty_name(
 
 
 # --------------------------------------------------------------------------
+# What the route serves is the object it checked.  The three tests below all
+# mutate the artifact *after* validation and before the response is built, by
+# wrapping the framework call the route makes last, which is the window a
+# check-then-reopen sequence leaves open (CWE-367).  A route that names the
+# file a second time serves whatever the name reaches by then; a route that
+# holds the descriptor it verified cannot.
+# --------------------------------------------------------------------------
+
+
+def _mutate_before_the_response(
+    monkeypatch: pytest.MonkeyPatch, mutate: Any
+) -> None:
+    """Run ``mutate`` immediately before the artifact response is built.
+
+    The hook is the view module's own reference to the framework's file-sending
+    call, which every version of this route reaches only after it has finished
+    validating - so the mutation is deterministically post-validation, with no
+    sleep, no thread and no race to lose.
+
+    :param monkeypatch: pytest's patcher, for its guaranteed teardown.
+    :param mutate: A no-argument callable that changes the filesystem.
+    """
+    from app.web import routes as view_module
+
+    sender = view_module.send_file
+
+    def _sending(*args: Any, **kwargs: Any) -> Any:
+        mutate()
+        return sender(*args, **kwargs)
+
+    monkeypatch.setattr(view_module, "send_file", _sending)
+
+
+def _validated_rerun_manifest(root: Path) -> Path:
+    """Put known content at the manifest's path, for the three swap tests.
+
+    :param root: An artifact root already carrying the artifact tree.
+    :returns: The manifest's path, carrying
+        :data:`VALIDATED_ARTIFACT_CONTENT`.
+    """
+    path = root / TARGET_DIR_NAME / RERUN_TXT_NAME
+    path.write_text(VALIDATED_ARTIFACT_CONTENT, encoding="utf-8")
+    return path
+
+
+def test_artifact_serves_the_object_it_validated_not_the_name(
+    client: FlaskClient,
+    flask_app: Flask,
+    artifact_tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file replaced after validation is still served as it was validated.
+
+    The pathname is made to address a different object - same name, new inode,
+    different content - after the route has finished deciding and before the
+    bytes are read.  What comes back must be the bytes of the object that was
+    checked, which is only possible if the response streams a descriptor rather
+    than reopening the name.  The swap's reality is asserted afterwards, so a
+    test that mutated nothing cannot pass.
+    """
+    path = _validated_rerun_manifest(artifact_tree)
+
+    def _swap() -> None:
+        path.unlink()
+        path.write_text(SWAPPED_ARTIFACT_CONTENT, encoding="utf-8")
+
+    _mutate_before_the_response(monkeypatch, _swap)
+
+    response = client.get(_url(flask_app, "web.artifact", name=RERUN_TXT_NAME))
+
+    assert response.status_code == 200
+    assert _text_of(response) == VALIDATED_ARTIFACT_CONTENT
+    assert SWAPPED_ARTIFACT_CONTENT not in _text_of(response)
+    assert path.read_text(encoding="utf-8") == SWAPPED_ARTIFACT_CONTENT, (
+        "the swap did not happen, so this test proved nothing"
+    )
+
+
+def test_a_post_validation_swap_cannot_disclose_a_file_outside_the_root(
+    client: FlaskClient,
+    flask_app: Flask,
+    artifact_tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The swap that discloses a file through a reopened name discloses none.
+
+    The strongest form of the window: the validated name is replaced with a
+    symbolic link to a file above the artifact root, which is exactly what a
+    second open would follow.  The response must carry the validated artifact's
+    own bytes and none of the external file's - not a 403, not a 500, and above
+    all not the external payload.
+    """
+    path = _validated_rerun_manifest(artifact_tree)
+    outside = artifact_tree / OUTSIDE_FILE_NAME
+    assert outside.read_text(encoding="utf-8") == OUTSIDE_PAYLOAD
+
+    def _swap() -> None:
+        path.unlink()
+        os.symlink(outside, path)
+
+    _mutate_before_the_response(monkeypatch, _swap)
+
+    response = client.get(_url(flask_app, "web.artifact", name=RERUN_TXT_NAME))
+
+    assert response.status_code == 200
+    assert _text_of(response) == VALIDATED_ARTIFACT_CONTENT
+    assert OUTSIDE_PAYLOAD not in _text_of(response)
+    assert path.is_symlink(), "the swap did not happen, so this proved nothing"
+
+
+def test_an_artifact_that_vanishes_after_validation_is_never_a_500(
+    client: FlaskClient,
+    flask_app: Flask,
+    artifact_tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file unlinked after validation cannot turn the response into an error.
+
+    Reopening a name that no longer resolves raises, and an exception out of a
+    view is a 500 - a sanitized one, but still the viewer reporting a fault
+    where the contract has only the artifact and its absence.  With the
+    descriptor held there is nothing left to fail: the bytes that were
+    validated are served, and the unlinked directory entry changes nothing.
+    """
+    path = _validated_rerun_manifest(artifact_tree)
+    _mutate_before_the_response(monkeypatch, path.unlink)
+
+    response = client.get(_url(flask_app, "web.artifact", name=RERUN_TXT_NAME))
+
+    assert response.status_code != 500
+    assert response.status_code == 200
+    assert _text_of(response) == VALIDATED_ARTIFACT_CONTENT
+    assert not path.exists(), "the unlink did not happen"
+
+
+def test_a_refused_artifact_request_closes_the_stream_it_opened(
+    client: FlaskClient,
+    flask_app: Flask,
+    artifact_tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The refusal paths own the descriptor they were handed, and close it.
+
+    The route opens before it has finished judging, so the judgement's refusal
+    is on the hook for the stream.  ``abort`` raises, which is precisely how a
+    descriptor gets left to the garbage collector on a path a prober can drive
+    as often as it likes - so the containment check is made to refuse, and the
+    stream the route opened is asserted closed once the response is complete.
+    """
+    from app.web import routes as view_module
+
+    streams: list[Any] = []
+    opener = view_module.open_resolved_artifact
+
+    def _recording(name: str) -> Any:
+        opened = opener(name)
+        if opened is not None:
+            streams.append(opened[1])
+        return opened
+
+    monkeypatch.setattr(view_module, "open_resolved_artifact", _recording)
+    monkeypatch.setattr(view_module, "_within_artifact_root", lambda path: False)
+
+    response = client.get(_url(flask_app, "web.artifact", name=RERUN_TXT_NAME))
+
+    assert response.status_code == 404
+    assert streams, "the route did not open the artifact through the authority"
+    assert all(stream.closed for stream in streams), (
+        "a refused request left the stream it opened unclosed"
+    )
+
+
+# --------------------------------------------------------------------------
 # The read-only guarantee.  AAP 0.3.1 states it three ways - every route is
 # synchronous and read-only, none writes to disk, and none starts a run - so it
 # is asserted three ways: the method surface, the filesystem, and the two
@@ -3095,7 +4750,10 @@ def _fully_served_state(root: Path, document: list[dict[str, Any]]) -> None:
     ("web.artifact", {"name": "cucumber-reports.html"}, "text/html"),
     ("web.artifact", {"name": "cucumber.json"}, "application/json"),
     ("web.artifact", {"name": "rerun.txt"}, "text/plain"),
-    ("web.artifact", {"name": "cucumber"}, "text/html"),
+    # The report tree's directory alias is absent by requirement: it carries no
+    # artifact of its own and answers a redirect to the page below, whose media
+    # type is the one that matters.  The redirect itself is asserted in the
+    # artifact section.
     ("web.artifact", {"name": PRETTY_OVERVIEW_RELPATH}, "text/html"),
     ("web.artifact", {"name": PRETTY_DETAIL_RELPATH}, "text/html"),
     ("web.artifact", {"name": PRETTY_ASSET_RELPATH}, "text/css"),
@@ -3119,10 +4777,11 @@ def test_every_successful_response_carries_the_media_type_it_should(
     check, and - for the text responses - that a charset is declared, since
     the report vocabulary carries non-ASCII content.
 
-    The artifact route's types come from the framework's guess at the name it
-    serves, which is why each of its four servable shapes is listed: a file,
-    a results document, a manifest, the report tree's own key, a page beneath
-    the tree and one of the vendored assets those pages need.
+    The artifact route's types come from the framework's guess at the name of
+    the file it holds open, which is why each shape it serves is listed: the
+    generated report, a results document, a manifest, the report tree's
+    overview page, a page beneath the tree and one of the vendored assets those
+    pages need.
     """
     _fully_served_state(artifact_tree, sample_document)
 
@@ -3271,41 +4930,108 @@ def test_no_route_can_start_a_run(
     assert calls == []
 
 
-def test_the_artifact_route_delegates_to_the_path_modules_resolver(
+@pytest.mark.parametrize(
+    "requested",
+    [CUCUMBER_JSON_NAME, *TREE_DIRECTORY_OVER_SPELLINGS],
+)
+def test_the_artifact_route_delegates_to_the_path_modules_opener(
     client: FlaskClient,
     flask_app: Flask,
     artifact_tree: Path,
     monkeypatch: pytest.MonkeyPatch,
+    requested: str,
 ) -> None:
-    """The allowlist has one owner, and this route consults it rather than the
-    filesystem.
+    """The allowlist has one owner, and this route consults it by opening.
 
     AAP 0.4.2 makes ``app/utils/paths.py`` the sole owner of every artifact
-    path, and ``tests/test_paths.py`` unit-tests the resolver's rules directly.
-    What belongs here is the edge: that the route *asks* it.  The resolver is
-    replaced with a recorder that answers ``None``, and a request for an
-    artifact that genuinely exists on disk is then refused - which can only
-    happen if the decision came from the resolver rather than from a join this
-    module performed itself.  The raw request segment must arrive unaltered,
-    since every rejection rule is expressed over that string.
+    path, and ``tests/test_paths.py`` unit-tests its rules directly.  What
+    belongs here is the edge: that the route asks it, and that what it asks
+    with is the request's own segment.  The opener - the operation that
+    validates and opens together, which is what leaves no window between the
+    two - is replaced with a recorder that answers ``None``, and a request for
+    an artifact that genuinely exists on disk is then refused, which can only
+    happen if the decision came from that function rather than from a join or a
+    stat this module performed itself.
+
+    The doubled and tripled trailing separators are parametrized alongside the
+    plain name because every rejection rule is expressed over the raw string: a
+    route that trimmed separators before asking would hand the authority a name
+    it never received, which is how those spellings came to be served.
     """
     from app.web import routes as view_module
 
     asked: list[str] = []
 
-    def _recording_resolver(name: str) -> None:
+    def _recording_opener(name: str) -> None:
         asked.append(name)
         return None
 
-    monkeypatch.setattr(view_module, "resolve_artifact", _recording_resolver)
+    monkeypatch.setattr(view_module, "open_resolved_artifact", _recording_opener)
 
-    response = client.get(_artifact_url(flask_app, CUCUMBER_JSON_NAME))
+    response = client.get(_artifact_url(flask_app, requested))
 
     assert (artifact_tree / RESULTS_RELPATH).is_file(), (
         "the results file must exist, or the refusal below would prove nothing"
     )
     assert response.status_code == 404
-    assert asked == [CUCUMBER_JSON_NAME]
+    assert asked == [requested], (
+        f"the authority was asked {asked} for a request naming {requested!r}"
+    )
+
+
+@pytest.mark.parametrize("spelling", TREE_DIRECTORY_SPELLINGS)
+def test_the_tree_alias_asks_the_authority_with_the_spelling_it_received(
+    client: FlaskClient,
+    flask_app: Flask,
+    artifact_tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    spelling: str,
+) -> None:
+    """The two authorized directory spellings are delegated raw as well.
+
+    The redirect these two answer with is built from the path module's
+    constants, which makes it easy for the route to *also* start asking the
+    authority about that destination instead of about the request - and then
+    the alias decision would be made twice, once in each module, with only one
+    of them documenting it.  So this pins the delegation rather than the
+    destination: the opener must be asked with the byte-exact segment that
+    arrived, trailing separator and all, and it is the authority's own
+    allowlist that maps it to the page inside the tree.
+
+    Both halves are asserted, because either alone would pass while the other
+    broke: the argument the authority received, and - with the authority back
+    in place - the 302 that the request still answers with.
+
+    :param spelling: One of :data:`TREE_DIRECTORY_SPELLINGS`.
+    """
+    from app.web import routes as view_module
+
+    asked: list[str] = []
+
+    def _recording_opener(name: str) -> None:
+        asked.append(name)
+        return None
+
+    # A context of its own, not this test's shared patcher: the artifact-root
+    # fixture establishes the working directory through that same patcher, so
+    # undoing it here would move the request off the populated root as well
+    # and the second half would assert nothing.
+    with monkeypatch.context() as patched:
+        patched.setattr(view_module, "open_resolved_artifact", _recording_opener)
+        refused = client.get(_artifact_url(flask_app, spelling))
+    redirected = client.get(_artifact_url(flask_app, spelling))
+
+    assert asked == [spelling], (
+        f"the authority was asked {asked} for a request naming {spelling!r}"
+    )
+    assert refused.status_code == 404, (
+        "a refusing authority must refuse the alias too, redirect or not"
+    )
+    assert refused.location is None
+    assert redirected.status_code == 302
+    assert redirected.headers["Location"] == _url(
+        flask_app, "web.artifact", name=PRETTY_OVERVIEW_RELPATH
+    )
 
 
 def test_the_view_module_holds_no_artifact_path_literal(repo_root: Path) -> None:
@@ -3363,10 +5089,14 @@ def test_the_view_module_holds_no_artifact_path_literal(repo_root: Path) -> None
 
     assert offending == [], f"the view module carries path literals {offending}"
     # And the names it does use come from the path module, so the six rules
-    # above are the only locations this module spells out at all.
+    # above are the only locations this module spells out at all.  The two
+    # openers are named here as well as the accessor: they are how this module
+    # turns a location into bytes, and a module that had grown its own read
+    # would no longer be holding them.
     from app.web import routes as view_module
 
-    assert view_module.resolve_artifact is resolve_artifact
+    assert view_module.open_resolved_artifact is open_resolved_artifact
+    assert view_module.open_artifact_read is open_artifact_read
     assert view_module.cucumber_json_path is cucumber_json_path
 
 
@@ -3403,15 +5133,29 @@ def test_every_viewer_template_builds_its_urls_through_url_for(
 def test_the_view_module_reaches_no_service_writer_or_browser_binding(
     flask_app: Flask,
 ) -> None:
-    """"No route can start a run" is a property of the import graph.
+    """"No route can start a run" is a property of the import graph, and the
+    ONE normalized result model is the single exception to it.
 
     Asserted over the view module's own namespace rather than over
     ``sys.modules``, which any other test in the session can populate: the
     names ``app/web/routes.py`` bound at import time are what its view
-    functions can reach, and none of them may come from the service layer, a
-    report writer, a page object, the browser automation package, selenium or
-    behave.  AAP 0.4.2 gives this package one outward edge, to ``app/utils``,
-    and this is that edge being checked rather than described.
+    functions can reach.
+
+    Two edges are permitted and no third.  ``app/utils`` owns the paths, and
+    :data:`PERMITTED_REPORTING_EDGE` - ``app.reporting.aggregation`` - owns
+    every status, tally, duration and timestamp any report surface shows.  The
+    second edge exists because AAP 0.4.2 requires it: *"Both HTML artifacts and
+    the HTTP views render over one normalized result model ... so no view
+    contradicts an artifact"*, and a viewer holding a private copy of that
+    calculation cannot satisfy it - a failed after-hook read *passed* in the
+    viewer and *failed* in the artifacts for exactly that reason.  That module
+    is pure computation: it resolves no path, opens no file, writes nothing and
+    can start nothing.
+
+    Everything that *can* act stays out, and that is what this test protects:
+    the service layer, every report WRITER (the event collector, the four
+    artifact writers and the screenshot module), the page objects, the browser
+    automation package, selenium and behave.
     """
     from app.web import routes as view_module
 
@@ -3434,20 +5178,37 @@ def test_the_view_module_reaches_no_service_writer_or_browser_binding(
             if isinstance(value, ModuleType)
             else getattr(value, "__module__", None) or ""
         )
+        if origin == PERMITTED_REPORTING_EDGE:
+            continue
         if any(origin.startswith(prefix) for prefix in forbidden):
             offending.append(f"{name} from {origin}")
 
     assert offending == [], f"the view module reaches {offending}"
 
+    # The permitted edge is permitted by name and not by prefix, so a writer
+    # module cannot ride in beside it.  Each of these is a module the viewer
+    # must never reach, and each is checked as its own name rather than as the
+    # package prefix above, which the exception now punches a hole in.
+    reached = {
+        (
+            value.__name__
+            if isinstance(value, ModuleType)
+            else getattr(value, "__module__", None) or ""
+        )
+        for value in vars(view_module).values()
+    }
+    for writer in FORBIDDEN_REPORTING_MODULES:
+        assert writer not in reached, f"the view module reaches {writer}"
+
     # The namespace asserted above is the namespace the application actually
-    # serves from, and the binding now runs in one direction: ``app/web`` owns
+    # serves from, and the binding runs in one direction only: ``app/web`` owns
     # the blueprint and calls this module's ``register_routes`` with it, while
-    # this module imports nothing from its own package - which is what removes
-    # the reciprocal import a decorator would need.  Both halves are checked,
-    # because either alone would pass while the surface came from somewhere
-    # else: the blueprint the factory registered is the one ``app/web``
-    # constructed, and every one of the six endpoints resolves to the view
-    # function defined in this module.
+    # this module imports nothing from its own package - which is why the
+    # reciprocal import a decorator would need does not exist.  Both halves
+    # are checked, because either alone would pass while the surface came from
+    # somewhere else: the blueprint the factory registered is the one
+    # ``app/web`` constructed, and every one of the six endpoints resolves to
+    # the view function defined in this module.
     from app.web import bp, web_bp
 
     registered = flask_app.blueprints["web"]

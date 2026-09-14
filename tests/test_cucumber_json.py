@@ -1,18 +1,17 @@
 """Tests for ``app/reporting/cucumber_json.py`` -- the one machine-read artifact.
 
-What this module gates
-----------------------
 ``target/cucumber.json`` is the only file this port writes that another program
-parses: the pipeline's publisher stage is narrowed to exactly that path
-(``Jenkins:15``), so a key with the wrong name, an emitted ``[]`` where the JVM
-omits the key, or a float where the contract carries a nanosecond integer is a
-*silent* failure -- nothing crashes and the published report is simply wrong.
-Every rule of AAP 0.6's Cucumber-JSON contract therefore has an executable
-assertion here: the key sets per level, the omission rules, the two tag shapes
-and their opposite emptiness rules, the ``id`` slug and its Examples-row form,
-duplicate ids, ``match``/``arguments``/``error_message``, the ``after`` array
-and its embeddings, the status mapping, the selection rule, element
-interleaving, and the I/O wrapper's destination.
+parses: ``CukesRunner.java:11`` declares the destination and the pipeline's
+publisher stage is narrowed to exactly that path, so a key with the wrong name,
+an emitted ``[]`` where the JVM omits the key, or a float where the contract
+carries a nanosecond integer is a *silent* failure -- nothing crashes and the
+published report is simply wrong.  Every rule of AAP 0.6's Cucumber-JSON
+contract therefore has an executable assertion here: the per-level key sets and
+their omission rules, the two tag shapes and their opposite emptiness rules,
+the ``id`` slug and its Examples-row form, duplicate ids, ``match``,
+``arguments`` and ``error_message``, the ``after`` array and its embeddings,
+the status and selection mapping, element interleaving, and the destination the
+I/O wrapper writes to.
 
 The anchors, and where they were measured
 -----------------------------------------
@@ -38,34 +37,39 @@ share a title), ten scenarios, four Background occurrences, thirty steps, one
 undefined step, one failed scenario carrying a PNG embedding on its after hook,
 two outline rows, and one ``@wip`` scenario the tag expression did not select.
 
-Exactly two reconciliations, both named and both deliberate
------------------------------------------------------------
-1. **The feature directory.** AAP deviation 1 moved the features and preserved
-   their filenames, so the golden's URIs carry the Java resource directory
-   while the port emits its own.  ``app.utils.paths.normalize_feature_uri``
-   owns that rewrite and ``tests/conftest.py`` applies it; this module reaches
-   it only through :func:`_reconcile_feature_directory`, and hard-codes neither
-   prefix anywhere.
-2. **``duration`` inside a ``skipped`` result.** The golden carries one
-   ``{"duration": 1000000, "status": "skipped"}`` while AAP 0.6's prose says a
-   skipped step is ``{"status": "skipped"}`` with no ``duration`` key.  That
-   single cell is the one place the two sources of the contract disagree, and
-   this file's own schema prompt is explicit: *"Do not assert that a skipped
-   step has no duration ... field presence is per-invocation, not
-   per-status."*  :func:`_reconcile_skipped_duration` drops the key from both
-   sides, so the module deliberately pins that cell in neither direction while
-   pinning the zero-omission rule -- which is what actually governs it -- from
-   the sample, where every skipped step carries a duration of zero.
+Exactly one reconciliation, named and deliberate
+------------------------------------------------
+**The feature directory.** AAP deviation 1 moved the features and preserved
+their filenames, so the golden's URIs carry the Java resource directory while
+the port emits its own.  ``app.utils.paths.normalize_feature_uri`` owns that
+rewrite and ``tests/conftest.py`` applies it; this module reaches it only
+through :func:`_reconcile_feature_directory`, and hard-codes neither prefix
+anywhere.  AAP 0.6's fixture entry calls it "the one expected difference", and
+:func:`comparable` is where that claim is kept honest: the prefix, then
+``conftest.normalize_volatile``, and nothing else.
 
-   The writer has since settled the cell in the plan's favour: it gates
-   ``duration`` on the status as well as on the value, so a ``skipped`` result
-   never carries one whatever was recorded.  That makes this a **real and
-   expected** difference from the fixture rather than a hypothetical one, and
-   it is why the reconciliation runs **before** ``normalize_volatile`` in
-   :func:`comparable`: normalization replaces every duration with a
-   placeholder, so a reconciliation applied afterwards could never recognise
-   the measured value it is narrowed to and the difference would surface as a
-   failure against a writer doing exactly what the plan requires.
+**``duration`` inside a ``skipped`` result is settled, and pinned here.**  The
+rule is that ``duration`` is emitted whenever the normalised value is
+non-zero, *independent of the status* -- field presence is per-invocation, not
+per-status.  ``createResultMap`` in ``io.cucumber:cucumber-core:7.2.3`` gates
+the field on ``!result.getDuration().isZero()`` and never consults the status,
+and the byte-pinned baseline carries the measured counter-example to any
+per-status reading: the step ``"User can verify the information"`` is
+``{"duration": 1000000, "status": "skipped"}``.  AAP 0.6's sentence that "a
+skipped step is ``{"status": "skipped"}`` with no ``duration`` key"
+generalises from the two zero-duration skips of that same baseline, while the
+clause governing the field in the same bullet is that a result "omits fields
+rather than emitting zeros".  So this module asserts **both** halves: the
+baseline's one measured skip keeps its 1,000,000 ns in the writer's output,
+and a skipped step recording zero emits no ``duration`` key -- which, since
+behave reports zero for a step skipped after a failure, is every skipped step
+of a real run and is pinned from the sample and again, on its own, by
+:func:`test_a_live_runs_skipped_step_emits_the_shape_the_specification_names`.
+No reconciliation is applied to that cell in either direction; if it were, the
+golden comparison would no longer hold the writer to the baseline's shape.
+This is the single place where the writer follows the section's field-presence
+clause over its per-status sentence, and the disagreement is between two
+statements of that one section rather than between the section and this port.
 
 Everything else is compared exactly.  Nothing here writes outside pytest's
 temporary directories, nothing starts a browser or touches the network, and no
@@ -76,7 +80,10 @@ from __future__ import annotations
 
 import base64
 import copy
+import inspect
 import json
+import logging
+import os
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, Final
@@ -186,16 +193,17 @@ GOLDEN_ARGUMENTS: Final[tuple[JsonDict, ...]] = (
     {"val": '"2"', "offset": 63},
 )
 
+#: The one measured non-zero duration on a skipped result in the baseline: the
+#: step ``"User can verify the information"`` at ``Crm.feature:20``, 1 ms in
+#: nanoseconds.  It is the cell that settles the duration rule -- the field is
+#: emitted on a non-zero value whatever the status -- so it is asserted
+#: *present* in the writer's output rather than reconciled away.
+GOLDEN_MEASURED_SKIPPED_DURATION: Final[int] = 1_000_000
+
 #: Result key sets, with their status, and how many steps carry each.  Counted
 #: in the golden report, and asserted against it so that a later edit of the
 #: baseline is caught here rather than silently changing what the writer is
 #: held to.
-#: The one measured non-zero duration on a skipped result in the baseline:
-#: the step at ``Crm.feature:20``, 1 ms in nanoseconds.  It is the only cell
-#: where the baseline and AAP 0.6's prose disagree, and naming it lets the
-#: reconciliation below be narrowed to exactly that cell.
-GOLDEN_MEASURED_SKIPPED_DURATION: Final[int] = 1_000_000
-
 GOLDEN_RESULT_SHAPES: Final[dict[tuple[tuple[str, ...], str], int]] = {
     (("duration", "status"), "passed"): 14,
     (("duration", "error_message", "status"), "failed"): 2,
@@ -255,6 +263,21 @@ SAMPLE_EMBEDDING_SCENARIO_NAME: Final[str] = (
 SAMPLE_AFTER_HOOK_LOCATION: Final[str] = "features.environment.after_scenario"
 SAMPLE_EMBEDDING_MIME_TYPE: Final[str] = "image/png"
 
+#: A valid inline attachment payload: the canonical base64 of
+#: :data:`~tests.conftest.DEFAULT_SCREENSHOT_PNG`, a genuinely well-formed 1x1
+#: PNG.  Every probe below that expects an attachment to *reach* the artifact
+#: uses this rather than base64 of arbitrary bytes, because
+#: ``app/reporting/cucumber_json.py`` validates each attachment through
+#: ``app/reporting/screenshots.py``'s inline-PNG contract before serialising
+#: it -- exactly as the two HTML writers do -- and a payload that is not a
+#: structurally valid PNG is dropped and logged rather than emitted.  The
+#: dropping itself is asserted in ``tests/test_png_embedding_contract.py``,
+#: which owns that contract; the probes here are about hook and embedding
+#: *shape*, so they carry a payload the contract accepts.
+SAMPLE_EMBEDDING_DATA: Final[str] = base64.b64encode(DEFAULT_SCREENSHOT_PNG).decode(
+    "ascii"
+)
+
 #: The teardown hook's own measured duration in the fixture: 412 ms in
 #: nanoseconds.  Asserted exactly, because a hook result is where a
 #: screenshot's provenance is recorded and the scale has to match a step's.
@@ -279,11 +302,14 @@ EXPECTED_STATUS_ALIASES: Final[dict[str, str]] = {
     "unknown": "untested",
 }
 
-#: The two Sales outline rows' ids.  Their Examples segment is empty and the
-#: separator therefore doubled.  That is the *generator's* current behaviour and
-#: is being changed under review finding F09 against
-#: ``app/reporting/events.py``; the rule under test here is only that the
-#: writer copies a supplied ``id`` through unchanged, whatever it contains.
+#: The two Sales outline rows' ids.  Their Examples blocks are unnamed, so the
+#: Examples segment is empty and the separator doubled -- ``;;2`` and ``;;3``.
+#: That is the JVM's own output, not an artefact of this port: the clean
+#: Cucumber-JVM baseline AAP 0.3.4 describes emits the same shape, and
+#: ``app.reporting.events.scenario_element_id`` pins it in its docstring and
+#: its examples.  The rule under test *here* is the writer's, and it is
+#: narrower: a supplied ``id`` is copied through unchanged, whatever it
+#: contains.
 SAMPLE_UNNAMED_EXAMPLES_ROW_IDS: Final[tuple[str, ...]] = (
     "....-app-sales-feature;verify-that-after-creating-a-new-customer--the-page-"
     "title-includes-the-customer-name.;;2",
@@ -297,8 +323,8 @@ SAMPLE_UNNAMED_EXAMPLES_ROW_IDS: Final[tuple[str, ...]] = (
 #
 # The synthetic documents below need feature URIs.  They are assembled from
 # ``app.utils.paths``' own scheme and feature-directory constants so that this
-# module names no feature-directory prefix of its own -- the point of
-# reconciliation 1.
+# module names no feature-directory prefix of its own -- the point of the one
+# sanctioned reconciliation.
 # --------------------------------------------------------------------------- #
 
 
@@ -334,14 +360,20 @@ OTHER_PROBE_FEATURE_FILENAME: Final[str] = "OtherProbe.feature"
 #: second of the two duplicate-id pairs AAP 0.6 records.
 SHARED_FEATURE_TITLE: Final[str] = "Testinium app login feature"
 
+#: Default ``id`` for :func:`probe_scenario`.  A scenario element carries a
+#: non-empty identifier by contract -- it is what every artifact keys on, and
+#: ``app.reporting.events.new_element`` refuses to build a test case without
+#: one -- so the probe supplies a synthetic one that no measured case uses.
+PROBE_SCENARIO_ID: Final[str] = "a-probe-feature;a-probe-scenario"
+
 
 # --------------------------------------------------------------------------- #
-# The two sanctioned reconciliations
+# The one sanctioned reconciliation
 # --------------------------------------------------------------------------- #
 
 
 def _reconcile_feature_directory(document: Any) -> Any:
-    """Reconciliation 1: the feature directory, and nothing else.
+    """The only reconciliation: the feature directory, and nothing else.
 
     AAP deviation 1 moved the feature files while preserving their filenames,
     so the committed baseline's URIs name the Java resource directory and this
@@ -360,90 +392,31 @@ def _reconcile_feature_directory(document: Any) -> Any:
     return normalize_feature_uris(document)
 
 
-def _reconcile_skipped_duration(document: Any) -> Any:
-    """Reconciliation 2: ``duration`` inside a ``skipped`` result.
-
-    The golden report carries one ``{"duration": 1000000, "status":
-    "skipped"}`` while AAP 0.6's prose states that a skipped step is
-    ``{"status": "skipped"}`` with no ``duration`` key.  That one cell is the
-    only place the two sources of this contract disagree, and the writer has
-    settled it in the plan's favour: ``_build_result`` gates the field on the
-    status as well as on the value, so a ``skipped`` result carries ``status``
-    alone whatever the internal document recorded.  This file's own schema
-    prompt settles what the tests may say about it: *"Do not assert that a
-    skipped step has no duration ... field presence is per-invocation, not
-    per-status."*
-
-    So the key is dropped from **both** sides of every comparison, and this
-    module pins that cell in neither direction.  What actually governs it --
-    ``createResultMap``'s rule that a zero duration is omitted whatever the
-    status -- is pinned instead from ``sample_results.json``, where every
-    skipped step carries a duration of zero.
-
-    The reconciliation is deliberately **as narrow as the disagreement**: it
-    removes ``duration`` only from a skipped result whose value is the one the
-    baseline measured, :data:`GOLDEN_MEASURED_SKIPPED_DURATION`.  Every other
-    skipped result keeps its key exactly as the writer emitted it, so the
-    baseline's two bare ``{"status": "skipped"}`` results still hold the writer
-    to emitting no duration at all for them, and a writer that started
-    inventing one would fail the golden comparison.  A blanket erasure would
-    have surrendered that protection to buy nothing.
-
-    That narrowness is what fixes this function's **position** in
-    :func:`comparable`: it must run on the document as it was read, before
-    ``normalize_volatile`` replaces every ``duration`` with a placeholder,
-    because a placeholder is not :data:`GOLDEN_MEASURED_SKIPPED_DURATION` and a
-    reconciliation that recognised nothing would reconcile nothing.  Running it
-    first costs nothing else -- it only ever removes a key, so no value
-    normalization depends on it.
-
-    :param document: A parsed JSON document, or any nesting of mappings,
-        sequences and scalars.  It is applied to the document as read, so the
-        durations it sees are the measured ones.
-    :returns: A new structure in which a skipped result carrying exactly the
-        measured duration no longer carries the key.  Nothing else is altered,
-        and the input is never mutated.
-    """
-    if isinstance(document, dict):
-        contested = (
-            document.get("status") == "skipped"
-            and document.get("duration") == GOLDEN_MEASURED_SKIPPED_DURATION
-        )
-        return {
-            key: _reconcile_skipped_duration(value)
-            for key, value in document.items()
-            if not (contested and key == "duration")
-        }
-    if isinstance(document, (list, tuple)):
-        return [_reconcile_skipped_duration(item) for item in document]
-    return document
-
-
 def comparable(document: Any) -> Any:
     """Reduce a document to what a comparison may legitimately assert.
 
-    Three transformations, and the **order is load-bearing**: the
-    feature-directory reconciliation, then the skipped-duration reconciliation,
+    Two transformations, and no third: the feature-directory reconciliation,
     then ``tests/conftest.py``'s :func:`normalize_volatile` -- which
     canonicalises timestamps, durations, failure text and embedded bytes while
     **preserving each key's presence**.  What survives is structure: feature
     order, element order, the Background's position, every key's presence or
     absence, and every value a run does not get to choose.
 
-    The skipped-duration step comes second rather than last because it is
-    narrowed to the one measured value the baseline carries and normalization
-    would already have replaced that value with a placeholder; see
-    :func:`_reconcile_skipped_duration`.  Normalization stays last so that it
-    is the thing standing between a measured value and an assertion, which is
-    the whole reason it exists.
+    That the list is this short is the point.  AAP 0.6 calls the
+    feature-directory prefix "the one expected difference" between the
+    committed baseline and this port's output, so any second reconciliation
+    here would be a licence for the writer to diverge from the artifact it is
+    ported from -- and one existed, erasing ``duration`` from the baseline's
+    one measured ``skipped`` result on both sides so that the cell was pinned
+    in neither direction.  The rule is settled (``duration`` is emitted on a
+    non-zero value whatever the status), so the cell is compared like every
+    other one.  ``normalize_volatile`` preserves key presence, which is what
+    makes that comparison meaningful for a field whose *value* is volatile.
 
     :param document: Either side of a comparison.
     :returns: The comparable form.  Applied to both sides, never to one.
     """
-    reconciled = _reconcile_skipped_duration(
-        _reconcile_feature_directory(document)
-    )
-    return normalize_volatile(reconciled)
+    return normalize_volatile(_reconcile_feature_directory(document))
 
 
 # --------------------------------------------------------------------------- #
@@ -680,7 +653,7 @@ def probe_scenario(
     name: str = "a probe scenario",
     description: str = "",
     selected: bool = True,
-    identifier: str | None = None,
+    identifier: str = PROBE_SCENARIO_ID,
     start_timestamp: str | None = None,
     tags: Sequence[JsonDict] | None = None,
     steps: Sequence[JsonDict] | None = None,
@@ -746,8 +719,83 @@ def probe_feature(
 
 
 # --------------------------------------------------------------------------- #
+# Capturing the writer's own records
+# --------------------------------------------------------------------------- #
+
+#: The writer's logger name.  Taken from the module's own ``__name__``-derived
+#: logger rather than spelled out, so that moving the module cannot leave this
+#: capture silently watching a logger nothing writes to.
+WRITER_LOGGER_NAME: Final[str] = "app.reporting.cucumber_json"
+
+
+class WriterLogCapture(logging.Handler):
+    """Every record the writer emits, captured at the point of emission.
+
+    ``caplog`` observes records that reach the *root* logger, and
+    ``app/logging_config.py``'s ``configure_logging()`` sets
+    ``propagate = False`` on the ``app`` logger -- so in a full-suite run,
+    where another module may already have configured logging or attached its
+    own capture to ``app``, a root-level capture can miss a record or see one
+    twice.  A handler installed directly on the writer's logger cannot: the
+    record reaches it before any ancestor's propagation flag or handler list is
+    consulted.  The same reasoning is written out at
+    ``tests/test_driver.py``'s ``AutomationLogCapture``, and the two are
+    deliberately independent so that neither module's capture depends on the
+    other's.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.NOTSET)
+
+        #: Every record seen, in emission order.
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Store one record.
+
+        :param record: The record being emitted.
+        :returns: ``None``.
+        """
+        self.records.append(record)
+
+    def at_or_above(self, level: int) -> tuple[logging.LogRecord, ...]:
+        """Every captured record at or above one level.
+
+        :param level: The threshold, as a :mod:`logging` level number.
+        :returns: The matching records, in emission order.
+        """
+        return tuple(record for record in self.records if record.levelno >= level)
+
+
+# --------------------------------------------------------------------------- #
 # Fixtures local to this module
 # --------------------------------------------------------------------------- #
+
+
+@pytest.fixture(name="writer_log")
+def _writer_log() -> Iterator[WriterLogCapture]:
+    """Capture every record the writer emits, whatever the session did earlier.
+
+    The handler goes on the writer's own logger and the logger's level is
+    lowered to DEBUG for the duration, so neither a record's level nor an
+    ancestor's configuration can hide it.  Both are restored in a ``finally``,
+    so a failing assertion cannot leave the logger reconfigured for a later
+    test.
+
+    :yields: The installed capture.
+    """
+    logger = logging.getLogger(WRITER_LOGGER_NAME)
+    capture = WriterLogCapture()
+    previous_level = logger.level
+
+    logger.addHandler(capture)
+    logger.setLevel(logging.DEBUG)
+
+    try:
+        yield capture
+    finally:
+        logger.setLevel(previous_level)
+        logger.removeHandler(capture)
 
 
 @pytest.fixture(name="golden_internal")
@@ -837,11 +885,18 @@ def test_build_reproduces_the_golden_report_exactly(
 
     An internal document reconstructed from the committed baseline, fed through
     the writer, must come back as the baseline.  A key renamed, a key emitted
-    where the JVM omits it, an element reordered, a keyword stripped of its
-    trailing space, a description trimmed, a tag shape conflated between the
-    two levels, a duration turned into a float or an id mangled would each fail
-    here -- which is why the remaining sections can assert one rule at a time
-    without having to reassemble the whole document.
+    where the JVM omits it, a key omitted where the JVM emits it -- the
+    baseline's measured ``skipped`` duration is exactly that case -- an element
+    reordered, a keyword stripped of its trailing space, a description trimmed,
+    a tag shape conflated between the two levels, a tag's declaration site
+    taken from its feature, a duration turned into a float or an id mangled
+    would each fail here, which is why the remaining sections can assert one
+    rule at a time without having to reassemble the whole document.
+
+    :func:`comparable` applies the feature-directory reconciliation and
+    ``normalize_volatile`` and **nothing else**, so this is a comparison
+    against the artifact as committed rather than against a negotiated form of
+    it.
     """
     built = build_cucumber_json(golden_internal)
 
@@ -1283,9 +1338,10 @@ def test_a_bare_string_tag_is_accepted_and_widened_at_both_levels() -> None:
     The internal builders require mappings, so this case is reachable only from
     a document assembled by hand -- and the writer widens rather than drops,
     because losing a tag silently would change which scenarios a reader
-    believes were selected.  A feature-level string has no location of its own,
-    so the feature's line is recorded for it; a scenario-level string becomes
-    the short shape.
+    believes were selected.  A feature-level string carries no declaration site
+    and **gains none**: the feature's own line is not a substitute for a tag's
+    location, so the widened tag carries ``name`` and ``type`` alone.  A
+    scenario-level string becomes the short shape.
     """
     feature = probe_feature(line=7)
     feature["tags"] = ["Smoke", "@Regression", "", {"name": ""}, 17]
@@ -1297,8 +1353,8 @@ def test_a_bare_string_tag_is_accepted_and_widened_at_both_levels() -> None:
     document = emitted_document(feature)
 
     assert document[0]["tags"] == [
-        {"name": "@Smoke", "type": "Tag", "location": {"line": 7, "column": 1}},
-        {"name": "@Regression", "type": "Tag", "location": {"line": 7, "column": 1}},
+        {"name": "@Smoke", "type": "Tag"},
+        {"name": "@Regression", "type": "Tag"},
     ]
     assert document[0]["elements"][0]["tags"] == [
         {"name": "@Wip"},
@@ -1307,32 +1363,71 @@ def test_a_bare_string_tag_is_accepted_and_widened_at_both_levels() -> None:
 
 
 def test_a_feature_tag_keeps_its_own_declaration_site() -> None:
-    """A tag's ``location`` is the tag's, and only defaults to the feature's.
+    """A tag's ``location`` is the tag's, and is never taken from the feature.
 
-    Two tags on one feature may sit on different lines and in different
-    columns, and the baseline's single tag proves the line is not the
-    feature's.  A tag mapping that carries a partial location -- a line but no
-    column -- keeps the line it declared.
+    The rule the baseline pins: ``@Smoke`` sits at ``Crm.feature:1`` and the
+    ``Feature:`` keyword at line 2, so a writer that reported the feature's
+    line for a tag would be wrong on the single tagged feature the reference
+    contains.  Two tags on one feature may also sit on different lines and in
+    different columns, which no single derived value can express.
+
+    The feature below declares its tags *below* its own line, so the feature's
+    12 can never coincide with a tag's site: a location that carries only a
+    line keeps that line and takes Gherkin's minimum column, and a tag with no
+    location at all carries **no location key** -- an absent site reads as "not
+    recorded", where an invented one reads as a source position that does not
+    exist.
     """
     feature = probe_feature(
         line=12,
         tags=[
-            {"name": "@First", "location": {"line": 10, "column": 1}},
-            {"name": "@Second", "location": {"line": 11, "column": 9}},
-            {"name": "@PartialLocation", "location": {"line": 11}},
+            {"name": "@First", "location": {"line": 14, "column": 1}},
+            {"name": "@Second", "location": {"line": 15, "column": 9}},
+            {"name": "@PartialLocation", "location": {"line": 15}},
             {"name": "@NoLocation"},
         ],
     )
 
     tags = emitted_document(feature)[0]["tags"]
 
-    assert [tag["location"] for tag in tags] == [
-        {"line": 10, "column": 1},
-        {"line": 11, "column": 9},
-        {"line": 11, "column": 1},
-        {"line": 12, "column": 1},
+    assert tags == [
+        {"name": "@First", "type": "Tag", "location": {"line": 14, "column": 1}},
+        {"name": "@Second", "type": "Tag", "location": {"line": 15, "column": 9}},
+        {
+            "name": "@PartialLocation",
+            "type": "Tag",
+            "location": {"line": 15, "column": 1},
+        },
+        {"name": "@NoLocation", "type": "Tag"},
     ]
-    assert {tag["type"] for tag in tags} == {"Tag"}
+    assert all(
+        tag.get("location", {}).get("line") != 12 for tag in tags
+    ), "a tag took the feature's line as its declaration site"
+
+
+def test_a_feature_tag_declared_above_its_feature_keeps_its_own_line() -> None:
+    """The baseline's own arrangement, driven through the writer.
+
+    ``@Smoke`` at line 1 with ``Feature:`` at line 2 is the case a synthesised
+    location gets wrong, and it is the only tagged feature in the reference --
+    so a writer that derived the site from the feature would pass every
+    hand-built case that happens to put the tag below the feature and still
+    corrupt the one artifact that exists.  The emitted tag is compared against
+    what ``app.reporting.events.feature_tag`` recorded, which is the single
+    owner of the internal long shape, so the assertion is that the values were
+    *copied* rather than that they match a literal written twice.
+    """
+    declared = events.feature_tag(
+        GOLDEN_FEATURE_TAG_NAME, GOLDEN_FEATURE_TAG_LINE, GOLDEN_FEATURE_TAG_COLUMN
+    )
+    feature = probe_feature(line=GOLDEN_FEATURE_LINE, tags=[declared])
+
+    emitted = emitted_document(feature)[0]
+
+    assert emitted["line"] == GOLDEN_FEATURE_LINE
+    assert emitted["tags"] == [declared]
+    assert emitted["tags"][0]["location"]["line"] == GOLDEN_FEATURE_TAG_LINE
+    assert emitted["tags"][0]["location"]["line"] != emitted["line"]
 
 
 # =========================================================================== #
@@ -1400,16 +1495,22 @@ def test_both_sample_outline_rows_number_from_the_header(
 
 
 def test_a_supplied_id_is_copied_through_verbatim(
-    sample_emitted: list[JsonDict],
+    sample_emitted: list[JsonDict], sample_result_set: Any
 ) -> None:
     """Whatever the collector computed is what is emitted -- unrepaired.
 
-    The sample's two Sales outline rows carry an empty Examples segment and so
-    a doubled separator.  That is the *generator's* behaviour, which
-    ``app/reporting/events.py``'s owner is changing under review finding F09;
-    the writer's rule is only that a supplied ``id`` is copied through, because
-    an id the writer "fixed" would no longer match the one the HTML reports and
-    the publisher key their detail pages on.
+    The sample's two Sales outline rows sit under unnamed ``Examples:`` blocks,
+    so their Examples segment is empty and the separator doubled -- ``;;2`` and
+    ``;;3``.  That is the JVM's own output, verified against the clean
+    Cucumber-JVM baseline AAP 0.3.4 describes and pinned in
+    ``app.reporting.events.scenario_element_id``, so the ids below are asserted
+    exactly rather than described.  The writer's own rule is narrower and is
+    what this test gates: every emitted ``id`` is the one the internal document
+    carried, character for character.  An id the writer "fixed" -- collapsing
+    the doubled separator, or rebuilding a row's id from the two names it can
+    see -- would no longer match the one both HTML writers and the publisher
+    key their detail pages on, and the mismatch would be invisible in the
+    artifact.
     """
     sales_rows = [
         element
@@ -1420,25 +1521,59 @@ def test_a_supplied_id_is_copied_through_verbatim(
     assert [row["id"] for row in sales_rows] == list(SAMPLE_UNNAMED_EXAMPLES_ROW_IDS)
     assert all(";;" in row["id"] for row in sales_rows)
 
+    # Every selected scenario of the whole sample, against the ids the internal
+    # document holds: the two Sales rows are the interesting case, but the rule
+    # is document-wide and is asserted that way.
+    internal_ids = [
+        element["id"]
+        for feature in sample_result_set["features"]
+        for element in feature["elements"]
+        if element["type"] == events.ELEMENT_TYPE_SCENARIO and element["selected"]
+    ]
+    assert [element["id"] for element in scenarios(sample_emitted)] == internal_ids
 
-def test_an_absent_id_is_derived_from_the_feature_and_scenario_names() -> None:
-    """A hand-built element with no ``id`` still gets the plain form.
 
-    Only a document that did not come from the collector reaches this: a plain
-    scenario's id is derivable from the two names, while an Examples row's is
-    not, because the block name and row position live on neither element.
+def test_an_empty_id_is_copied_and_announced_rather_than_reconstructed(
+    writer_log: WriterLogCapture,
+) -> None:
+    """A missing ``id`` is reported, not invented.
+
+    Unreachable from a collected or a loaded document --
+    ``app.reporting.events.new_element`` refuses to build a scenario without an
+    ``id`` and ``load_result_set`` rejects an empty one -- so this is the
+    residual in-process path, a document assembled by hand.
+
+    The writer used to rebuild the plain ``<feature-slug>;<scenario-slug>``
+    form here, and that is precisely what must not happen: an Examples row's id
+    carries two further segments, the block's slug and the row's position, and
+    neither is recorded on the element.  For the one shape where an id can go
+    missing, a reconstruction therefore publishes a well-formed identifier for
+    a test case that does not exist -- worse than an empty string, because an
+    empty string is visible in the artifact and a plausible id is not.  So the
+    value is copied as it was found and the defect is announced once at
+    ``WARNING``, where ``app/logging_config.py``'s split routes it to stderr.
     """
     scenario_name = "User can create pipeline in the displayed dashboard"
     feature = probe_feature(
         name=GOLDEN_FEATURE_NAME,
-        elements=[probe_scenario(name=scenario_name)],
+        elements=[probe_scenario(line=9, name=scenario_name)],
     )
     feature["elements"][0]["id"] = ""
 
     element = emitted_document(feature)[0]["elements"][0]
 
-    assert element["id"] == GOLDEN_PLAIN_SCENARIO_IDS[0]
-    assert element["id"] == scenario_element_id(GOLDEN_FEATURE_NAME, scenario_name)
+    assert element["id"] == ""
+    assert element["id"] != scenario_element_id(GOLDEN_FEATURE_NAME, scenario_name)
+    assert element["id"] != GOLDEN_PLAIN_SCENARIO_IDS[0]
+
+    warnings = writer_log.at_or_above(logging.WARNING)
+    assert len(warnings) == 1, (
+        "the missing id was announced once per element, or not at all: "
+        f"{[record.getMessage() for record in writer_log.records]}"
+    )
+    message = warnings[0].getMessage()
+    assert scenario_name in message
+    assert "9" in message
 
 
 def test_duplicate_feature_ids_are_preserved_rather_than_disambiguated(
@@ -1483,13 +1618,27 @@ def test_the_second_duplicate_pair_also_collides_and_is_kept() -> None:
             filename=PROBE_FEATURE_FILENAME,
             identifier=convert_to_id(SHARED_FEATURE_TITLE),
             name=SHARED_FEATURE_TITLE,
-            elements=[probe_scenario(name=scenario_name, identifier=None)],
+            elements=[
+                probe_scenario(
+                    name=scenario_name,
+                    identifier=scenario_element_id(
+                        SHARED_FEATURE_TITLE, scenario_name
+                    ),
+                )
+            ],
         ),
         probe_feature(
             filename=OTHER_PROBE_FEATURE_FILENAME,
             identifier=convert_to_id(SHARED_FEATURE_TITLE),
             name=SHARED_FEATURE_TITLE,
-            elements=[probe_scenario(name=scenario_name, identifier=None)],
+            elements=[
+                probe_scenario(
+                    name=scenario_name,
+                    identifier=scenario_element_id(
+                        SHARED_FEATURE_TITLE, scenario_name
+                    ),
+                )
+            ],
         ),
     )
 
@@ -1848,11 +1997,16 @@ def test_a_zero_duration_is_omitted_whatever_the_status(
 ) -> None:
     """``createResultMap`` emits ``duration`` only when it is non-zero.
 
-    This is the rule that actually governs the key, and the sample exercises it
-    on both of the statuses that reach zero: its skipped steps and its
-    undefined step all record ``duration: 0`` internally, and none of them may
-    carry the key.  A ``"duration": 0`` in the artifact would tell the
-    publisher a step was measured at zero rather than never measured.
+    The half of the rule that governs a real run: behave reports ``0`` for a
+    step it skipped after a failure in the same scenario and for one it never
+    resolved, so the sample's skipped steps and its undefined step all record
+    ``duration: 0`` internally and none of them may carry the key.  A
+    ``"duration": 0`` in the artifact would tell the publisher a step was
+    measured at zero rather than never measured.
+
+    The other half -- a non-zero value survives whatever the status -- is
+    pinned from the baseline's measured skip in the test below.  Together they
+    are one clause read off the value alone.
     """
     # Guarded, so that a fixture edit cannot turn this into a vacuous pass:
     # both zero-duration statuses must actually occur in the sample.
@@ -1864,28 +2018,26 @@ def test_a_zero_duration_is_omitted_whatever_the_status(
             assert "duration" not in step["result"]
 
 
-def test_a_skipped_step_with_a_measured_duration_keeps_its_status_and_scale(
+def test_a_measured_skipped_step_keeps_its_duration_status_and_scale(
     golden_internal: JsonDict,
 ) -> None:
-    """The one cell where the baseline and the AAP's prose disagree.
+    """The baseline's measured skip reaches the artifact with its duration.
 
-    The committed baseline carries a skipped step measured at 1,000,000
-    nanoseconds, while AAP 0.6's prose describes a skipped result as ``{"status":
-    "skipped"}`` with no ``duration`` key, and this file's own specification
-    settles what a test may say about it: *"Do not assert that a skipped step
-    has no duration ... field presence is per-invocation, not per-status."*  The
-    writer's behaviour there is additionally under revision by its owner
-    (review finding F05), so the *presence* of the key is asserted in neither
-    direction here -- :func:`_reconcile_skipped_duration` removes it from both
-    sides of every comparison in this module for exactly that reason.
+    The cell that settles the rule.  ``createResultMap`` gates ``duration`` on
+    ``!result.getDuration().isZero()`` and never on the status, and the
+    committed baseline carries the counter-example to any per-status reading:
+    the step ``"User can verify the information"`` is ``{"duration": 1000000,
+    "status": "skipped"}`` while its two sibling skips, which recorded zero,
+    are bare ``{"status": "skipped"}``.  All three shapes are therefore
+    asserted exactly -- one carrying the measured nanosecond count, two
+    carrying no ``duration`` key -- and the status stays ``skipped`` rather
+    than being folded into another token.
 
-    What is not in doubt, and is asserted, is everything else about the cell:
-    the status stays ``skipped`` rather than being folded into another token,
-    and a duration that *is* emitted is the exact integer nanosecond count the
-    run recorded -- never a float, never rounded to seconds, never zero.  Were
-    this to fail, a skipped step would either be reported to the publisher as
-    some other outcome or would carry a duration on a different scale from
-    every other step in the artifact.
+    Were the writer to gate on the status instead, the publisher would be told
+    a step was never measured when it was, and the golden comparison above
+    would need a reconciliation to hide it.  Were it to round or float the
+    value, the skip's duration would be on a different scale from every other
+    step in the artifact.
     """
     measured = [
         step["result"]
@@ -1905,13 +2057,17 @@ def test_a_skipped_step_with_a_measured_duration_keeps_its_status_and_scale(
         if step["result"]["status"] == "skipped"
     ]
 
-    expected_skipped = (
-        GOLDEN_RESULT_SHAPES[(("status",), "skipped")]
-        + GOLDEN_RESULT_SHAPES[(("duration", "status"), "skipped")]
-    )
-    assert len(emitted) == expected_skipped
+    expected_bare = GOLDEN_RESULT_SHAPES[(("status",), "skipped")]
+    expected_measured = GOLDEN_RESULT_SHAPES[(("duration", "status"), "skipped")]
+    assert len(emitted) == expected_bare + expected_measured
+
     carrying = [result for result in emitted if "duration" in result]
-    assert len(carrying) <= 1, (
+    bare = [result for result in emitted if "duration" not in result]
+    assert len(carrying) == expected_measured, (
+        "the baseline's measured skipped duration was dropped or duplicated: "
+        f"{emitted}"
+    )
+    assert len(bare) == expected_bare, (
         "a duration appeared on a skipped result that recorded none: "
         f"{emitted}"
     )
@@ -1919,28 +2075,28 @@ def test_a_skipped_step_with_a_measured_duration_keeps_its_status_and_scale(
         assert result["duration"] == GOLDEN_MEASURED_SKIPPED_DURATION
         assert isinstance(result["duration"], int)
         assert not isinstance(result["duration"], bool)
+    for result in bare:
+        assert result == {"status": "skipped"}
     for result in emitted:
         assert result["status"] == "skipped"
 
 
-def test_the_skipped_duration_rule_is_applied_uniformly(
+def test_the_duration_rule_reads_the_value_and_not_the_status(
     tmp_artifact_root: Path,
 ) -> None:
-    """Whichever rule governs the contested cell, it governs every instance.
+    """One rule, applied to identical observations and to a zero alike.
 
-    The companion to the test above, and the part that does not depend on
-    which way the cell is settled.  Two skipped steps recording the *same*
-    non-zero duration must come out with the *same* result shape: either both
-    carry it, which is what the baseline shows, or neither does, which is what
-    AAP 0.6's prose describes.  A writer that emitted one and dropped the other
-    would be reporting two identical observations differently, and the
-    publisher -- which reads this file and nothing else -- would have no way to
-    tell which of the two it was being told about.
+    The companion to the test above, driven through a hand-built document so
+    that the two halves of the clause meet in one artifact: two skipped steps
+    recording the *same* non-zero duration both carry it, and a third
+    recording zero carries no key at all.  A writer reporting two identical
+    observations differently would leave the publisher -- which reads this file
+    and nothing else -- no way to tell which of the two it was being told
+    about, and a writer keying the omission on ``skipped`` would fail the first
+    two.
 
     Asserted through the written artifact rather than the in-memory document,
-    so that the rule is proven where the publisher actually reads it.  The
-    zero-duration half of the rule is not in doubt and is pinned separately
-    from the sample, where every skipped step records zero.
+    so that the rule is proven where the publisher actually reads it.
     """
     steps = [
         probe_step(
@@ -1951,6 +2107,14 @@ def test_the_skipped_duration_rule_is_applied_uniformly(
         )
         for line in (11, 12)
     ]
+    steps.append(
+        probe_step(
+            line=13,
+            name="a skipped step that recorded nothing",
+            status="skipped",
+            duration=0,
+        )
+    )
     document = {
         "features": [probe_feature(elements=[probe_scenario(steps=steps)])]
     }
@@ -1958,22 +2122,59 @@ def test_the_skipped_duration_rule_is_applied_uniformly(
     written = write_cucumber_json(document, base=tmp_artifact_root)
     emitted = json.loads(written.read_text(encoding="utf-8"))[0]["elements"][0]
 
-    assert [step["result"]["status"] for step in emitted["steps"]] == [
-        "skipped",
-        "skipped",
+    assert [step["result"] for step in emitted["steps"]] == [
+        {"status": "skipped", "duration": GOLDEN_MEASURED_SKIPPED_DURATION},
+        {"status": "skipped", "duration": GOLDEN_MEASURED_SKIPPED_DURATION},
+        {"status": "skipped"},
     ]
-    shapes = {
-        tuple(sorted(step["result"])) for step in emitted["steps"]
-    }
-    assert len(shapes) == 1, (
-        "two identical skipped observations were reported with different "
-        f"result shapes: {[step['result'] for step in emitted['steps']]}"
-    )
-    for step in emitted["steps"]:
-        if "duration" in step["result"]:
-            assert step["result"]["duration"] == (
-                GOLDEN_MEASURED_SKIPPED_DURATION
+
+
+def test_a_live_runs_skipped_step_emits_the_shape_the_specification_names(
+    tmp_artifact_root: Path,
+) -> None:
+    """AAP 0.6's literal ``skipped`` shape, pinned as the live-run case.
+
+    Specification section 0.6 states the shape outright: "skipped is
+    ``{"status": "skipped"}`` with **no** ``duration`` key".  That sentence
+    describes every skipped step a real run of this port produces, and this
+    test is what holds the writer to it -- behave records duration ``0`` for a
+    step skipped after a failure in the same scenario, which is the only way a
+    live run reaches the status, and the value test in
+    :func:`app.reporting.cucumber_json._build_result` omits a zero.
+
+    Its companion above pins the other half, the baseline's one measured
+    ``skipped`` cell.  The two are not in tension in any run: they are the
+    same clause -- omit a zero, keep a measurement -- applied to a zero and to
+    a measurement.  Together they are the whole of the rule, asserted in both
+    directions so that neither can be quietly changed, and asserted through
+    the written artifact because that is where the publisher reads it.
+    """
+    document = {
+        "features": [
+            probe_feature(
+                elements=[
+                    probe_scenario(
+                        steps=[
+                            probe_step(
+                                line=11,
+                                name="a step skipped after a failure",
+                                status="skipped",
+                                duration=0,
+                            )
+                        ]
+                    )
+                ]
             )
+        ]
+    }
+
+    written = write_cucumber_json(document, base=tmp_artifact_root)
+    result = json.loads(written.read_text(encoding="utf-8"))[0]["elements"][0][
+        "steps"
+    ][0]["result"]
+
+    assert result == {"status": "skipped"}
+    assert "duration" not in result
 
 
 def test_a_failed_step_carries_both_a_duration_and_a_message(
@@ -2518,35 +2719,70 @@ def test_a_scenario_with_no_attachment_carries_no_after_key(
 
 
 @pytest.mark.parametrize(
-    ("embeddings", "expected_after"),
+    ("status", "embeddings", "expected_after"),
     [
-        pytest.param([], False, id="a-hook-with-no-embedding-contributes-nothing"),
         pytest.param(
-            [{"mime_type": SAMPLE_EMBEDDING_MIME_TYPE, "data": ""}],
+            "passed",
+            [],
             False,
-            id="an-embedding-with-empty-data-is-dropped",
+            id="a-passing-hook-with-no-embedding-contributes-nothing",
         ),
         pytest.param(
-            [{"mime_type": SAMPLE_EMBEDDING_MIME_TYPE, "data": "QUJD"}],
+            "passed",
+            [{"mime_type": SAMPLE_EMBEDDING_MIME_TYPE, "data": ""}],
+            False,
+            id="a-passing-hook-whose-embedding-has-no-data-contributes-nothing",
+        ),
+        pytest.param(
+            "passed",
+            [{"mime_type": SAMPLE_EMBEDDING_MIME_TYPE, "data": SAMPLE_EMBEDDING_DATA}],
             True,
             id="an-embedding-with-data-is-kept",
         ),
+        pytest.param(
+            "hook_error",
+            [],
+            True,
+            id="a-failed-hook-with-no-embedding-is-still-published",
+        ),
+        pytest.param(
+            "cleanup_error",
+            [],
+            True,
+            id="a-failed-cleanup-with-no-embedding-is-still-published",
+        ),
+        pytest.param(
+            "hook_error",
+            [{"mime_type": SAMPLE_EMBEDDING_MIME_TYPE, "data": ""}],
+            True,
+            id="a-failed-hook-whose-capture-produced-nothing-is-still-published",
+        ),
     ],
 )
-def test_only_hooks_that_produced_an_attachment_reach_the_artifact(
-    embeddings: list[JsonDict], expected_after: bool
+def test_a_hook_reaches_the_artifact_on_an_attachment_or_a_non_passing_status(
+    status: str, embeddings: list[JsonDict], expected_after: bool
 ) -> None:
-    """A capture that failed must leave no trace at all.
+    """Either an attachment or a problem publishes the entry; nothing else does.
 
-    AAP deviation 19 suppresses a screenshot failure: it is logged, the
-    scenario's status is unchanged, and no embedding is emitted.  An entry
-    carrying an empty ``embeddings`` list -- or an embedding with empty
-    ``data`` -- would instead render as a broken image in both HTML reports.
+    Two rules meet here, and each protects the other.  A capture that failed
+    leaves no *embedding* behind: AAP deviation 19 suppresses the failure,
+    the scenario's status is unchanged, and an entry carrying an empty
+    ``embeddings`` list -- or an embedding with empty ``data`` -- would render
+    as a broken image in both HTML reports.  But the hook's **outcome** is not
+    suppressed with it: a teardown that failed without managing a screenshot
+    is the normal shape of a dead session, and dropping the entry for want of
+    an attachment published a pass in the one artifact the Jenkins publisher
+    reads while both HTML families showed the failure.
+
+    So the entry is emitted when it carries an attachment or when its mapped
+    status is not ``passed``, and only a silently passing hook contributes
+    nothing.  ``hook_error`` and ``cleanup_error`` are behave's two names for a
+    hook that blew up, and both fold onto ``failed`` on the way out.
     """
     element = probe_scenario(
         after=[
             events.new_hook_entry(
-                status="passed", duration=412_000_000, embeddings=embeddings
+                status=status, duration=412_000_000, embeddings=embeddings
             )
         ]
     )
@@ -2554,8 +2790,60 @@ def test_only_hooks_that_produced_an_attachment_reach_the_artifact(
     emitted = emitted_document(probe_feature(elements=[element]))[0]["elements"][0]
 
     assert ("after" in emitted) is expected_after
-    if expected_after:
-        assert emitted["after"][0]["embeddings"][0]["data"] == "QUJD"
+    if not expected_after:
+        return
+
+    entry = emitted["after"][0]
+    assert entry["result"]["status"] == (
+        STATUS_PASSED if status == "passed" else "failed"
+    )
+    usable = [
+        embedding for embedding in embeddings if embedding.get("data")
+    ]
+    if usable:
+        assert entry["embeddings"][0]["data"] == SAMPLE_EMBEDDING_DATA
+    else:
+        assert "embeddings" not in entry, (
+            "an empty embeddings list reached the artifact rather than being "
+            f"omitted: {entry}"
+        )
+
+
+def test_a_failed_teardown_that_captured_nothing_is_published_in_full() -> None:
+    """The case a screenshot-gated writer dropped, asserted end to end.
+
+    The single most consequential omission this writer can make: ``Jenkins:15``
+    narrows the publisher to this one file, so a teardown failure absent from
+    it is a teardown failure absent from CI, while
+    ``app/reporting/html_report.py`` and ``app/reporting/pretty_reports.py``
+    both render it from the same internal entry.  Everything the hook recorded
+    therefore has to survive -- its location, its folded status, its measured
+    nanosecond duration and its failure text -- with ``embeddings`` omitted
+    rather than emitted empty, because there was nothing to attach.
+    """
+    element = probe_scenario(
+        after=[
+            events.new_hook_entry(
+                location=SAMPLE_AFTER_HOOK_LOCATION,
+                status="hook_error",
+                duration=SAMPLE_AFTER_HOOK_DURATION_NANOS,
+                error_message="WebDriverException: session deleted\r\n  frame",
+                embeddings=[],
+            )
+        ]
+    )
+
+    emitted = emitted_document(probe_feature(elements=[element]))[0]["elements"][0]
+
+    assert len(emitted["after"]) == 1
+    entry = emitted["after"][0]
+    assert set(entry) == {"match", "result"}
+    assert entry["match"] == {"location": SAMPLE_AFTER_HOOK_LOCATION}
+    assert entry["result"] == {
+        "status": "failed",
+        "duration": SAMPLE_AFTER_HOOK_DURATION_NANOS,
+        "error_message": "WebDriverException: session deleted\n  frame",
+    }
 
 
 def test_an_embedding_without_a_name_omits_the_key() -> None:
@@ -2568,10 +2856,10 @@ def test_an_embedding_without_a_name_omits_the_key() -> None:
         after=[
             events.new_hook_entry(
                 embeddings=[
-                    {"mime_type": SAMPLE_EMBEDDING_MIME_TYPE, "data": "QUJD"},
+                    {"mime_type": SAMPLE_EMBEDDING_MIME_TYPE, "data": SAMPLE_EMBEDDING_DATA},
                     {
                         "mime_type": SAMPLE_EMBEDDING_MIME_TYPE,
-                        "data": "QUJD",
+                        "data": SAMPLE_EMBEDDING_DATA,
                         "name": "named",
                     },
                 ]
@@ -2601,7 +2889,7 @@ def test_a_hook_with_no_location_carries_an_empty_match() -> None:
                 status="failed",
                 duration=0,
                 embeddings=[
-                    {"mime_type": SAMPLE_EMBEDDING_MIME_TYPE, "data": "QUJD"}
+                    {"mime_type": SAMPLE_EMBEDDING_MIME_TYPE, "data": SAMPLE_EMBEDDING_DATA}
                 ],
             )
         ]
@@ -2624,7 +2912,7 @@ def test_a_background_never_carries_an_after_array() -> None:
     background = probe_background()
     background["after"] = [
         events.new_hook_entry(
-            embeddings=[{"mime_type": SAMPLE_EMBEDDING_MIME_TYPE, "data": "QUJD"}]
+            embeddings=[{"mime_type": SAMPLE_EMBEDDING_MIME_TYPE, "data": SAMPLE_EMBEDDING_DATA}]
         )
     ]
 
@@ -3222,3 +3510,714 @@ def test_write_reports_an_unusable_destination_rather_than_swallowing_it(
 
     with pytest.raises(OSError):
         write_cucumber_json(sample_result_set, path=paths.cucumber_json_path(blocker))
+
+
+# =========================================================================== #
+# 15. The redaction boundary at the publish point (SEC2-F03 and SEC2-F20)
+#
+# This artifact is the one that leaves the workspace: the publisher stage
+# reads it and the build archives it.  So the writer re-applies the two value
+# rules the collector already applied -- ``redact_step_text`` over a step's
+# name together with its ``match.arguments``, and ``sanitize_failure_text``
+# over ``error_message`` -- because a worker's JSON file is untrusted input to
+# this writer and a hand-built document may never have been classified at all.
+# Both rules are idempotent, which is what makes applying them twice free.
+#
+# The phrasings below are the suite's, from ``Login.feature`` and
+# ``Contact.feature``; the values are synthetic, because review finding
+# SEC2-F17 is that a credential belongs in the Gherkin fixture data and
+# nowhere else, and this file is not fixture data.
+# =========================================================================== #
+
+#: ``Login.feature:16``'s phrasing with a synthetic password substituted.  The
+#: value is classified by the word that follows it and by nothing else, which
+#: is the case a value-shape rule alone would publish.
+CREDENTIAL_STEP_NAME: Final[str] = 'User enters "not-a-real-secret" password'
+
+#: ``Contact.feature:12``'s phrasing with its two values substituted, in the
+#: order that makes the surviving value's offset move: the address is
+#: classified, the phone number is not, and the placeholder is shorter than
+#: what it replaces.
+TWO_ARGUMENT_STEP_NAME: Final[str] = (
+    'User enters "someone@example.test" and "+99999999999"'
+)
+
+#: A two-value phrase whose second value is the credential and whose first is
+#: ordinary business data, used for the partially indexed argument list a
+#: worker file can carry: one entry indexes the name, the other value is
+#: represented by no entry at all.  Synthetic phrasing, labelled as one.
+MIXED_VALUE_STEP_NAME: Final[str] = (
+    'User enters "public" tag and "not-a-real-secret" password'
+)
+
+#: The business value of that phrase, which the writer must publish unchanged.
+MIXED_VALUE_KEPT: Final[str] = '"public"'
+
+#: A masked quoted argument: the placeholder inside the quotes the contract
+#: says ``val`` carries.
+REDACTED_QUOTED_VALUE: Final[str] = '"[redacted]"'
+
+
+def quoted_argument_entries(step_name: str) -> list[JsonDict]:
+    """Internal ``match.arguments`` entries for every quoted run of a name.
+
+    The entries are built the way the collector builds them -- ``val``
+    including its quotes, ``offset`` indexing into the name -- so that the
+    writer is handed exactly the shape a worker writes.
+
+    :param step_name: The substituted step text.
+    :returns: One entry per quoted run, left to right.
+    """
+    entries: list[JsonDict] = []
+    index = step_name.find('"')
+    while index != -1:
+        closing = step_name.find('"', index + 1)
+        if closing == -1:
+            break
+        entries.append(
+            {"val": step_name[index : closing + 1], "offset": index}
+        )
+        index = step_name.find('"', closing + 1)
+    return entries
+
+
+def unclassified_step(
+    *,
+    name: str,
+    arguments: Sequence[JsonDict] | None = None,
+    error_message: str | None = None,
+) -> JsonDict:
+    """Assemble an internal step object **without** going through the builder.
+
+    :func:`app.reporting.events.new_step` applies the redaction itself, so a
+    step built through it can never show whether the *writer* also applies it.
+    This helper writes the mapping out literally, which is what a worker's
+    JSON file is to this writer: input it did not produce and cannot assume
+    was classified.
+
+    :param name: The step text, exactly as it is to be handed over.
+    :param arguments: ``match.arguments`` entries, or ``None`` for none.
+    :param error_message: Failure text, or ``None`` for a passing step.
+    :returns: The internal step mapping, carrying the five documented keys.
+    """
+    match: JsonDict = {"location": "features.steps.login_steps.user_enters"}
+    if arguments is not None:
+        match["arguments"] = [dict(argument) for argument in arguments]
+    result: JsonDict = {"status": STATUS_PASSED, "duration": 1_000}
+    if error_message is not None:
+        result["status"] = "failed"
+        result["error_message"] = error_message
+    return {
+        "keyword": "When ",
+        "line": 16,
+        "name": name,
+        "matched": True,
+        "match": match,
+        "result": result,
+    }
+
+
+def emitted_step_of(step: JsonDict) -> JsonDict:
+    """Emit one internal step and return it.
+
+    :param step: An internal step object.
+    :returns: The emitted step.
+    """
+    document = emitted_document(
+        probe_feature(elements=[probe_scenario(steps=[step])])
+    )
+    return document[0]["elements"][0]["steps"][0]
+
+
+def assert_offsets_index_into_the_name(step: JsonDict) -> None:
+    """Assert ``name[offset:offset + len(val)] == val`` on an emitted step.
+
+    This is the invariant the redaction has to preserve: the publisher slices
+    the emitted name with the emitted offset, so masking the text without
+    moving the offsets would hand it a substring nobody recorded.
+
+    :param step: An emitted step carrying ``name`` and ``match``.
+    """
+    name = step["name"]
+    for argument in step["match"].get("arguments", ()):
+        if not argument:
+            continue
+        offset, value = argument["offset"], argument["val"]
+        assert name[offset : offset + len(value)] == value, (
+            f"{value!r} at {offset} does not index into {name!r}"
+        )
+
+
+def test_a_credential_bearing_step_is_published_redacted() -> None:
+    """Review finding SEC2-F03, at the boundary that matters most.
+
+    A Login row's substituted step text *is* a credential and
+    ``match.arguments`` carries it a second time.  Neither reaches the file the
+    publisher reads: the name carries the placeholder, so does ``val``, the
+    quotes survive because the contract says ``val`` includes them, and the
+    offset still indexes into the emitted name.
+    """
+    emitted = emitted_step_of(
+        unclassified_step(
+            name=CREDENTIAL_STEP_NAME,
+            arguments=quoted_argument_entries(CREDENTIAL_STEP_NAME),
+        )
+    )
+
+    assert emitted["name"] == 'User enters "[redacted]" password'
+    assert emitted["match"]["arguments"] == [
+        {"val": REDACTED_QUOTED_VALUE, "offset": 12}
+    ]
+    assert_offsets_index_into_the_name(emitted)
+    assert set(emitted) == set(STEP_KEYS)
+
+
+def test_the_writer_classifies_a_document_no_producer_classified() -> None:
+    """The writer's own boundary, not the collector's.
+
+    The step here is assembled literally rather than through
+    :func:`app.reporting.events.new_step`, which is what a shard file written
+    by another build -- or a hand-built document -- looks like to this writer.
+    Trusting it would make the artifact's safety depend on a file this module
+    does not control, which is why the rule is applied again here.
+    """
+    raw = unclassified_step(
+        name=TWO_ARGUMENT_STEP_NAME,
+        arguments=quoted_argument_entries(TWO_ARGUMENT_STEP_NAME),
+    )
+    delta = len(REDACTED_QUOTED_VALUE) - len('"someone@example.test"')
+
+    emitted = emitted_step_of(raw)
+    arguments = emitted["match"]["arguments"]
+
+    assert "someone@example.test" not in render_cucumber_json(
+        {"features": [probe_feature(elements=[probe_scenario(steps=[raw])])]}
+    )
+    assert arguments[0] == {"val": REDACTED_QUOTED_VALUE, "offset": 12}
+    assert arguments[1]["val"] == '"+99999999999"'
+    assert arguments[1]["offset"] == (
+        TWO_ARGUMENT_STEP_NAME.index('"+99999999999"') + delta
+    )
+    assert_offsets_index_into_the_name(emitted)
+
+
+def test_a_partially_indexed_argument_list_is_published_classified() -> None:
+    """The publish boundary covers a span no argument entry represents.
+
+    A worker file can index some of a step's quoted values and not others --
+    a definition that captured one parameter of a two-value phrase, or a
+    hand-built document that recorded a single entry -- and this writer cannot
+    tell the difference between that and a document nothing ever classified.
+    So the artifact the publisher reads is checked both ways: the credential
+    span with no entry behind it is masked, the represented business value is
+    published byte for byte, the raw value appears nowhere in the rendered
+    file, and the surviving offset still indexes into the emitted name.
+    """
+    raw = unclassified_step(
+        name=MIXED_VALUE_STEP_NAME,
+        arguments=quoted_argument_entries(MIXED_VALUE_STEP_NAME)[:1],
+    )
+
+    emitted = emitted_step_of(raw)
+    arguments = emitted["match"]["arguments"]
+
+    assert emitted["name"] == (
+        'User enters "public" tag and "[redacted]" password'
+    )
+    assert arguments == [{"val": MIXED_VALUE_KEPT, "offset": 12}]
+    assert_offsets_index_into_the_name(emitted)
+    assert "not-a-real-secret" not in render_cucumber_json(
+        {"features": [probe_feature(elements=[probe_scenario(steps=[raw])])]}
+    )
+
+
+def test_the_baselines_parameterised_step_is_emitted_untouched(
+    golden_internal: JsonDict, golden_cucumber_normalized: Any
+) -> None:
+    """The over-redaction guard, on the only parameterised step in the golden.
+
+    ``User can change any user's information like "Test2" , "30" and "2"``
+    carries the word ``user`` twice and three quoted values, none of them a
+    credential, and AAP 0.6 freezes both the name and the three offsets.  A
+    widened keyword set or an entropy heuristic would empty this step -- in
+    the artifact the publisher reads -- and fail here.
+    """
+    emitted = build_cucumber_json(golden_internal)
+    steps = [
+        step
+        for step in iter_steps(emitted)
+        if step["name"] == GOLDEN_ARGUMENT_STEP_NAME
+    ]
+    baseline = [
+        step
+        for step in iter_steps(golden_cucumber_normalized)
+        if step["name"] == GOLDEN_ARGUMENT_STEP_NAME
+    ]
+
+    assert len(steps) == 1
+    assert len(baseline) == 1
+    assert steps[0]["name"] == GOLDEN_ARGUMENT_STEP_NAME
+    assert steps[0]["match"]["arguments"] == list(GOLDEN_ARGUMENTS)
+    assert steps[0]["match"]["arguments"] == baseline[0]["match"]["arguments"]
+    assert_offsets_index_into_the_name(steps[0])
+
+
+def test_error_message_is_published_sanitized() -> None:
+    """Review finding SEC2-F20: the durable copy of a failure is bounded.
+
+    Three things happen to the text and one does not.  A classified value is
+    masked, an absolute path outside the checkout keeps only its last two
+    components, and an over-long text is cut with the exact count of dropped
+    characters -- while the assertion's own message survives verbatim, which
+    AAP 0.6 and deviation 16 require.
+    """
+    tail = "y" * 32
+    message = (
+        "The title is not same as the expected! password=not-a-real-secret\n"
+        '  File "/opt/toolchain/lib/python3.14/unittest/case.py", line 12\n'
+        + "diagnostic line of a traceback frame\n"
+        * ((events.MAX_FAILURE_TEXT_CHARS // 37) + 10)
+        + tail
+    )
+
+    emitted = emitted_step_of(
+        unclassified_step(name="a step", error_message=message)
+    )
+    published = emitted["result"]["error_message"]
+
+    assert published.startswith(
+        "The title is not same as the expected! password=[redacted]\n"
+    )
+    assert "not-a-real-secret" not in published
+    assert '  File ".../unittest/case.py", line 12' in published
+    assert "/opt/toolchain" not in published
+    assert "char(s) truncated]" in published
+    assert not published.endswith(tail)
+    assert len(published) < len(message)
+
+
+def test_a_sanitized_message_and_a_relative_frame_survive_the_writer(
+    sample_emitted: list[JsonDict],
+) -> None:
+    """The sample's two failures are already clean, and stay byte-identical.
+
+    Their text is what a real run produces -- an assertion message or a
+    Selenium ``no such element`` message, then a Python traceback whose frames
+    are already repository-relative -- so the publish-time rule must be a
+    no-op on it.  A writer that rewrote these would be destroying the
+    diagnostic the artifact exists to carry.
+    """
+    messages = [
+        step["result"]["error_message"]
+        for step in iter_steps(sample_emitted)
+        if "error_message" in step["result"]
+    ]
+
+    assert len(messages) == 2
+    for message in messages:
+        assert events.sanitize_failure_text(message) == message
+        assert "[redacted]" not in message
+        assert "char(s) truncated]" not in message
+        assert 'File "features/steps/crm_steps.py"' in message
+
+
+def test_the_redaction_leaves_locations_embeddings_and_names_alone() -> None:
+    """The boundary is value-level, and narrowly so.
+
+    A screenshot's base64 payload is a required artifact field, a hook's
+    ``match.location`` and a step's ``match.location`` are dotted Python paths
+    (AAP deviation 8) and an element's name is a frozen parity value.  None of
+    them is a credential, and a redaction that reached any of them would break
+    the report rather than protect it -- the payload is what both HTML writers
+    render as the failure's evidence.
+    """
+    payload = base64.b64encode(DEFAULT_SCREENSHOT_PNG).decode("ascii")
+    scenario_name = "User enters his password in the login form"
+    element = probe_scenario(
+        name=scenario_name,
+        steps=[
+            unclassified_step(
+                name=CREDENTIAL_STEP_NAME,
+                arguments=quoted_argument_entries(CREDENTIAL_STEP_NAME),
+            )
+        ],
+        after=[
+            events.new_hook_entry(
+                location=SAMPLE_AFTER_HOOK_LOCATION,
+                embeddings=[
+                    {
+                        "mime_type": SAMPLE_EMBEDDING_MIME_TYPE,
+                        "data": payload,
+                        "name": scenario_name,
+                    }
+                ],
+            )
+        ],
+    )
+
+    emitted = emitted_document(probe_feature(elements=[element]))[0]["elements"][0]
+    hook = emitted["after"][0]
+
+    assert emitted["name"] == scenario_name
+    assert hook["match"]["location"] == SAMPLE_AFTER_HOOK_LOCATION
+    assert hook["embeddings"][0]["data"] == payload
+    assert hook["embeddings"][0]["name"] == scenario_name
+    assert (
+        emitted["steps"][0]["match"]["location"]
+        == "features.steps.login_steps.user_enters"
+    )
+
+
+def test_emitting_an_already_redacted_document_changes_nothing() -> None:
+    """Idempotency, which is what makes applying the rule twice safe.
+
+    The collector redacts and the writer redacts again.  If the second pass
+    were not a fixed point, every hop would mask the placeholder's own quotes
+    again and the offsets would drift -- so the emitted document is walked back
+    into the internal schema and emitted a second time, and the two must be
+    equal.
+    """
+    first = emitted_document(
+        probe_feature(
+            elements=[
+                probe_scenario(
+                    identifier="a-probe-feature;a-probe-scenario",
+                    start_timestamp=None,
+                    steps=[
+                        unclassified_step(
+                            name=CREDENTIAL_STEP_NAME,
+                            arguments=quoted_argument_entries(CREDENTIAL_STEP_NAME),
+                        ),
+                        unclassified_step(
+                            name=TWO_ARGUMENT_STEP_NAME,
+                            arguments=quoted_argument_entries(
+                                TWO_ARGUMENT_STEP_NAME
+                            ),
+                        ),
+                    ],
+                )
+            ]
+        )
+    )
+
+    second = build_cucumber_json(internal_result_set(first))
+
+    assert second == first
+# 16. The write authority: what the bytes travel through to reach disk
+#
+# Section 14 asserts *where* the artifact goes; this section asserts *how* it
+# gets there.  The writer no longer prepares the parent directory and then
+# names the pathname a second time to a builtin ``open``: between those two
+# steps a symbolic or hard link put in the artifact's place redirected the
+# write, and the truncation the open performed destroyed the target before any
+# check could refuse it (CWE-367/CWE-59).  Every write now goes through
+# ``app.utils.paths.open_artifact_write``, which creates and verifies each
+# owned directory component under a *held* directory descriptor, opens the
+# final entry relative to that descriptor with ``O_NOFOLLOW``, and truncates
+# only once the descriptor is known to hold a lone regular file.
+#
+# Each hostile case below therefore asserts *two* things: that the write was
+# refused, and that the file outside the artifact root is byte-for-byte as it
+# was.  An exception raised after the outside inode had already been emptied
+# would satisfy ``pytest.raises`` and still be exactly the defect.
+# =========================================================================== #
+
+#: Whether this platform can create a symbolic link.  The redirection cases
+#: need a real one and there is no honest way to fake it; a platform without
+#: symbolic links cannot be attacked through one either, so skipping is the
+#: truthful outcome rather than a gap.
+SYMLINKS_AVAILABLE: Final[bool] = hasattr(os, "symlink")
+
+#: Whether this platform can create a hard link.  A destination that *is* a
+#: file elsewhere is refused for its link count, and that destination cannot be
+#: prepared where :func:`os.link` is absent.
+HARD_LINKS_AVAILABLE: Final[bool] = hasattr(os, "link")
+
+#: Whether POSIX permission bits carry meaning here.  Windows expresses
+#: permissions as ACLs, where the owner-only creation policy has nothing to
+#: apply and nothing to assert.
+MODES_ENFORCED: Final[bool] = hasattr(os, "fchmod")
+
+#: Name of the file planted *outside* the artifact root for a hostile link to
+#: point at.  The report carries substituted step arguments and failure text,
+#: so redirecting this writer is a write of run evidence into someone else's
+#: file as well as the loss of that file's content.
+OUTSIDE_NAME: Final[str] = "outside.json"
+
+#: Content of that file: distinctive enough that finding it anywhere else -- or
+#: finding it gone, or emptied -- is unambiguous.
+OUTSIDE_CONTENT: Final[bytes] = b'{"kept": true}'
+
+
+def _plant_outside_file(directory: Path) -> Path:
+    """Create the file a hostile link points at, outside the artifact root.
+
+    :param directory: A temporary directory that is **not** the artifact root
+        -- pytest's ``tmp_path``, of which the root is a subdirectory.
+    :returns: The path of the planted file.
+    """
+    outside = directory / OUTSIDE_NAME
+    outside.write_bytes(OUTSIDE_CONTENT)
+    return outside
+
+
+def _permission_bits(path: Path) -> int:
+    """The permission bits of ``path``, without its file type.
+
+    :param path: Entry to inspect.
+    :returns: ``st_mode`` masked to the twelve permission and special bits.
+    """
+    return path.stat().st_mode & 0o7777
+
+
+def _assert_owner_only(path: Path) -> None:
+    """Assert that nothing but the owner can reach ``path``.
+
+    The group and other bits are asserted absent rather than the whole mode
+    asserted equal to ``0o700``: a set-group-id build directory keeps that bit
+    -- it grants the group nothing once the access bits are gone -- and the
+    policy is about access, not about one exact integer.
+
+    :param path: Entry to check.
+    """
+    bits = _permission_bits(path)
+    assert bits & paths.ARTIFACT_MODE_MASK == 0, (
+        f"{path} is reachable by the group or by others: {oct(bits)}"
+    )
+    assert bits & 0o700, f"{path} is not reachable by its owner: {oct(bits)}"
+
+
+def test_the_written_artifact_still_reproduces_the_golden_baseline(
+    golden_internal: JsonDict,
+    golden_cucumber_normalized: Any,
+    tmp_artifact_root: Path,
+) -> None:
+    """The secure write route changed the plumbing and not one byte of content.
+
+    Section 1 compares the *built* document with the committed baseline; this
+    compares the bytes that reached disk through the descriptor-bound opener,
+    which is the only route this writer now has.  A route that wrapped the
+    stream differently -- a BOM, a CRLF translation, a re-encode -- would leave
+    the in-memory comparison passing and the publisher reading something else.
+    """
+    written = write_cucumber_json(golden_internal, base=tmp_artifact_root)
+    raw = written.read_bytes()
+
+    assert raw == render_cucumber_json(golden_internal).encode("utf-8")
+    assert b"\r" not in raw
+    assert comparable(json.loads(raw.decode("utf-8"))) == comparable(
+        golden_cucumber_normalized
+    )
+
+
+@pytest.mark.skipif(
+    not MODES_ENFORCED,
+    reason="this platform expresses permissions as ACLs, so the policy does not apply",
+)
+def test_the_written_artifact_and_the_directories_above_it_are_owner_only(
+    sample_result_set: Any, tmp_artifact_root: Path
+) -> None:
+    """The report is created ``0o600`` beneath an owner-only ``target/``.
+
+    The artifact carries substituted step arguments -- the credentials the
+    Login scenarios type -- and failure text, so an ambient ``0o644`` under an
+    ambient ``0o755`` discloses the run's evidence to every local account
+    (CWE-732/CWE-359).  The directory is asserted as well as the file: a
+    world-readable build-output directory discloses which artifacts exist even
+    where their contents are tight.
+    """
+    written = write_cucumber_json(sample_result_set, base=tmp_artifact_root)
+
+    assert _permission_bits(written) == paths.ARTIFACT_FILE_MODE
+    _assert_owner_only(written)
+    _assert_owner_only(paths.target_root(tmp_artifact_root))
+
+
+@pytest.mark.skipif(
+    not MODES_ENFORCED,
+    reason="this platform expresses permissions as ACLs, so the policy does not apply",
+)
+def test_a_permissive_artifact_from_an_earlier_run_is_tightened_on_rewrite(
+    sample_result_set: Any, tmp_artifact_root: Path
+) -> None:
+    """``--no-clean`` over a permissive artifact does not keep its bits.
+
+    This is the case a creation mode cannot reach, and the one the review
+    measured at ``0o644``: the mode argument applies only to a file the open
+    *creates*, so a run that rewrites the artifact an earlier run left behind
+    would inherit whatever that run's umask produced.  The tightening is made
+    through the descriptor the write holds, and before the truncation, so the
+    bits are gone before the new content exists.
+    """
+    written = write_cucumber_json(sample_result_set, base=tmp_artifact_root)
+    os.chmod(written, 0o644)
+    os.chmod(paths.target_root(tmp_artifact_root), 0o755)
+
+    rewritten = write_cucumber_json(None, base=tmp_artifact_root)
+
+    assert rewritten == written
+    assert _permission_bits(written) == paths.ARTIFACT_FILE_MODE
+    _assert_owner_only(paths.target_root(tmp_artifact_root))
+    assert written.read_bytes() == b"[]\n"
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create a symbolic link to be redirected through",
+)
+def test_a_symlinked_destination_is_refused_and_the_outside_file_survives(
+    sample_result_set: Any, prepared_artifact_root: Path, tmp_path: Path
+) -> None:
+    """A link standing where the artifact goes is refused, target untouched.
+
+    The deterministic case from the security review: with the artifact's name
+    occupied by a symbolic link to a writable file outside the artifact root, a
+    builtin ``open`` follows it and truncates that file before returning a
+    stream.  The refusal is necessary but not sufficient, which is why the
+    outside file's bytes are asserted afterwards -- the finding is the
+    overwrite, not the exception.
+    """
+    outside = _plant_outside_file(tmp_path)
+    destination = paths.cucumber_json_path(prepared_artifact_root)
+    os.symlink(outside, destination)
+
+    with pytest.raises(paths.ArtifactPathError) as refusal:
+        write_cucumber_json(sample_result_set, base=prepared_artifact_root)
+
+    # An OSError subclass, so the writer's documented contract and the AAP
+    # 0.4.1 writer-failure exit class are unchanged by the refusal.
+    assert isinstance(refusal.value, OSError)
+    assert outside.read_bytes() == OUTSIDE_CONTENT
+    assert destination.is_symlink()
+
+
+@pytest.mark.skipif(
+    not HARD_LINKS_AVAILABLE,
+    reason="this platform cannot create a hard link, so that destination cannot exist",
+)
+def test_a_hard_linked_destination_is_refused_and_the_outside_file_survives(
+    sample_result_set: Any, prepared_artifact_root: Path, tmp_path: Path
+) -> None:
+    """A destination that *is* a file elsewhere is refused for its link count.
+
+    The case no symlink check can see: there is no link anywhere in the path,
+    the entry is an ordinary regular file, and writing it in place would
+    overwrite the outside inode it shares.  ``--no-clean`` over a tree an
+    attacker prepared is exactly how the artifact's name comes to carry a
+    second link.
+    """
+    outside = _plant_outside_file(tmp_path)
+    destination = paths.cucumber_json_path(prepared_artifact_root)
+    os.link(outside, destination)
+
+    with pytest.raises(paths.ArtifactPathError) as refusal:
+        write_cucumber_json(sample_result_set, base=prepared_artifact_root)
+
+    assert isinstance(refusal.value, OSError)
+    assert outside.read_bytes() == OUTSIDE_CONTENT
+    assert destination.read_bytes() == OUTSIDE_CONTENT
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create a symbolic link to be redirected through",
+)
+def test_a_symlinked_build_output_directory_is_refused_with_nothing_written(
+    sample_result_set: Any, tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """A linked ``target/`` writes nothing into the directory it points at.
+
+    The parent half of the same race: a component of the path, rather than the
+    final entry, is the link.  Verification that releases its descriptor before
+    the write cannot refuse this at all -- the report lands wherever the link
+    points -- so the opener refuses the component as it descends, and the
+    directory it pointed at is asserted still empty.
+    """
+    outside_directory = tmp_path / "outside-tree"
+    outside_directory.mkdir()
+    os.symlink(outside_directory, paths.target_root(tmp_artifact_root))
+
+    with pytest.raises(paths.ArtifactPathError) as refusal:
+        write_cucumber_json(sample_result_set, base=tmp_artifact_root)
+
+    assert isinstance(refusal.value, OSError)
+    assert list(outside_directory.iterdir()) == []
+
+
+@pytest.mark.skipif(
+    not HARD_LINKS_AVAILABLE,
+    reason="this platform cannot create a hard link, so that destination cannot exist",
+)
+def test_a_refused_rewrite_leaves_the_previous_artifact_whole(
+    sample_result_set: Any, tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """Nothing is emptied before the destination has been established.
+
+    The ordering property behind the whole route: ``open(..., "w")`` truncates
+    as part of the open, so by the time a check could refuse anything the
+    previous report is already gone.  The opener leaves ``O_TRUNC`` out, checks
+    the descriptor it obtained and truncates last, so a refused write costs the
+    run nothing -- the artifact an earlier run published is still readable and
+    still parses, which is what the AAP 0.4.1 writer-failure row promises for
+    the artifacts written before a failure.
+    """
+    written = write_cucumber_json(sample_result_set, base=tmp_artifact_root)
+    published = written.read_bytes()
+    # A second link to the artifact, from outside the root: the entry stays an
+    # ordinary regular file, so only its link count reveals that writing it
+    # would also write somewhere else.
+    outside = tmp_path / OUTSIDE_NAME
+    os.link(written, outside)
+
+    with pytest.raises(paths.ArtifactPathError):
+        write_cucumber_json(None, base=tmp_artifact_root)
+
+    assert written.read_bytes() == published
+    assert json.loads(written.read_text(encoding="utf-8")) == build_cucumber_json(
+        sample_result_set
+    )
+    assert outside.read_bytes() == published
+
+
+def test_the_writer_reaches_disk_only_through_the_path_authority(
+    sample_result_set: Any, tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One write route, named once, carrying this artifact's byte contract.
+
+    Asserted two ways, because each catches what the other cannot.  The source
+    of the function is read to show that the builtin opener and the
+    check-then-open pair it belonged to are simply absent -- a hardened writer
+    API with no consumer protects nothing.  The call is then intercepted to
+    show that the destination handed to the authority is the one
+    ``paths.cucumber_json_path`` resolved, with ``utf-8`` and ``\\n`` passed
+    explicitly rather than left to the opener's defaults, so the artifact's
+    bytes cannot start depending on a default changing elsewhere.
+    """
+    body = inspect.getsource(write_cucumber_json).replace(
+        write_cucumber_json.__doc__ or "", ""
+    )
+    assert "open_artifact_write(" in body
+    assert "open(" not in body
+    assert "ensure_parent" not in body
+
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def recording(destination: Any, **options: Any) -> Any:
+        calls.append((destination, options))
+        return paths.open_artifact_write(destination, **options)
+
+    monkeypatch.setattr(
+        "app.reporting.cucumber_json.open_artifact_write", recording
+    )
+
+    written = write_cucumber_json(sample_result_set, base=tmp_artifact_root)
+
+    assert calls == [
+        (
+            paths.cucumber_json_path(tmp_artifact_root),
+            {"encoding": "utf-8", "newline": "\n"},
+        )
+    ]
+    assert written.read_text(encoding="utf-8") == render_cucumber_json(
+        sample_result_set
+    )

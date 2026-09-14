@@ -1,81 +1,37 @@
 r"""Tests for ``app/automation/interactions.py`` - the port's only home for keys and actions.
 
-The evidence module for the two helpers AAP 0.4.1 assigns to
-``app/automation/interactions.py``: *"Keyboard-key helpers for the three
-classes that use ``Keys`` - Crm, Notes and Sales - and action-chain helpers
-for the two that use ``Actions`` - Crm and Notes.  ``Contacts.java`` uses
-neither and its module imports nothing from here"*.  The Java anchors are
-``Crm.java``, ``Notes.java`` and ``Sales.java`` at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240``, which AAP 0.2.1 holds as
-REFERENCE and this port never modifies.
+The evidence module for the two helpers AAP 0.4.1 assigns here: *"Keyboard-key
+helpers for the three classes that use ``Keys`` - Crm, Notes and Sales - and
+action-chain helpers for the two that use ``Actions`` - Crm and Notes"*, with
+``Contacts.java`` using neither.  The anchors are ``Crm.java:9-10`` and
+``Notes.java:9-10``, importing both classes, ``Sales.java:9``, importing
+``Keys`` alone, and ``Contacts.java:3-9``, whose import block names neither -
+pinned revision ``47e9d697e4a9a85da889f94a846fdf47af28a240`` (AAP 0.2.1).
 
-Three specification statements are encoded here, and every test below traces
-to one of them:
+Three contracts are owned here: AAP 0.4.1's closed export surface, keyboard
+helpers for the ``Keys`` sites and action-chain helpers for the ``Actions``
+sites and nothing else; AAP 0.4.2's import sites, carried in
+:data:`PRESS_KEYS_CONSUMERS` and :data:`ACTION_CHAIN_CONSUMERS` and asserted
+against the tree by parsing every step module with :mod:`ast`; and AAP 0.5.2's
+rule that ``Keys`` and ``Actions`` are *"reached only through
+``app/automation/interactions.py``"*, asserted from both sides - the barrel
+hands out neither class, and no module under ``features/steps/`` imports
+``selenium`` in any form.
 
-AAP 0.4.1, the ``interactions`` row
-    Keyboard helpers for the ``Keys`` sites and action-chain helpers for the
-    ``Actions`` sites, and nothing else.  Asserted as an export surface that is
-    not merely correct but **closed** - see
-    :func:`test_interaction_surface_is_closed`.
-AAP 0.4.2, the import sites
-    *"``press_keys`` in ``crm_steps``, ``notes_steps`` and ``sales_steps``;
-    ``action_chain`` in ``crm_steps`` and ``notes_steps``"*, with ``By`` as the
-    single authorized Selenium re-export.  Asserted against the tree itself, by
-    parsing every step module with :mod:`ast` - see
-    :func:`test_press_keys_import_sites_match_the_specification` onwards.
-AAP 0.5.2, the translation table
-    ``org.openqa.selenium.Keys`` and ``interactions.Actions`` are *"reached
-    only through ``app/automation/interactions.py``"*.  Asserted from both
-    sides: the barrel hands out neither class
-    (:func:`test_keys_is_not_exported_by_the_barrel`) and no module under
-    ``features/steps/`` imports ``selenium`` in any form
-    (:func:`test_no_step_module_imports_selenium`).
+What the source requires: the nine ``Keys`` sites, cited line by line in
+:data:`JAVA_KEY_CALL_SITES`, take two Java shapes that both reach the browser as
+one character stream, so the port makes exactly one keyboard call carrying
+``(text, *keys)`` in order, and the two ``Actions`` chains transcribe as a
+fluent builder with no ``build()`` step and ``pause`` in seconds.
 
-The call sites this module is the port of
------------------------------------------
-``Keys.ENTER`` is the only member the suite ever names, at nine sites in two
-Java shapes - :data:`JAVA_KEY_CALL_SITES` carries all nine, and
-:func:`test_the_nine_java_call_sites_each_port_to_one_ordered_call` drives one
-case per site:
-
-``Notes.java:35``   ``notesP.tagsN.sendKeys("New Tag", Keys.ENTER)``
-``Sales.java:68``   ``salesp.searchBar.sendKeys(name + Keys.ENTER)``
-``Crm.java:36``, ``:40``, ``:76``, ``:78``, ``:80``, ``:138``, ``:141``
-    the same call carrying that site's own literal.
-
-Both Java shapes reach the browser as one character stream, so the port makes
-exactly **one** keyboard call carrying ``(text, *keys)``; that single-call,
-order-preserving shape is what the ``element.send_keys`` assertions pin.
-``Actions`` appears twice - ``Crm.java:108-115`` and ``Notes.java:78-79`` -
-each building ``clickAndHold(...).pause(2000).moveToElement(...).pause(2000)
-.release().perform()``, and the two parity traps that transcription carries are
-measured in :func:`test_returned_builder_has_no_build_step` and
-:func:`test_pause_takes_seconds_where_the_java_literal_was_milliseconds`.
-
-Why nothing here starts a browser, and how that is guaranteed
--------------------------------------------------------------
-``app/automation/interactions.py`` executes ``from .driver import get_driver``,
-binding the name into its own namespace, so the seam is
-``app.automation.interactions.get_driver`` and nothing else.  The autouse
-:func:`_forbid_unpatched_session` fixture replaces it with a callable that fails
-the test outright, and a test that needs a session installs its own stand-in
-through :func:`get_driver_source`.  No test can therefore reach the real
-provisioning path: no browser is launched, no driver binary is downloaded and
-no network call is made.  The page itself is
-``tests/conftest.py``'s :class:`~tests.conftest.StubDriver`, whose single
-ordered log is what makes "one call, in this order" assertable at all.
-
-Why the key characters appear as literals rather than as ``Keys`` members
--------------------------------------------------------------------------
-``Keys.ENTER`` is ``"\ue007"``, a code point the W3C WebDriver specification
-fixes in the Unicode private-use area, and :data:`ENTER` states it directly.
-Two reasons, both deliberate: the suite honours the AAP 0.4.2 boundary
-everywhere including here, so no test module needs ``selenium`` on the import
-path to describe what reaches the page; and comparing against the specified
-code point is non-circular, where importing the very class the module under
-test imports would agree with it by construction.  The character values are
-measured against the pinned ``selenium`` 4.48.0 and restated in
-:data:`KEY_CHARACTERS`.
+Nothing starts a browser: the seam is
+``app.automation.interactions.get_driver``, which the autouse
+:func:`_forbid_unpatched_session` fixture replaces with a failing callable
+unless a test installs a stand-in, and the page is ``tests/conftest.py``'s
+:class:`~tests.conftest.StubDriver`, whose single ordered log makes "one call,
+in this order" assertable.  ``Keys.ENTER`` is the literal ``"\ue007"`` the W3C
+WebDriver specification fixes, so the AAP 0.4.2 boundary holds here too and the
+comparison is not circular.
 """
 
 from __future__ import annotations
@@ -565,7 +521,8 @@ def test_text_then_key_reaches_the_page_as_one_ordered_call(stub_driver: Any) ->
     """The port of ``Notes.java:35``: one call carrying ``("New Tag", ENTER)``.
 
     The single most important assertion about this helper.  Both Java shapes -
-    ``sendKeys("New Tag", Keys.ENTER)`` and ``sendKeys(name + Keys.ENTER)`` -
+    ``sendKeys("New Tag", Keys.ENTER)`` at ``Notes.java:35`` and
+    ``sendKeys(name + Keys.ENTER)`` at ``Sales.java:68`` -
     reach the browser as one character stream, because selenium's
     ``keys_to_typing`` flattens every argument into one character list.  So the
     port makes exactly one keyboard call, and this test pins all three ways that
@@ -1130,7 +1087,8 @@ def test_pause_returns_the_same_chain_so_a_java_chain_transcribes_directly(
     """The builder is fluent, which is what lets a step reproduce its Java chain.
 
     ``clickAndHold(...).pause(2000).moveToElement(...).pause(2000).release()``
-    is one expression in Java; the port is one expression in Python only if each
+    is one expression in Java (``Crm.java:110-115`` over six lines,
+    ``Notes.java:79`` on one); the port is one expression in Python only if each
     step returns the builder.  Asserted on ``pause`` because it is the operation
     the two chains use that carries no element, and an element-targeted action
     cannot be built against a duck-typed driver - selenium's pointer actions
@@ -1201,8 +1159,10 @@ def test_action_chain_import_sites_match_the_specification(
     """``action_chain`` is imported by ``crm`` and ``notes`` - and no other.
 
     ``Crm.java:9-10`` and ``Notes.java:9-10`` import
-    ``org.openqa.selenium.interactions.Actions``; ``Sales.java`` does not, which
-    is why its module takes the keyboard helper alone.
+    ``org.openqa.selenium.interactions.Actions``; ``Sales.java:3-11`` is the
+    whole of that class's import block and names ``org.openqa.selenium.Keys``
+    at ``Sales.java:9`` and no ``Actions`` at all, which is why its module
+    takes the keyboard helper alone.
     """
     consumers = {
         name
@@ -1218,9 +1178,12 @@ def test_contacts_steps_imports_neither_helper(
 ) -> None:
     """``contacts_steps`` takes nothing from this module, which is the point.
 
-    ``Contacts.java`` imports neither ``Keys`` nor ``Actions``, so importing
-    either helper here would be a divergence rather than a tidy-up - the AAP
-    0.4.1 row says so in as many words.  It does import from the barrel, for its
+    ``Contacts.java:3-9`` is that class's entire import block - ``ContactsP``,
+    ``Driver``, the two Cucumber annotations, JUnit's ``Assert`` and, at
+    ``Contacts.java:8-9``, ``ExpectedConditions`` and ``WebDriverWait`` - so it
+    imports neither ``Keys`` nor ``Actions``, and importing either helper here
+    would be a divergence rather than a tidy-up; the AAP 0.4.1 row says so in
+    as many words.  ``contacts_steps`` does import from the barrel, for its
     waits, so the assertion is specifically about the two names and not about
     the package.
     """

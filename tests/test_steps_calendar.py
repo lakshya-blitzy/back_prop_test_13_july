@@ -1,100 +1,42 @@
-"""Per-method Java-parity tests for ``features/steps/calendar_steps.py``.
+"""Behavioural parity tests for ``features/steps/calendar_steps.py``.
 
-Java anchor
------------
-``src/main/java/com/testinium/step_definitions/Calendar.java`` and
-``src/main/java/com/testinium/pages/CalendarP.java`` at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240``, both held REFERENCE by AAP 0.2.1.
-``Calendar.java`` is 204 lines and declares **thirteen** step definitions;
-``CalendarP.java`` is 76 lines and declares **twenty-one** ``@FindBy`` fields.
+Authority: ``step_definitions/Calendar.java`` (204 lines; thirteen definitions
+annotated between ``:17`` and ``:198``, each line transcribed into
+:data:`JAVA_ANNOTATION_LINES`) and ``pages/CalendarP.java`` (76 lines;
+twenty-one ``@FindBy`` fields at ``:13-74``), at pinned revision
+``47e9d697e4a9a85da889f94a846fdf47af28a240`` and held REFERENCE by AAP 0.2.1.
+Every expectation is transcribed into a constant below and cited to its Java
+line, so the suite needs no reference checkout and nothing here is derived
+from the port it judges.
 
-This module discharges the per-module obligation AAP 0.4.1 states: *"for each
-of the ten step modules, ``tests/test_steps_<area>.py`` drives the module
-against a stubbed driver and asserts, for every step method in the
-corresponding Java class, that the port performs the same observable
-operations in the same order - the same locators as declared in the paired
-page object, the same wait target and timeout, the same hard-coded literals
-and expected values, the same assertion subject and message text, and the same
-no-ops where a Java method's body is empty"*, together with AAP 0.4.1's
-fixed-sleep rule: *"Each module's behaviour test asserts the delay is present
-at its call site."*
+This module discharges AAP 0.4.1's per-module parity obligation for the
+Calendar area: for every step method of the paired class, the same observable
+operations in the same order - the same page-object locators, wait target and
+timeout, literals and expected values, assertion subject and message text,
+and the same no-ops.  A method with no assertion here is a gap, so
+:data:`DEFINITIONS` enumerates all thirteen and the census fails closed on a
+fourteenth, a rename or a misrouted registration.  What that fixes here:
 
-What it proves, and why each part of it exists
-----------------------------------------------
-1. **The census is closed.**  :data:`DEFINITIONS` transcribes all thirteen
-   definitions from the Java file - line, keyword, method, phrase, the page
-   fields each one touches in order, and its wait, sleep and assertion counts.
-   :func:`test_census_holds_exactly_thirteen_definitions` and
-   :func:`test_step_module_registers_exactly_the_census_functions` make that
-   census *fail-closed*: a fourteenth definition, a renamed function, a dropped
-   port or a definition registered with the wrong decorator fails a test rather
-   than passing unnoticed.  Every check is computed from static constants and
-   from the step module's own source, so no test depends on another having run
-   first and ``pytest -k`` on any single test behaves identically.
-2. **Every step is driven, and its whole ordered operation log is asserted.**
-   Membership is not enough for parity - ``Calendar.java:19-20`` clicks *then*
-   waits, and the reverse order would satisfy a membership assertion - so each
-   per-definition test compares ``stub_driver.calls`` element for element.
-   Both seams record **into that same list**: :class:`_FakeClock` appends
-   :data:`SLEEP_MARKER` and :class:`_WaitRecorder` appends
-   :data:`WAIT_MARKER` with the locator and timeout the call site supplied, so
-   a wait that resolves its locator inside its own predicate - performing no
-   lookup of its own - still occupies a position in the sequence that a
-   reordering would move.
-3. **Both date calculations are parameterized over all twelve months plus the
-   source's missing ``default``.**  ``Calendar.java:59-96`` and ``:115-152``
-   are twelve-case switches with no default, so an out-of-range ``data-month``
-   leaves the month name empty and the expected string malformed.  Both the
-   day-view step and the month-view step are parameterized directly - not a
-   private helper - over ``data-month`` ``"0"`` to ``"11"`` and over four
-   out-of-range values.
-4. **The two fixed delays are asserted by position, not by presence.**  The
-   fake clock appends a marker into the *same* ordered list the driver records
-   into, so the expected-call assertions show exactly where
-   ``Thread.sleep(3000)`` falls: after both ``data-*`` reads and before
-   ``dateActual`` is sampled (``Calendar.java:99`` and ``:155``).
-5. **Each of the seven assertions is exercised both ways**, and the message
-   text is parity: ``Calendar.java:46`` carries
-   ``"The title is not same as the expected!"`` and the other six are
-   two-argument JUnit calls that carry no message at all.
-6. **Duplicated selectors are told apart by name.**  ``CalendarP.java``
-   declares ``createButton``/``editButton`` with one identical XPath and
-   ``getNote``/``selectNote`` with another, so the driver log cannot
-   distinguish them.  The page-attribute sequences parsed out of the step
-   module's AST can, and they are asserted per definition.
+* **Order, not membership.**  ``Calendar.java:19-20`` clicks *then* waits, so
+  each definition's whole log is compared entry by entry, the wait and delay
+  recorders appending into the driver's own log to give each one a position.
+* **Waits carry locators.**  The ten ``visibilityOf`` sites (``:20`` through
+  ``:193``, enumerated at :data:`WAIT_SITE_COUNT`) share the 2-second timeout
+  of ``:15``, and each is asserted to receive the ``CalendarPage`` constant
+  itself: the lookup belongs inside ``visibility_of_element_located``, per
+  poll, where those 2 seconds gate it rather than the 10-second implicit wait
+  ``app/automation/driver.py`` sets.
+* **Two fixed delays, by position.**  ``:99`` and ``:155`` are asserted at
+  their call sites, as AAP 0.4.1 requires of the preserved sleeps.
+* **Duplicated selectors told apart by name.**  ``CalendarP.java:49``/``:58``
+  and ``:52``/``:73`` declare one XPath twice each, so the driver log cannot
+  distinguish those four fields; the AST-parsed page attributes can, and are
+  asserted per definition.
 
-Boundaries this module observes
--------------------------------
-* **The step module is never imported.**  ``tests/conftest.py``'s session
-  registry already exec'd it through behave's ``load_step_modules``, and a
-  second registration risks ``AmbiguousStep``.  Bodies are reached only via
-  ``resolve_step(phrase).run(fake_context)``, which is also how behave reaches
-  them.
-* **The Java reference is never read at runtime.**  Every expectation is
-  transcribed into a constant below and cited to its Java line, so the suite
-  runs on a host that has no reference checkout.
-* **No selenium, no browser, no network, no real sleeping and no write into
-  the repository's ``target/``.**  The driver is ``tests/conftest.py``'s
-  :class:`StubDriver`; the wait helpers and ``time`` are patched in the step
-  module's own namespace, which is the seam its docstring designates.
-* **Wait *shape* is deliberately not pinned, but its target and timeout are.**
-  ``app/automation/waits.py`` may take the timeout positionally or by keyword;
-  what parity fixes is the **identity of the waited-on element** and the
-  **literal timeout 2** (``Calendar.java:15``), so :class:`_WaitRecorder`
-  accepts either shape and normalises the target through
-  ``getattr(target, "locator", target)`` - which makes an element-based and a
-  locator-based call compare equal.  The helper the port calls today takes the
-  **locator**, so it resolves its element inside the predicate on every poll,
-  under the call site's 2 seconds, rather than once beforehand under the
-  session's 10-second implicit wait.  Two consequences are asserted throughout
-  and not worked around: a wait contributes no ``find_element`` to the driver
-  log, and the page attribute its call site names is the upper-case constant -
-  which :data:`DEFINITIONS` records per definition, so which of two
-  identically-valued fields a wait was given is pinned exactly as it is at a
-  click site.  The timeout is required at every call site because no helper in
-  that module declares a default.
-  Likewise the fixed delay is patched as a bare ``sleep`` name or as the
-  ``time`` module, whichever the step module exposes.
+The step module is never imported: ``tests/conftest.py``'s registry loaded it
+and bodies run through ``resolve_step(phrase).run(fake_context)`` against its
+``StubDriver``, with the wait helpers and ``time`` patched in module globals,
+so nothing opens a browser, sleeps for real or writes to disk.
 """
 
 from __future__ import annotations
@@ -222,20 +164,28 @@ DUPLICATE_PRIMARY_BUTTON_XPATH: Final[str] = "//button[@class='btn btn-sm btn-pr
 #: ``selectNote``).
 DUPLICATE_NAME_FIELD_XPATH: Final[str] = "//div[@class='o_field_name o_field_type_char']"
 
-#: ``Calendar.java`` imports ``CalendarP``, ``Driver``, the three Gherkin
-#: annotations, ``org.junit.Assert``, ``ExpectedConditions`` and
-#: ``WebDriverWait`` - and **neither** ``org.openqa.selenium.Keys`` **nor**
-#: ``org.openqa.selenium.interactions.Actions``.  Nor does it read any
-#: configuration property.  These are the names whose presence in the port
-#: would therefore be a parity break.
+#: ``Calendar.java:3-10`` is the class's whole import list: ``CalendarP``,
+#: ``Driver``, the three Gherkin annotations, ``org.junit.Assert``,
+#: ``ExpectedConditions`` and ``WebDriverWait`` - **neither**
+#: ``org.openqa.selenium.Keys`` **nor**
+#: ``org.openqa.selenium.interactions.Actions``, which only
+#: ``Crm.java:9-10``, ``Notes.java:9-10`` and ``Sales.java:9`` import; no
+#: ``org.openqa.selenium.By``, which only ``LoginSD.java:10`` imports for the
+#: direct lookup at ``LoginSD.java:56``; and no ``ConfigurationReader``, which
+#: only ``EmployeeStage.java:4``, ``LoginSD.java:4`` and ``Session.java:4``
+#: import.  Each of these names in the port would be a capability the source
+#: lacks.
 FORBIDDEN_STEP_MODULE_NAMES: Final[frozenset[str]] = frozenset(
     {"Keys", "ActionChains", "press_keys", "action_chain", "By", "config"}
 )
 
-#: Visibility-wait helpers a port of ``ExpectedConditions.visibilityOf`` may
-#: legitimately use.  ``app/automation/waits.py`` is owned elsewhere and its
-#: call shape may change; what may not change is that the wait is a
-#: *visibility* wait, on the element the Java line names, for 2 seconds.
+#: The two helpers of ``app/automation/waits.py`` that port
+#: ``ExpectedConditions.visibilityOf`` (``Calendar.java:20`` and its nine
+#: siblings).  Both wait on ``visibility_of_element_located``, so both take the
+#: **locator** and resolve it inside the predicate on every poll; a wait
+#: through any other name, or on anything but a locator, is not this class's
+#: wait.  Which of the two a call site chooses is not parity - the target, the
+#: 2-second timeout of ``Calendar.java:15`` and the position are.
 VISIBILITY_WAIT_HELPERS: Final[frozenset[str]] = frozenset(
     {"wait_visible_element", "wait_visible"}
 )
@@ -335,7 +285,6 @@ def _find(locator: Locator) -> Call:
 
 
 def _click(locator: Locator) -> Call:
-    """One ``WebElement.click()`` entry."""
     return (f"{ELEMENT_PREFIX}click", (locator,))
 
 
@@ -360,7 +309,6 @@ def _is_selected(locator: Locator) -> Call:
 
 
 def _clear(locator: Locator) -> Call:
-    """One ``WebElement.clear()`` entry."""
     return (f"{ELEMENT_PREFIX}clear", (locator,))
 
 
@@ -379,6 +327,22 @@ def _sleep(seconds: float = SLEEP_SECONDS) -> Call:
     return (SLEEP_MARKER, (seconds,))
 
 
+def _is_locator(value: Any) -> bool:
+    """Report whether *value* has the shape ``app/pages`` declares a locator in.
+
+    :param value: Any object.
+    :returns: ``True`` for a two-element tuple of strings, which is what every
+        upper-case :class:`~app.pages.calendar_page.CalendarPage` constant is
+        and what ``expected_conditions`` unpacks.  A resolved web element is
+        not one, which is the distinction the wait recorder enforces.
+    """
+    return (
+        isinstance(value, tuple)
+        and len(value) == 2
+        and all(isinstance(part, str) for part in value)
+    )
+
+
 def _wait(locator: Locator, timeout: int = WAIT_TIMEOUT_SECONDS) -> Call:
     """One explicit wait, interleaved in the driver's ordered log.
 
@@ -393,19 +357,24 @@ def _wait(locator: Locator, timeout: int = WAIT_TIMEOUT_SECONDS) -> Call:
 
 
 # --------------------------------------------------------------------------
-# The census: all thirteen definitions of ``Calendar.java``, in source order
+# The census: all thirteen definitions of ``Calendar.java:17-201``, in source
+# order - annotation at :17, :23, :29, :35, :41, :49, :106, :160, :166, :177,
+# :181, :187 and :198
 # --------------------------------------------------------------------------
 
 
 class Definition(NamedTuple):
     """One ``Calendar.java`` step definition and everything parity fixes about it.
 
-    Every field is transcribed from the Java file and is what one or more tests
-    below compare the port against.  Nothing here is computed from the port, so
-    the port cannot make it agree with itself.
+    Every field is transcribed from ``Calendar.java:17-201`` and is what one or
+    more tests below compare the port against.  Nothing here is computed from
+    the port, so the port cannot make it agree with itself.
     """
 
-    #: Line of the Cucumber annotation in ``Calendar.java``.
+    #: Line of the Cucumber annotation in ``Calendar.java``, which is also this
+    #: entry's identity: one of ``:17``, ``:23``, ``:29``, ``:35``, ``:41``,
+    #: ``:49``, ``:106``, ``:160``, ``:166``, ``:177``, ``:181``, ``:187``,
+    #: ``:198``.
     java_line: int
 
     #: The annotation itself.  Recorded because it is the reason the port
@@ -668,9 +637,10 @@ DEFINITIONS: Final[tuple[Definition, ...]] = (
     ),
 )
 
-#: The thirteen annotation lines, ascending - ``Calendar.java`` in source
-#: order.  Transcribed separately from :data:`DEFINITIONS` so that the census's
-#: own ordering is checked against the file rather than against itself.
+#: The thirteen annotation lines of ``Calendar.java:17-198``, ascending -
+#: source order.  Transcribed separately from :data:`DEFINITIONS` so that the
+#: census's own ordering is checked against the file rather than against
+#: itself.
 JAVA_ANNOTATION_LINES: Final[tuple[int, ...]] = (
     17,
     23,
@@ -859,13 +829,14 @@ def _page_variable(node: ast.FunctionDef) -> str:
 def _page_attribute_sites(function: str) -> tuple[tuple[int, str], ...]:
     """Page-object accessor reads in one step body as ``(line, accessor)`` pairs.
 
-    The check the driver log cannot make.  ``CalendarP.java`` declares
-    ``createButton`` and ``editButton`` with one identical XPath and
-    ``getNote`` and ``selectNote`` with another, so two different fields
-    produce byte-identical ``find_element`` entries; only the source can say
-    which name a call site used, and ``Calendar.java`` fixes that per line.
-    The line numbers come along because the fixed-delay placement assertions
-    compare them against the delay's own line.
+    The check the driver log cannot make.  ``CalendarP.java:49`` and ``:58``
+    declare ``createButton`` and ``editButton`` with one identical XPath, and
+    ``:52`` and ``:73`` declare ``getNote`` and ``selectNote`` with another, so
+    two different fields produce byte-identical ``find_element`` entries; only
+    the source can say which name a call site used, and ``Calendar.java:172``,
+    ``:174``, ``:183-:185`` and ``:189-:190`` fix that per line.  The line
+    numbers come along because the fixed-delay placement assertions compare
+    them against the delay's own line.
 
     :param function: The registered function to inspect.
     :returns: ``(line, accessor)`` in source order, with repeats kept - a
@@ -1071,14 +1042,17 @@ def _feature_steps() -> tuple[tuple[int, str, str], ...]:
 class _WaitRecorder:
     """Records every explicit wait a step body performs, in its own position.
 
-    Deliberately signature-agnostic.  ``app/automation/waits.py`` is owned
-    outside this module and its visibility wait may take an element or a
-    locator, and its timeout positionally or as ``timeout=``.  Parity fixes
-    two things only - **which element is waited on** and **that the timeout is
-    the literal 2 of ``Calendar.java:15``** - so both are recovered from
-    whichever shape arrives, and the target is normalised through
-    ``getattr(target, "locator", target)`` so an element-based and a
-    locator-based wait satisfy the same assertion.
+    A visibility wait takes a **locator** and nothing else
+    (``app/automation/waits.py``'s ``wait_visible_element``, which resolves it
+    inside ``visibility_of_element_located``), so this recorder captures the
+    target exactly as the call site passed it and applies no normalisation.
+    An element handed to a wait instead would have been resolved *before* the
+    wait existed, under the 10-second implicit wait ``app/automation/driver.py``
+    sets, and the 2 seconds of ``Calendar.java:15`` would never gate that
+    lookup - which is why the recorded target is compared, by identity, against
+    the ``CalendarPage`` constant the site names rather than against anything
+    an element could also satisfy.  The timeout is read positionally or as
+    ``timeout=``, the two spellings of one argument.
 
     Like :class:`_FakeClock`, it appends into the **driver's own ordered log**
     as well as into its own list, because the helper the port calls takes a
@@ -1088,8 +1062,9 @@ class _WaitRecorder:
     fixed points among the clicks and reads around them.
     """
 
-    #: Keyword names a wait helper might use for its target.
-    TARGET_KEYWORDS: Final[tuple[str, ...]] = ("element", "locator", "target")
+    #: The keyword name the wait helpers give their locator parameter, for a
+    #: call site that spells it out instead of passing it first.
+    TARGET_KEYWORDS: Final[tuple[str, ...]] = ("locator",)
 
     def __init__(self, log: list[Call]) -> None:
         """Bind the recorder to the driver log it interleaves with.
@@ -1125,13 +1100,20 @@ class _WaitRecorder:
             else:
                 timeout = None
 
-            resolved = getattr(target, "locator", target)
+            assert _is_locator(target), (
+                f"{name} was called with {target!r}, which is not a locator. "
+                f"Calendar.java's ten visibility waits port onto "
+                f"visibility_of_element_located, so every call site passes a "
+                f"CalendarPage constant and the lookup happens inside the "
+                f"predicate, under the {WAIT_TIMEOUT_SECONDS} seconds of "
+                f"Calendar.java:15 rather than under the driver's implicit wait"
+            )
 
-            self.records.append((name, resolved, timeout))
-            self._log.append(_wait(resolved, timeout))
+            self.records.append((name, target, timeout))
+            self._log.append(_wait(target, timeout))
 
             # The real helper returns the element it waited on; returning the
-            # target keeps a body that chains off the result working, and no
+            # locator keeps a body that chains off the result working, and no
             # body in this module does.
             return target
 
@@ -1280,17 +1262,17 @@ class CalendarHarness:
     def _patch_seams(self, match: Any) -> tuple[_WaitRecorder, _FakeClock]:
         """Replace the wait helpers and the clock in the step module namespace.
 
-        Every global whose name begins with ``wait`` is replaced, not just the
-        one this port imports today: the visibility wait's *name* is not parity
-        (its target and timeout are), and a sibling change to
-        ``app/automation/waits.py`` must not be able to route a wait around the
-        recorder and leave it silently unasserted.
+        Every global whose name begins with ``wait`` is replaced, not only the
+        one the port imports: which helper of ``app/automation/waits.py`` a
+        call site names is not parity (its locator target and its timeout
+        are), and an unpatched binding would route a wait around the recorder,
+        leave it unasserted and reach the real driver lifecycle.
 
         :param match: The resolved step.
         :returns: The wait recorder and the fake clock.
         :raises AssertionError: When the namespace offers no delay seam at all,
-            which would mean the module can no longer perform - or can no
-            longer be prevented from performing - a real fixed delay.
+            which would mean the module can neither perform nor be prevented
+            from performing a real fixed delay.
         """
         namespace = match.func.__globals__
         recorder = _WaitRecorder(self._driver.calls)
@@ -1303,9 +1285,10 @@ class CalendarHarness:
         patched = False
 
         # ``calendar_steps.py`` does ``import time`` and writes
-        # ``time.sleep(3)``, so there is no bare ``sleep`` global today; the
-        # other shape is patched too because that module is maintained
-        # elsewhere and either spelling is legitimate.
+        # ``time.sleep(3)``, so the ``time`` binding is the one that carries
+        # its two delays.  A bare ``sleep`` binding is patched as well, since
+        # ``from time import sleep`` is the other legitimate spelling of the
+        # same delay and either must be intercepted rather than slept.
         if "sleep" in namespace and callable(namespace["sleep"]):
             self._monkeypatch.setitem(namespace, "sleep", clock.sleep)
             patched = True
@@ -1444,6 +1427,22 @@ def _assert_step_shape(
         f"Calendar.java uses ExpectedConditions.visibilityOf, so only "
         f"{sorted(VISIBILITY_WAIT_HELPERS)} are parity"
     )
+
+    # Each wait's first argument is the very ``CalendarPage`` class attribute
+    # the body names at that site - the same object, not an equal-valued pair,
+    # which is what joins the constant the source reads to the locator the
+    # helper resolves per poll.  ``CREATE_BUTTON``/``EDIT_BUTTON``
+    # (CalendarP.java:49 and :58) and ``GET_NOTE``/``SELECT_NOTE`` (:52 and
+    # :73) share one XPath each, so value equality alone would let a wait on
+    # either satisfy the other.
+    for (target, _), name in zip(run.waits, definition.locator_reads, strict=True):
+        expected = getattr(CalendarPage, name)
+
+        assert target is expected, (
+            f"{definition.function} waited on {target!r}; Calendar.java:"
+            f"{definition.java_line} waits on the field CalendarPage.{name} "
+            f"ports, which is {expected!r}"
+        )
     assert run.sleeps == (SLEEP_SECONDS,) * definition.sleeps
     assert run.calls == expected_calls
 
@@ -1736,8 +1735,10 @@ def test_the_module_has_exactly_seven_assertions_and_no_hidden_one() -> None:
 
 
 # ==========================================================================
-# Import boundaries (AAP 0.4.2) - Calendar.java imports neither Keys nor
-# Actions, and reads no configuration property
+# Import boundaries (AAP 0.4.2) - Calendar.java:3-10 is the whole import list:
+# neither Keys nor Actions (only Crm.java:9-10, Notes.java:9-10 and
+# Sales.java:9 import those), and no ConfigurationReader (only
+# EmployeeStage.java:4, LoginSD.java:4 and Session.java:4 import it)
 # ==========================================================================
 
 
@@ -2813,13 +2814,14 @@ def test_no_step_uses_the_unused_title_locator() -> None:
 
 
 def test_step_module_neither_prints_nor_catches_anything() -> None:
-    """``Calendar.java`` has no ``try`` and no output.
+    """``Calendar.java:1-204`` has no ``try`` and no output.
 
     A wait expiry, a failed parse, a missing element and a dead session all
     propagate untouched, exactly as the Java method's uncaught exception fails
     its step - so a ``try`` here would swallow a failure the source reports.
-    And only ``Crm.java`` and ``Sales.java`` print; this class does not, so a
-    print statement would put text in the report the source never emits.
+    And only ``Crm.java:51-52``, ``:63-64``, ``:97-98``, ``:126-127`` and
+    ``Sales.java:34-35`` print; this class does not, so a print statement
+    would put text in the report the source never emits.
     """
     tree = _step_module_tree()
 
@@ -2836,9 +2838,9 @@ def test_the_whole_class_totals_ten_waits_two_delays_and_never_navigates(
     of them on the 2 seconds of ``Calendar.java:15``; exactly two 3-second
     delays, with no third one hiding in any of the other eleven definitions;
     one title read, in the one definition that reads it; and no navigation of
-    any kind, because
-    ``Calendar.java`` never calls ``get``, ``navigate`` or a script - the
-    Background's login is ``Session.java``'s job.
+    any kind, because nothing in ``Calendar.java:1-204`` calls ``get``,
+    ``navigate`` or a script - the Background's login is
+    ``Session.java:12-18``'s job.
     """
     _arrange_datepicker(harness, "2")
     harness.driver.title = EXPECTED_TITLE

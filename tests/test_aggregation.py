@@ -39,9 +39,13 @@ suite, as ``pytest.ini`` records, so nothing here manipulates the import path.
 
 from __future__ import annotations
 
+import copy
 from typing import Any
 
+import pytest
+
 from app.reporting import aggregation as ag
+from app.reporting import cucumber_json as json_writer
 
 # --------------------------------------------------------------------------- #
 # Builders.  Small and local: every test below states the one thing it is about
@@ -123,12 +127,47 @@ def feature(name: str, elements: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def test_status_token_normalises_case_and_rejects_the_unknown() -> None:
-    """A status is spelled one way, and an unrecognised one is not a pass."""
+    """A status is spelled one way, and an unrecognised one is not a pass.
+
+    ``executing`` is the case that changed and the contract is now the wider
+    one: it is a **behave** status name, so it is canonicalised through
+    :data:`app.reporting.aggregation.STATUS_ALIASES` to ``untested`` -- the
+    same fold ``app/reporting/cucumber_json.py`` applies -- rather than
+    reported as a token nobody recognises.  While that table lived in the JSON
+    writer alone, one run was graded differently depending on which file a
+    reader opened: ``cucumber.json`` said ``untested`` and both HTML artifacts
+    said *Unknown*.  A status genuinely outside the vocabulary, and a value
+    that is not text at all, still answer :data:`UNKNOWN_STATUS`.
+    """
     assert ag.status_token("Passed") == "passed"
     assert ag.status_token("  FAILED  ") == "failed"
-    assert ag.status_token("executing") == ag.UNKNOWN_STATUS
+    assert ag.status_token("executing") == ag.UNTESTED_STATUS
+    assert ag.status_token("no-such-status") == ag.UNKNOWN_STATUS
     assert ag.status_token(None) == ag.UNKNOWN_STATUS
     assert ag.status_token(7) == ag.UNKNOWN_STATUS
+    # One fold, not two: this name is the canonical normaliser under its
+    # re-read reading, and it holds for every input rather than for the
+    # examples above.  The one difference is the provenance of the word
+    # ``unknown``, which the next assertion states.
+    vocabulary: list[Any] = [
+        *ag.KNOWN_STATUSES,
+        *ag.STATUS_ALIASES,
+        ag.UNKNOWN_STATUS,
+        "  PASSED  ",
+        "no-such-status",
+        "",
+        None,
+        7,
+    ]
+    for status in vocabulary:
+        assert ag.status_token(status) == ag.canonical_status(
+            status, recorded=False
+        ), status
+    # A recorded ``unknown`` is behave's own status name and folds like the
+    # other nine; the same word read back as a token this model produced is
+    # echoed, which is what keeps a fold of a fold exact.
+    assert ag.canonical_status(ag.UNKNOWN_STATUS) == ag.UNTESTED_STATUS
+    assert ag.status_token(ag.UNKNOWN_STATUS) == ag.UNKNOWN_STATUS
 
 
 def test_roll_up_status_follows_the_declared_precedence() -> None:
@@ -141,10 +180,19 @@ def test_roll_up_status_follows_the_declared_precedence() -> None:
 
 
 def test_roll_up_status_keeps_the_two_empty_cases_apart() -> None:
-    """An empty collection and an unrecognised one answer differently."""
+    """An empty collection and an unrecognised one answer differently.
+
+    The unrecognised member is now spelled ``no-such-status``: ``executing``
+    was used here before the alias table was shared, and it is no longer
+    unrecognised -- it folds to ``untested``, which
+    :func:`test_status_token_normalises_case_and_rejects_the_unknown` pins.
+    """
     assert ag.roll_up_status([]) == ag.EMPTY_ELEMENT_STATUS
     assert ag.roll_up_status([], empty=ag.EMPTY_AGGREGATE_STATUS) == ag.UNKNOWN_STATUS
-    assert ag.roll_up_status(["executing"], empty=ag.UNKNOWN_STATUS) == ag.UNKNOWN_STATUS
+    assert (
+        ag.roll_up_status(["no-such-status"], empty=ag.UNKNOWN_STATUS)
+        == ag.UNKNOWN_STATUS
+    )
 
 
 def test_worst_status_is_the_same_function_not_a_second_fold() -> None:
@@ -158,6 +206,323 @@ def test_counter_token_folds_ambiguous_onto_undefined_only_for_counting() -> Non
     assert ag.counter_token("Skipped") == "skipped"
     assert ag.counter_token(None) == ag.UNKNOWN_STATUS
     assert ag.AMBIGUOUS_STATUS in ag.STATUS_PRECEDENCE
+
+
+# --------------------------------------------------------------------------- #
+# The shared canonicalisation
+#
+# The alias table used to live in ``app/reporting/cucumber_json.py`` alone, so
+# a step behave recorded as ``hook_error`` was published ``failed`` in the JSON
+# artifact and rendered *Unknown* on both HTML artifacts: one run, two grades,
+# decided by which file a reader opened.  The table is now this model's, every
+# surface reads it here, and the tests below hold the two to each other.
+# --------------------------------------------------------------------------- #
+
+
+class StubStatus:
+    """A behave-style status enum stand-in.
+
+    behave's ``Status`` exposes both ``name`` and ``normalized_name``, and the
+    normalised one folds ``untested_pending`` onto ``pending`` and
+    ``untested_undefined`` onto ``undefined``.  A stub rather than the real
+    enum, because importing the engine here would load it at collection time
+    for a test that needs two attributes, and ``tests/conftest.py`` keeps
+    behave out of collection deliberately.
+
+    :param name: The member's raw name.
+    :param normalized_name: The folded name, omitted for a member that has
+        none -- which is what a simpler stand-in carries.
+    """
+
+    def __init__(self, name: str, normalized_name: str | None = None) -> None:
+        self.name = name
+        if normalized_name is not None:
+            self.normalized_name = normalized_name
+
+    def __str__(self) -> str:
+        """Return the raw name, so a fallback coercion has something to read."""
+        return self.name
+
+
+@pytest.mark.parametrize(
+    ("alias", "expected"),
+    sorted(ag.STATUS_ALIASES.items()),
+    ids=sorted(ag.STATUS_ALIASES),
+)
+def test_every_behave_only_status_is_canonicalised_on_every_surface(
+    alias: str, expected: str
+) -> None:
+    """Each entry of the shared table folds where the JSON writer folds it.
+
+    The expectation is the table's own value and the *point* of the assertion
+    is the pair of tests around it: one holds the table against the writer's
+    (:func:`test_the_alias_table_is_the_json_writers_table`), the other holds
+    every consumer to this function.  ``hook_error`` is the member worth
+    naming: were it to fold to ``passed``, a scenario whose teardown blew up
+    would be badged green on both HTML artifacts while ``cucumber.json``
+    reported a failure.
+
+    Each entry is asserted under the JSON writer's own fallback, because that
+    is the contract the table states.  Nine of the ten then fold identically
+    whatever the fallback; the tenth is ``unknown``, which is a name this
+    model's vocabulary *has* -- its eighth token, for an outcome nothing
+    established -- so under the model's own fallback it is answered as itself.
+    That is the single documented boundary between the two surfaces and
+    :func:`test_the_fallback_parameter_reproduces_the_json_writers_answer`
+    pins it from the other side.
+    """
+    assert ag.canonical_status(alias, fallback=ag.UNTESTED_STATUS) == expected
+    assert expected in ag.KNOWN_STATUSES
+    # Case and padding are folded before the table is consulted, and the fold
+    # is reached through the historical name every consumer imports.
+    assert ag.status_token(f"  {alias.upper()} ", fallback=ag.UNTESTED_STATUS) == (
+        expected
+    )
+    if alias == ag.UNKNOWN_STATUS:
+        assert ag.status_token(alias) == ag.UNKNOWN_STATUS
+    else:
+        assert ag.status_token(alias) == expected
+
+
+def test_one_run_is_graded_the_same_by_the_model_and_by_the_json_writer() -> None:
+    """The end-to-end form of the rule, which is the form that matters.
+
+    The two surfaces each fold a recorded status **once, at their own
+    ingress**: this model where :func:`app.reporting.aggregation.decorate_element`
+    writes its canonical copy, and ``app/reporting/cucumber_json.py`` where it
+    builds the report.  So the contract is not that two helper functions agree
+    in isolation but that one document, published both ways, names the same
+    status for the same step -- for every status either vocabulary can name,
+    behave's own ``unknown`` included.
+
+    Were this to fail, a reader opening ``cucumber.json`` and a reader opening
+    either HTML artifact would be told different things about the same step,
+    which is the defect the shared table was introduced to remove.
+    """
+    for recorded in (*ag.KNOWN_STATUSES, *ag.STATUS_ALIASES):
+        document = {
+            "features": [feature("F", [scenario("s", [step(recorded, duration=5)])])],
+            "dry_run": False,
+        }
+        graded = ag.normalize_run(document).features[0]["elements"][0]
+        published = json_writer.build_cucumber_json(document)[0]["elements"][0]
+        emitted = published["steps"][0]["result"]["status"]
+        assert graded["steps"][0]["result"]["status"] == emitted, recorded
+        assert graded["status"] == emitted, recorded
+        assert graded[ag.EFFECTIVE_STATUS_KEY] == emitted, recorded
+
+    # The one case that is not a recorded name: a result that named no status
+    # at all.  The model keeps its own eighth token, which the statistics pages
+    # and the steps overview render as Unknown and which no step column counts,
+    # while the artifact carries the publisher-parseable fallback.  The model
+    # stays internally consistent about it, which is the property that matters.
+    nameless = {
+        "features": [
+            feature("F", [scenario("s", [{"keyword": "Given ", "result": {}}])])
+        ],
+        "dry_run": False,
+    }
+    run = ag.normalize_run(nameless)
+    element = run.features[0]["elements"][0]
+    assert element["steps"][0]["result"]["status"] == ag.UNKNOWN_STATUS
+    assert element["status"] == ag.UNKNOWN_STATUS
+    assert run.summary["steps"][ag.SUMMARY_BY_STATUS_KEY] == {ag.UNKNOWN_STATUS: 1}
+    assert json_writer.build_cucumber_json(nameless)[0]["elements"][0]["steps"][0][
+        "result"
+    ]["status"] == ag.UNTESTED_STATUS
+
+
+def test_the_alias_table_is_the_json_writers_table() -> None:
+    """The two tables are one table, so the surfaces cannot drift apart.
+
+    ``app/reporting/cucumber_json.py`` is imported **read-only** here: this
+    module asserts the equality rather than the writer importing the model or
+    the model importing the writer, because the writer's vocabulary
+    legitimately differs in its *fallback* and only in that.  Were this to
+    fail, a behave status would grade one way in the machine-readable artifact
+    and another on both report pages -- the defect the shared table removed.
+    """
+    assert ag.STATUS_ALIASES == json_writer.STATUS_ALIASES
+    assert len(ag.STATUS_ALIASES) == 10
+    assert set(ag.STATUS_ALIASES.values()) <= set(ag.KNOWN_STATUSES)
+
+
+def test_a_behave_status_enum_is_read_through_its_normalized_name() -> None:
+    """An enum handed over directly is read the way the engine reads it.
+
+    behave's own enum folds its two pending spellings and its undefined
+    spelling, so ``normalized_name`` wins over ``name``; an object carrying
+    only ``name`` is still understood, and one carrying neither is coerced to
+    text and then refused rather than reported as a pass.
+    """
+    assert ag.canonical_status(StubStatus("pending_warn", "pending")) == "pending"
+    assert ag.canonical_status(StubStatus("untested_undefined", "undefined")) == (
+        ag.UNDEFINED_STATUS
+    )
+    assert ag.canonical_status(StubStatus("hook_error")) == "failed"
+    assert ag.canonical_status(StubStatus("no-such-status")) == ag.UNKNOWN_STATUS
+    assert ag.status_name(StubStatus("failed", "failed")) == "failed"
+    assert ag.status_name(None) == ""
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [
+        pytest.param("untested", id="untested"),
+        pytest.param("skipped", id="skipped"),
+        pytest.param(None, id="no-status-at-all"),
+        pytest.param("failed", id="even-a-failure-behave-never-ran"),
+    ],
+)
+def test_the_dry_run_mapping_follows_the_match_state_and_nothing_else(
+    recorded: Any,
+) -> None:
+    """Under ``--dry-run`` the recorded status is not consulted at all.
+
+    Measured: the JVM emits a matched step ``passed`` and an unmatched one
+    ``undefined`` under ``dryRun``, while behave records ``untested`` for
+    both.  The rule existed in the JSON writer alone, so one dry run published
+    19 ``passed`` steps in ``cucumber.json`` and 60 ``untested`` badges on the
+    single-page HTML artifact from the same document, and the rerun manifest
+    -- which selects on ``undefined`` -- was empty.  Were this to fail, those
+    three readings would disagree again.
+    """
+    assert ag.canonical_status(recorded, matched=True, dry_run=True) == "passed"
+    assert ag.canonical_status(recorded, matched=False, dry_run=True) == (
+        ag.UNDEFINED_STATUS
+    )
+    # Never ``untested``, whichever way the match state falls.
+    for matched in (True, False):
+        assert ag.canonical_status(
+            recorded, matched=matched, dry_run=True
+        ) != ag.UNTESTED_STATUS
+
+
+def test_a_steps_own_match_state_decides_its_dry_run_status() -> None:
+    """The step-shaped entry point reads ``matched`` off the step.
+
+    A step with no boolean flag is read as matched, which is this module's
+    convention for an absent flag and the conservative answer: grading it
+    ``undefined`` would invent a failure and put a scenario nobody reported as
+    failing into the rerun manifest.
+    """
+    matched = {"matched": True, "result": {"status": "untested"}}
+    unmatched = {"matched": False, "result": {"status": "untested"}}
+    assert ag.canonical_step_status(matched, dry_run=True) == "passed"
+    assert ag.canonical_step_status(unmatched, dry_run=True) == ag.UNDEFINED_STATUS
+    assert ag.canonical_step_status({"result": {"status": "untested"}}, dry_run=True) == (
+        "passed"
+    )
+    # Outside a dry run the flag is not read at all.
+    assert ag.canonical_step_status(unmatched) == ag.UNTESTED_STATUS
+    assert ag.canonical_step_status({"result": {"status": "hook_error"}}) == "failed"
+
+
+def test_the_fallback_parameter_reproduces_the_json_writers_answer() -> None:
+    """The one residual difference between the two surfaces, stated as a rule.
+
+    This model has an eighth token for "nobody established an outcome"; the
+    machine-readable artifact has no such name, because the publisher parses
+    the seven Cucumber names, so its fallback is ``untested``.  A caller
+    holding to that contract passes ``fallback="untested"`` and gets that
+    writer's answer for **every** input from this one implementation, which is
+    what makes the handover exact rather than approximate.
+    """
+    vocabulary: list[Any] = [
+        *ag.KNOWN_STATUSES,
+        *ag.STATUS_ALIASES,
+        ag.UNKNOWN_STATUS,
+        "  PASSED  ",
+        "no-such-status",
+        "",
+        None,
+        7,
+    ]
+    for status in vocabulary:
+        assert ag.canonical_status(
+            status, fallback=ag.UNTESTED_STATUS
+        ) == json_writer.map_step_status(status), status
+    # The default fallback is the model's own token, and it differs from the
+    # writer's answer in exactly one case: a value that named no status at all.
+    # Every status either surface can *name* -- behave's ``unknown`` included,
+    # which folds through the shared table on both -- grades identically.
+    assert ag.canonical_status(None) == ag.UNKNOWN_STATUS
+    assert json_writer.map_step_status(None) == ag.UNTESTED_STATUS
+    assert ag.canonical_status(ag.UNKNOWN_STATUS) == json_writer.map_step_status(
+        ag.UNKNOWN_STATUS
+    )
+    assert ag.canonical_status("no-such-status") == ag.UNKNOWN_STATUS
+    assert json_writer.map_step_status("no-such-status") == ag.UNTESTED_STATUS
+
+
+def test_canonicalisation_is_idempotent_on_every_token_it_answers_with() -> None:
+    """Decoration writes a canonical status that a fold then re-reads.
+
+    Every one of the eight tokens has to survive that second reading, or an
+    element would be graded from a status its own steps no longer carry.  The
+    re-read goes through :func:`app.reporting.aggregation.status_token`, which
+    is the reading :func:`roll_up_status` and :func:`counter_token` use for
+    exactly this reason: the seven Cucumber names are fixed points of either
+    reading, and the eighth -- this model's own ``unknown`` -- is a fixed point
+    of that one.
+    """
+    for token in (*ag.KNOWN_STATUSES, ag.UNKNOWN_STATUS):
+        assert ag.status_token(token) == token, token
+        assert ag.roll_up_status([token], empty=ag.UNKNOWN_STATUS) == token, token
+    for token in ag.KNOWN_STATUSES:
+        assert ag.canonical_status(token) == token, token
+
+
+def test_an_unknown_outcome_can_no_longer_be_folded_away_as_a_pass() -> None:
+    """The model must not contradict its own binary reading.
+
+    :data:`UNKNOWN_STATUS` was absent from the severity order, so a fold over
+    a pass and an unestablished outcome answered ``passed`` while
+    :func:`element_verdict` of the same element answered ``failed``.  It now
+    ranks between ``untested`` and ``passed``: below a status behave recorded,
+    above a pass it never recorded.
+    """
+    assert ag.roll_up_status(["passed", ag.UNKNOWN_STATUS]) == ag.UNKNOWN_STATUS
+    assert ag.roll_up_status(["passed", "no-such-status"]) == ag.UNKNOWN_STATUS
+    assert ag.UNKNOWN_STATUS in ag.STATUS_PRECEDENCE
+    assert ag.STATUS_PRECEDENCE.index(ag.UNTESTED_STATUS) < ag.STATUS_PRECEDENCE.index(
+        ag.UNKNOWN_STATUS
+    ) < ag.STATUS_PRECEDENCE.index("passed")
+    # And the element's two readings now agree about it.
+    element = scenario("s", [step("passed"), step("no-such-status")])
+    assert ag.element_status(element) == ag.UNKNOWN_STATUS
+    assert ag.element_verdict(element) == ag.VERDICT_FAILED
+
+
+def test_the_failure_tokens_are_the_complement_of_cucumbers_status_is_ok() -> None:
+    """``isOk()`` is ``PASSED || SKIPPED``; everything else selects a rerun.
+
+    The set is also a **prefix** of the severity order, which is what makes
+    "any member of a unit failed" and "the unit's fold is a failure" one
+    predicate -- the property ``app/reporting/rerun_report.py`` relies on to
+    express its selection through this model.
+    """
+    assert ag.FAILURE_TOKENS == {"failed", "undefined", "ambiguous", "pending"}
+    assert ag.STATUS_PRECEDENCE[: len(ag.FAILURE_TOKENS)] == (
+        "failed",
+        "undefined",
+        "ambiguous",
+        "pending",
+    )
+    for status in ("failed", "error", "hook_error", "cleanup_error", "xfailed"):
+        assert ag.is_failure_token(status), status
+    for status in ("passed", "xpassed", "skipped", "untested", "executing", None):
+        assert not ag.is_failure_token(status), status
+    assert ag.is_passed_token("xpassed")
+    assert not ag.is_passed_token("skipped")
+
+
+def test_is_dry_run_reads_the_flag_the_collector_records() -> None:
+    """One reader of the key, so no consumer spells it."""
+    assert ag.is_dry_run({"dry_run": True})
+    assert not ag.is_dry_run({"dry_run": False})
+    assert not ag.is_dry_run({})
+    assert not ag.is_dry_run(None)
 
 
 # --------------------------------------------------------------------------- #
@@ -212,6 +577,84 @@ def test_an_element_is_not_coloured_by_its_neighbours() -> None:
     failing = scenario("bad", [step("failed")])
     assert ag.element_status(passing) == "passed"
     assert ag.element_status(failing) == "failed"
+
+
+# --------------------------------------------------------------------------- #
+# The scenario unit: one test case, one effective status
+#
+# A Background occurrence and the scenario it precedes are one test case.  The
+# JSON element shape keeps them apart -- measured: a Cucumber-JVM 7.2.3 probe
+# emits the Background's failed step and the scenario's own steps as
+# ``skipped`` -- so what has to agree is every *derived* reading, which is what
+# these functions are.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_background_failure_is_the_units_effective_status() -> None:
+    """One test case, one grade, whichever surface asks.
+
+    The element-level readings are deliberately unchanged -- the Background
+    reads ``failed`` for itself and the scenario reads ``skipped`` for itself,
+    which is what the JSON artifact carries and what each badge answers for --
+    while the *unit* reads ``failed``, which is what a count, a failures
+    overview and the rerun manifest consult.  Were this to fail, one run would
+    be graded four ways again: ``skipped`` in the summary, ``failed`` on the
+    Pretty pages, ``skipped`` in the JSON and *selected* by the manifest.
+    """
+    failed_background = background([step("failed", 5)])
+    skipped_scenario = scenario("s", [step("skipped"), step("skipped")])
+    unit = [failed_background, skipped_scenario]
+
+    assert ag.element_status(failed_background) == "failed"
+    assert ag.element_status(skipped_scenario) == "skipped"
+    assert ag.unit_status(unit) == "failed"
+    assert ag.unit_verdict(unit) == ag.VERDICT_FAILED
+    # The unit is exactly what ``element_units`` groups.
+    assert ag.element_units([failed_background, skipped_scenario]) == [unit]
+
+
+def test_a_units_reading_covers_every_members_steps_and_hooks() -> None:
+    """Hooks take part, and a lone element is its own unit.
+
+    A scenario whose setup hook failed and whose steps never ran is a failed
+    test case, which is why the JVM's rerun formatter keys on the test-case
+    result rather than on a step.
+    """
+    hooked = scenario("s", [step("passed")], after=[hook("failed")])
+    assert ag.unit_status([hooked]) == "failed"
+    assert ag.unit_verdict([hooked]) == ag.VERDICT_FAILED
+    # A unit with nothing at all to count is passed: ``StatusCounter``'s
+    # initial value, and the reference tree's empty Background.
+    assert ag.unit_status([background([])]) == ag.EMPTY_ELEMENT_STATUS
+    assert ag.unit_verdict([background([]), scenario("s", [])]) == ag.VERDICT_PASSED
+    # And a passing unit stays a pass, so the fold is not one-way.
+    passing = [background([step("passed")]), scenario("s", [step("passed")])]
+    assert ag.unit_status(passing) == "passed"
+    assert ag.unit_verdict(passing) == ag.VERDICT_PASSED
+
+
+def test_a_units_reading_applies_the_dry_run_rule_to_steps_only() -> None:
+    """The unit reading is where the rerun manifest reads a dry run.
+
+    A hook resolves no step definition, so the dry-run rule does not touch
+    one: the JSON writer builds a hook's result with ``dry_run=False`` for the
+    same reason, and grading an ``untested`` teardown as ``undefined`` would
+    select every scenario of a dry run.
+    """
+    unmatched = {"matched": False, "result": {"status": "untested"}}
+    matched = {"matched": True, "result": {"status": "untested"}}
+    hooked = {"steps": [matched], "after": [{"result": {"status": "untested"}}]}
+
+    assert ag.unit_status([{"steps": [matched]}], dry_run=True) == "passed"
+    assert ag.unit_status([{"steps": [unmatched]}], dry_run=True) == (
+        ag.UNDEFINED_STATUS
+    )
+    assert ag.is_failure_token(ag.unit_status([{"steps": [unmatched]}], dry_run=True))
+    # The hook keeps the status behave recorded, so the unit reads ``untested``
+    # rather than ``passed`` -- and ``untested`` is not a failure, which is
+    # what keeps a dry run's teardown from selecting every scenario.
+    assert ag.unit_status([hooked], dry_run=True) == ag.UNTESTED_STATUS
+    assert not ag.is_failure_token(ag.unit_status([hooked], dry_run=True))
 
 
 # --------------------------------------------------------------------------- #
@@ -377,6 +820,35 @@ def test_stats_of_never_counts_a_background_as_a_scenario() -> None:
     assert stats["status"] == ag.VERDICT_FAILED
 
 
+def test_stats_of_counts_a_scenario_by_its_effective_verdict() -> None:
+    """A tag row sees the scenario without its Background, and still grades it.
+
+    A tag's subjects are scenario elements lifted away from the occurrences
+    that precede them, so the unit reading has to travel *on* the element --
+    which is what ``effective_verdict`` is for.  An undecorated element keeps
+    the old behaviour and is graded from its own body, which is what lets a
+    hand-built row count identically.
+    """
+    decorated = ag.decorate_feature(
+        feature(
+            "A",
+            [background([step("failed")]), scenario("blocked", [step("skipped")])],
+        )
+    )
+    blocked = decorated["elements"][1]
+
+    # The scenario alone, as a tag row holds it.
+    row = ag.tag_row("@Smoke", [blocked])
+    assert row["scenarios_total"] == 1
+    assert row["scenarios_failed"] == 1
+    assert row["scenarios_passed"] == 0
+    assert row["status"] == ag.VERDICT_FAILED
+    # And an undecorated element is graded from its own body.
+    undecorated = ag.stats_of([scenario("plain", [step("passed")])])
+    assert undecorated["scenarios_passed"] == 1
+    assert undecorated["status"] == ag.VERDICT_PASSED
+
+
 def test_stats_of_ignores_an_unselected_element() -> None:
     """A scenario that never ran cannot inflate a row."""
     stats = ag.stats_of([scenario("gone", [step("passed")], selected=False)])
@@ -480,6 +952,43 @@ def test_a_step_less_scenario_counts_as_passed_rather_than_unknown() -> None:
     assert summary["features"]["by_status"] == {"passed": 1}
 
 
+def test_build_summary_counts_a_background_only_failure_as_a_failed_scenario() -> None:
+    """The "skipped in summary" half of the four-way disagreement, settled.
+
+    The scenario's own body holds nothing but skipped steps -- behave skips a
+    scenario's steps once its Background has failed -- so counting the element
+    alone reported this run as one *skipped* scenario while the rerun manifest
+    offered it for retry and the Pretty pages badged it failed.  The scenario
+    is now counted by its effective status, the unit's.  The step tally and
+    the feature tally are unchanged: a Background genuinely runs once per
+    scenario, so its steps count, and a feature's badge folds every element
+    beneath it anyway.
+    """
+    features = [
+        feature(
+            "A",
+            [
+                background([step("failed")]),
+                scenario("blocked", [step("skipped")]),
+                background([step("passed")]),
+                scenario("ok", [step("passed")]),
+            ],
+        )
+    ]
+
+    summary = ag.build_summary(features)
+
+    assert summary["scenarios"]["total"] == 2
+    assert summary["scenarios"]["by_status"] == {"passed": 1, "failed": 1}
+    assert summary["steps"]["total"] == 4
+    assert summary["features"]["by_status"] == {"failed": 1}
+    # The same figures come out of the decorated document, which is what the
+    # writers hand it, and they equal the ``effective_status`` on the element.
+    decorated = ag.decorate_feature(features[0])
+    assert decorated["elements"][1][ag.EFFECTIVE_STATUS_KEY] == "failed"
+    assert ag.build_summary([decorated])["scenarios"] == summary["scenarios"]
+
+
 def test_a_failed_hook_reaches_the_summary_too() -> None:
     """Hooks are counted on every surface or on none; they are counted."""
     features = [
@@ -510,6 +1019,145 @@ def test_decoration_copies_and_fills_in_every_level() -> None:
     # the originals gained nothing
     assert "status" not in source
     assert "status" not in element
+
+
+def test_decoration_writes_every_key_a_surface_reads() -> None:
+    """A template formats decorated values; it never derives one.
+
+    The five status keys are asserted together because a surface that finds one
+    missing goes back to deriving it from the steps, which is how the same run
+    came to be graded differently on different pages.  ``steps_status`` is the
+    steps-only reading, ``status``/``verdict`` the element's own two readings,
+    and ``effective_status``/``effective_verdict`` the unit's.
+    """
+    decorated = ag.decorate_feature(
+        feature(
+            "A",
+            [
+                background([step("failed", 3)]),
+                scenario("blocked", [step("skipped")], after=[hook("passed")]),
+            ],
+        )
+    )
+    occurrence, blocked = decorated["elements"]
+
+    for element in (occurrence, blocked):
+        for key in (
+            "status",
+            ag.STEPS_STATUS_KEY,
+            "verdict",
+            ag.EFFECTIVE_STATUS_KEY,
+            ag.EFFECTIVE_VERDICT_KEY,
+            "duration_ns",
+            "duration_samples",
+            "stats",
+        ):
+            assert key in element, key
+
+    # A Background occurrence carries its own reading in the same keys, so a
+    # consumer never has to ask which kind of element it is holding.
+    assert occurrence[ag.EFFECTIVE_STATUS_KEY] == occurrence["status"] == "failed"
+    assert blocked["status"] == blocked[ag.STEPS_STATUS_KEY] == "skipped"
+    assert blocked[ag.EFFECTIVE_STATUS_KEY] == "failed"
+    assert blocked[ag.EFFECTIVE_VERDICT_KEY] == ag.VERDICT_FAILED
+    # Decorated on its own, an element is its own unit.
+    alone = ag.decorate_element(scenario("s", [step("skipped")]))
+    assert alone[ag.EFFECTIVE_STATUS_KEY] == alone["status"] == "skipped"
+
+
+def test_an_elements_own_figures_agree_with_its_effective_verdict() -> None:
+    """A scenario's own statistics block cannot contradict its badge.
+
+    The case only a foreign or hand-built document produces -- behave skips a
+    scenario's steps once its Background has failed -- and the one the model
+    has to be coherent about anyway: a scenario whose own body passed behind a
+    failed Background counts as a **failed** scenario in its own figures, in
+    its feature's, and in a tag row's, because all three read the effective
+    verdict.
+    """
+    decorated = ag.decorate_feature(
+        feature(
+            "A",
+            [background([step("failed")]), scenario("odd", [step("passed")])],
+        )
+    )
+    odd = decorated["elements"][1]
+
+    assert odd["status"] == "passed", "the element's own reading is unchanged"
+    assert odd[ag.EFFECTIVE_VERDICT_KEY] == ag.VERDICT_FAILED
+    assert odd["stats"]["scenarios_passed"] == 0
+    assert odd["stats"]["scenarios_failed"] == 1
+    assert decorated["stats"]["scenarios_failed"] == 1
+    assert ag.tag_row("@Smoke", [odd])["scenarios_failed"] == 1
+
+
+def test_decoration_canonicalises_statuses_in_the_copy_only() -> None:
+    """The mapped status reaches the rendered page, and the input is untouched.
+
+    Both HTML writers read ``step.result.status`` in their templates, so a
+    behave-only status had to be folded in the copy or the page would badge
+    *Unknown* what ``cucumber.json`` published as ``failed``.  Two properties
+    are asserted with it: no key is *added* to a result -- a skipped step
+    carries no ``duration`` in the artifact and must not acquire one here --
+    and every other key survives in place.
+    """
+    element = scenario("s", [step("hook_error", 7), step("skipped")])
+    element["after"] = [hook("cleanup_error")]
+    source = feature("A", [element])
+    before = copy.deepcopy(source)
+
+    decorated = ag.decorate_feature(source)
+    steps = decorated["elements"][0]["steps"]
+
+    assert steps[0]["result"] == {"status": "failed", "duration": 7}
+    assert steps[1]["result"] == {"status": "skipped"}
+    assert "duration" not in steps[1]["result"]
+    assert steps[0]["name"] == "a step" and steps[0]["line"] == 3
+    assert decorated["elements"][0]["after"][0]["result"]["status"] == "failed"
+    assert decorated["elements"][0]["status"] == "failed"
+    # Nothing under the input document moved, including the raw statuses the
+    # JSON writer still has to read for itself.
+    assert source == before
+
+
+def test_a_dry_run_is_read_once_and_reaches_every_decorated_value() -> None:
+    """``normalize_run`` reads the flag; nothing downstream needs it.
+
+    Measured: under ``dryRun`` the JVM marks a matched step ``passed`` and an
+    unmatched one ``undefined``, while behave records ``untested`` for both --
+    so one dry run published nineteen ``passed`` steps in ``cucumber.json``
+    and sixty ``untested`` badges on the HTML artifact from the same document.
+    The flag is read here, once, and written into the copies, which is what
+    makes both artifacts and the manifest read the same run.
+    """
+    matched = {
+        "keyword": "Given ",
+        "name": "a matched step",
+        "line": 3,
+        "matched": True,
+        "result": {"status": "untested"},
+    }
+    unmatched = {**matched, "name": "an unmatched step", "matched": False}
+    document = {
+        "dry_run": True,
+        "features": [feature("A", [scenario("s", [matched, unmatched])])],
+    }
+
+    run = ag.normalize_run(document)
+    steps = run.features[0]["elements"][0]["steps"]
+
+    assert [step_["result"]["status"] for step_ in steps] == [
+        "passed",
+        ag.UNDEFINED_STATUS,
+    ]
+    assert run.features[0]["elements"][0][ag.EFFECTIVE_STATUS_KEY] == (
+        ag.UNDEFINED_STATUS
+    )
+    assert run.summary["steps"]["by_status"] == {"passed": 1, "undefined": 1}
+    assert run.summary["scenarios"]["by_status"] == {"undefined": 1}
+    # Without the flag the same document reads as the engine recorded it.
+    plain = ag.normalize_run({**document, "dry_run": False})
+    assert plain.summary["steps"]["by_status"] == {"untested": 2}
 
 
 def test_a_feature_with_no_element_did_not_pass_it_did_not_run() -> None:

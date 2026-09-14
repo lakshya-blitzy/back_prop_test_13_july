@@ -4,13 +4,9 @@ Invoke it with the project interpreter and no arguments::
 
     .venv/bin/python run.py
 
-That is the whole of this file's job: obtain an application from the factory and
-start Flask's development server on the loopback interface.  Its counterpart,
-``wsgi.py``, hands the same factory's product to a WSGI caller and starts
-nothing.  The two differ in exactly one thing - the ``if __name__ ==
-"__main__"`` guard at the bottom of this file - so the property to protect when
-editing either is that *importing* this module yields an application and no
-listening socket, while *running* it listens.
+It serves the viewer over the artifacts a suite run has already produced, and
+starts nothing else - no suite run, no browser.  ``wsgi.py`` exposes the same
+factory's application for a WSGI server to load.
 
 What is being served
 ====================
@@ -41,6 +37,16 @@ Serving defaults, and the only thing that adjusts them
   environment variable.  One override exists for one reason: several checkouts
   of this project may need to serve at once on a shared machine, and a fixed
   port makes that impossible.  Unset or empty means the default.
+* **Accepted ``Host`` headers** - not set here at all.  The loopback bind
+  above decides which interfaces a connection may arrive on; what decides
+  which *names* it may claim is the ``TRUSTED_HOSTS`` allowlist the factory
+  installs, and it is what makes a request arriving under a foreign name a
+  400 rather than a 200.  The two work together: the bind keeps the socket
+  local, and the allowlist keeps a page loaded under an attacker-controlled
+  hostname from reading this machine's artifacts through the browser that
+  loaded it.  So widening the bind is not a one-value change here - it means
+  revising that allowlist too, through ``create_app``'s overrides, where the
+  whole decision lives in one place.
 
 Debug mode is off and is not configurable here.  ``debug=False`` is stated
 outright at the call below rather than left to a framework default a later
@@ -117,44 +123,27 @@ from typing import Final
 
 from app import create_app
 
-#: The published surface: the application object, which is what a WSGI-style
-#: import of this module is for.  The single helper below is private because
-#: it answers one question for the guard at the bottom and is of no use to
-#: anything else.
 __all__ = ["app"]
 
-#: The loopback interface, and not a configurable one.  See the module
-#: docstring: publishing local build output to the network is a decision for a
-#: real server, not a default for a development runner.
 DEFAULT_HOST: Final[str] = "127.0.0.1"
 
-#: Flask's own default port, and therefore the one a reader expects without
-#: being told.  It is the single fact the project's documentation needs to
-#: quote about this file, so it is declared once, here, rather than repeated in
-#: a string below.
 DEFAULT_PORT: Final[int] = 5000
 
-#: Chooses the listening port when several checkouts must serve at once.  It is
-#: the only environment variable this file reads; see the module docstring on
-#: why no debug variable joins it.
 PORT_VARIABLE: Final[str] = "FLASK_PORT"
 
 
 def _port_from_environment() -> int:
-    """Return the port to listen on, resolving the environment override.
+    """Return the port to listen on, resolving the ``FLASK_PORT`` override.
 
-    Unset - and empty, since an exported-but-empty variable is how a shell
-    conveys "no value" - means :data:`DEFAULT_PORT`.  Anything else must be a
-    whole number within the usable TCP range.
+    Unset or empty - an exported-but-empty variable being how a shell conveys
+    "no value" - means :data:`DEFAULT_PORT`.  Anything else must be a whole
+    number within the usable TCP range.
 
     :returns: A port number between 1 and 65535 inclusive.
     :raises SystemExit:
-        If the variable holds a value that is not a usable port.  Exiting with
-        a message is the right failure for a script entry point: the operator
-        set the variable seconds ago and needs to be told which value was
-        rejected and what would be accepted, not shown a stack trace.  Silently
-        falling back to the default would be worse still, because the server
-        would then listen somewhere the operator is not looking.
+        If the variable holds a value that is not a usable port.  The caller
+        gets a message naming the rejected value and the accepted range, rather
+        than a traceback or a silent fall back to a port nobody is watching.
     """
     raw = os.environ.get(PORT_VARIABLE)
     if raw is None or not raw.strip():
@@ -167,8 +156,7 @@ def _port_from_environment() -> int:
     try:
         port = int(raw.strip())
     except ValueError:
-        # ``from None`` keeps the message clean: the underlying ValueError adds
-        # nothing an operator can act on.
+        # ``from None``: the underlying ValueError adds nothing actionable.
         raise SystemExit(
             f"{PORT_VARIABLE}={raw!r} is not a number. {guidance}"
         ) from None
@@ -180,33 +168,10 @@ def _port_from_environment() -> int:
     return port
 
 
-#: The application, built by the factory - the one action this module performs
-#: at import time, and the only line it has in common with ``wsgi.py``.  The
-#: factory holds no module-level state, so building one here cannot disturb
-#: another built elsewhere in the same interpreter.
-#:
-#: This name shadows the imported ``app`` package inside this module only.
-#: That is the established Flask idiom and it is safe here because nothing
-#: below refers to the package again; the factory is already bound above.
 app = create_app()
 
 
 if __name__ == "__main__":
-    # The guard is this file's reason to exist, and the line that separates it
-    # from ``wsgi.py``: without it, importing the module would start a server
-    # and every importer - a test, a shell, a documentation tool - would hang.
-    #
-    # The one environment read sits inside it deliberately, so that an import
-    # neither consults nor validates the variable, and a mistyped override can
-    # only ever fail the person who typed it.
-    #
-    # ``debug=False`` is passed explicitly, not omitted: the interactive
-    # debugger and the reloader are never wanted from this entry point, and
-    # saying so here means no framework default or environment variable can
-    # turn them on behind a reader's back.
-    #
-    # Flask's development server announces what it is on startup, which is the
-    # whole of the "this is not production" messaging this file needs.
     app.run(
         host=DEFAULT_HOST,
         port=_port_from_environment(),

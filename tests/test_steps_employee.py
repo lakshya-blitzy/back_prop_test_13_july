@@ -1,33 +1,32 @@
 """Per-method behaviour-parity tests for ``features/steps/employee_steps.py``.
 
-This module discharges AAP 0.4.1's per-module parity obligation for one step
-class: *"for each of the ten step modules, ``tests/test_steps_<area>.py`` drives
-the module against a stubbed driver and asserts, for every step method in the
-corresponding Java class, that the port performs the same observable operations
-in the same order ... and the module test enumerates the Java class's methods so
-an omission fails rather than passes silently."*
+Discharges AAP 0.4.1's per-module parity obligation for one step class: for
+every step method of the paired Java class the port must perform the same
+observable operations in the same order, and this module enumerates that
+class's methods so an omission fails rather than passing silently.
 
-The specification is the pinned Java source, not this port's own docstrings:
-``src/main/java/com/testinium/step_definitions/EmployeeStage.java`` (112 lines,
-12 methods) and its page object ``.../pages/EmployeeP.java`` (15 ``@FindBy``
-fields and two ``login`` overloads).  Every test below names the Java line or
-lines it pins, and the census the whole module is built around is::
+The authority is the pinned Java source and the feature files, never the
+port's own docstrings: ``EmployeeStage.java:12-113`` - twelve step methods,
+one 3-second ``WebDriverWait`` at ``:14``, eight fixed delays, four
+message-less assertions and two commented-out ``assertEquals`` blocks that
+must stay absent - its page object ``EmployeeP.java:8-70`` and
+``features/EmployeeFc.feature``.  Every constant and test below carries the
+line or lines it pins.  ``EmployeeP.java:60-61``'s two login literals are
+carried over verbatim as executable data under AAP 0.8, which sanctions the
+fixture data and not a second copy of it in prose, so they are stated exactly
+once - as :data:`LOGIN_EMAIL` and :data:`LOGIN_PASSWORD` - and every assertion
+reads them from there.
 
-    12 step methods            EmployeeStage.java:16, 22, 28, 35, 45, 50,
-                               58, 66, 76, 84, 91, 107
-    5 configuration reads      web.table.url :18; url :24, :60, :93;
-       over 3 keys             mixed-case EmplTitle :31
-    3 login() invocations      :25, :61, :94 - each three DOM operations
-                               through three separate lookups
-    6 explicit waits, all 3s   :31 (configured EmplTitle), :38, :40, :42
-                               (visibility of the element just clicked),
-                               :71 ("New - Odoo"), :87 ("Employees - Odoo")
-    8 fixed delays             one of 7s at :48 - the suite's only one - and
-                               seven of 3s at :62, :68, :70, :95, :97, :100,
-                               :103
-    4 live assertions          :32, :52, :78, :88, every one message-less
-    2 commented-out asserts    :53-55 and :79-81, which must stay ABSENT
-    1 assertion-free body      :107-110, a single click and no check
+behave's ``load_step_modules`` execs a step module, so it never enters
+``sys.modules``: ``resolve_step`` from ``tests/conftest.py`` is the supported
+handle and ``match.func.__globals__`` the only door to its namespace, which
+:class:`StepProbe` patches through ``monkeypatch.setitem`` because the step
+registry is session-scoped and shared with every other step test.  Nothing
+sleeps and nothing polls.  Every visibility wait is recorded by the
+**locator** it was handed and compared by identity against the page class's
+own constant, so a pair merely equal to it cannot pass; lookups stay out of
+the ordered views and are pinned separately as an exact count - the un-cached
+``PageFactory`` proxy of ``LoginP.java:9-11``.
 
 How a step body is reached
 --------------------------
@@ -67,10 +66,24 @@ separate count derived from what was recorded.
 rather than ``("partial link text", "Employees")``, so a same-valued locator
 belonging to another page object cannot satisfy a test here.
 
-*The credentials are asserted verbatim.*  ``posmanager50@info.com`` and
-``posmanager`` are carried over from ``EmployeeP.java:60-61`` as AAP 0.8
-requires ("no agent should redact, parameterize or rotate them, or treat their
-presence as a finding"), so they are pinned exactly as the reference has them.
+*The credentials are asserted as configuration, not as literals.*
+``EmployeeP.java:60-61`` typed two account literals and this suite used to pin
+them character for character.  Review finding SEC2-F17 (CRITICAL) established
+that AAP 0.8's test-data note sanctions those values in **the Gherkin Examples
+tables** and nowhere else, so they are gone from the port's Python source: the
+page object types the two values it is *given*, and this module's three
+``login()`` call sites read them from the existing ``username`` and ``password``
+properties - two of the six keys AAP 0.4.1 inventories, with no seventh added -
+because AAP 0.4.2 gives page objects ``app.automation`` and nothing else and
+names this step module among ``app.config``'s consumers.
+
+That makes this module the layer where the two values enter, so it is where
+they are pinned.  :data:`LOGIN_EMAIL` and :data:`LOGIN_PASSWORD` are
+reserved-namespace sentinels, supplied through :data:`CONFIG_SENTINELS` for the
+recorder-driven tests and through :data:`USERDATA_VALUES` for the end-to-end
+one, and asserted as the values the page typed: a swap of the two fields, a
+dropped ``send_keys``, a credential hoisted to module level or one read from
+anywhere but ``app.config`` still fails here.
 
 Coverage is enumerated, not hoped for
 -------------------------------------
@@ -102,7 +115,7 @@ from app.pages import EmployeePage
 #: feature-file assertions below do not depend on where pytest was started.
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 
-#: The step module under test - the port of ``EmployeeStage.java``.
+#: The step module under test - the port of ``EmployeeStage.java:12-113``.
 STEP_MODULE_PATH: Final[Path] = REPO_ROOT / "features" / "steps" / "employee_steps.py"
 
 #: The module name behave's registry reports for every definition it owns,
@@ -132,7 +145,7 @@ FEATURE_HEADER: Final[str] = "Feature: Testinium app Employees module"
 FEATURES_DIR: Final[Path] = REPO_ROOT / "features"
 
 # --------------------------------------------------------------------------- #
-# The twelve phrases, in EmployeeStage.java declaration order
+# The twelve phrases, in EmployeeStage.java declaration order (:16 to :107)
 # --------------------------------------------------------------------------- #
 
 #: ``EmployeeStage.java:16`` - the orphan.  Registered by the port and invoked
@@ -180,10 +193,12 @@ PHRASE_EDIT_EMPLOYEE: Final[str] = "User edits created employees in the Employee
 #: ``EmployeeStage.java:107``.
 PHRASE_EDITED_NAME: Final[str] = "User should see the edited name in the Employees module"
 
-#: All twelve registered patterns, in ``EmployeeStage.java`` declaration order.
-#: The enumeration the parity obligation requires: this tuple is compared
-#: against what the registry actually holds, so a thirteenth definition or a
-#: deleted one fails rather than passes silently.
+#: All twelve registered patterns, in ``EmployeeStage.java`` declaration order
+#: - ``:16``, ``:22``, ``:28``, ``:35``, ``:45``, ``:50``, ``:58``, ``:66``,
+#: ``:76``, ``:84``, ``:91``, ``:107``.  The enumeration the parity obligation
+#: requires: this tuple is compared against what the registry actually holds,
+#: so a thirteenth definition or a deleted one fails rather than passes
+#: silently.
 ALL_PATTERNS: Final[tuple[str, ...]] = (
     PHRASE_ORPHAN_LOGIN_PAGE,
     PHRASE_DASHBOARD,
@@ -222,11 +237,22 @@ STEP_FUNCTION_NAMES: Final[tuple[str, ...]] = (
 # Literals, timings and expected values
 # --------------------------------------------------------------------------- #
 
-#: ``EmployeeP.java:60`` - carried over verbatim per AAP 0.8.
-LOGIN_EMAIL: Final[str] = "posmanager50@info.com"
+#: The value the three sign-in steps must type into the login field: the
+#: ``username`` property as this module supplies it, through
+#: :data:`CONFIG_SENTINELS` for the recorder-driven tests and through
+#: :data:`USERDATA_VALUES` for the end-to-end one.  A sentinel in the RFC 2606
+#: reserved namespace rather than the account literal of ``EmployeeP.java:60``:
+#: review finding SEC2-F17 moved that credential out of the port's Python
+#: source, and a test that restated it would put it straight back.
+#: Distinguishable from :data:`LOGIN_PASSWORD` on purpose, so a call site that
+#: passed the two values in the wrong order fails rather than passes.
+LOGIN_EMAIL: Final[str] = "employee-login@example.invalid"
 
-#: ``EmployeeP.java:61`` - carried over verbatim per AAP 0.8.
-LOGIN_PASSWORD: Final[str] = "posmanager"
+#: The value those steps must type into the password field, supplied as the
+#: ``password`` property by the same two channels.  Not a credential of any
+#: system: it names its own role, which is the whole of what these assertions
+#: need from it.
+LOGIN_PASSWORD: Final[str] = "employee-password-sentinel"
 
 #: ``EmployeeStage.java:32``, ``:87`` and ``:88``.
 TITLE_EMPLOYEES: Final[str] = "Employees - Odoo"
@@ -267,31 +293,79 @@ UNEXPECTED_TITLE: Final[str] = "employees - odoo (Employees - Odoo mirror)"
 # The configuration seam
 # --------------------------------------------------------------------------- #
 
-#: The three ``app.config`` accessors this module is allowed to read, mapped to
+#: The five ``app.config`` accessors this module is allowed to read, mapped to
 #: the ``configuration.properties`` key each one resolves.  ``EmplTitle`` is
 #: mixed case in the reference and stays mixed case here.
+#:
+#: ``username`` and ``password`` joined the three navigation and title keys when
+#: review finding SEC2-F17 took the two account literals out of
+#: ``EmployeeP.java:60-61``'s port: ``EmployeePage.login`` types its two
+#: arguments, and AAP 0.4.2 - which gives page objects ``app.automation`` and
+#: nothing else, and names this step module among ``app.config``'s consumers -
+#: puts the read at the three ``login()`` call sites here.  No key was added to
+#: the port for it; both are among the six AAP 0.4.1 inventories, and
+#: ``session_steps`` reads the same two.
 CONFIG_ACCESSOR_KEYS: Final[dict[str, str]] = {
     "get_web_table_url": "web.table.url",
     "get_url": "url",
     "get_empl_title": "EmplTitle",
+    "get_username": "username",
+    "get_password": "password",
 }
 
 #: Distinguishable values the recorder returns for each accessor.  Distinct
 #: strings are the whole point: a step that read ``web.table.url`` where the
-#: Java reads ``url`` would navigate to the wrong sentinel and fail here.
+#: Java reads ``url`` would navigate to the wrong sentinel and fail here, and a
+#: call site that passed the password where the user name belongs would type
+#: the wrong one of the two credential sentinels.
 CONFIG_SENTINELS: Final[dict[str, str]] = {
     "get_web_table_url": "https://sentinel.invalid/web-table-url",
     "get_url": "https://sentinel.invalid/module-url",
     "get_empl_title": "Sentinel EmplTitle - not the hard-coded one",
+    "get_username": LOGIN_EMAIL,
+    "get_password": LOGIN_PASSWORD,
 }
 
 #: Values installed through ``app.config.set_userdata`` for the end-to-end
 #: configuration test, which drives the real accessors rather than recorders.
+#: Keyed by the literal property names, which is what that test proves: a
+#: mis-keyed read resolves to nothing and lands ``None`` on the driver.
 USERDATA_VALUES: Final[dict[str, str]] = {
     "web.table.url": "https://userdata.invalid/sign-in",
     "url": "https://userdata.invalid/employees",
     "EmplTitle": "Userdata EmplTitle",
+    # The two credential keys are here because that test drives phrases whose
+    # bodies read them at their ``login()`` call sites through the real
+    # accessors, once the recorders are out of the way (``config_values={}``).
+    # They reuse the two sentinels above rather than restating their text, so
+    # the module tells one story: every sign-in it drives types those two
+    # values, whichever channel supplied them.
+    "username": LOGIN_EMAIL,
+    "password": LOGIN_PASSWORD,
 }
+
+#: The four navigation sites of the class, each with the key it reads.  This is
+#: where ``EmployeeStage.java`` is the port's heaviest exposure to a configured
+#: destination: ``:19`` navigates to ``web.table.url`` and ``:24``, ``:60`` and
+#: ``:93`` each navigate to ``url`` and then sign in.
+NAVIGATION_SITES: Final[tuple[tuple[str, str], ...]] = (
+    (PHRASE_ORPHAN_LOGIN_PAGE, "web.table.url"),
+    (PHRASE_DASHBOARD, "url"),
+    (PHRASE_EMPLOYEES_DASHBOARD, "url"),
+    (PHRASE_EDIT_EMPLOYEE, "url"),
+)
+
+#: Destinations ``app/config.py``'s navigation policy refuses, one per class
+#: that matters at a navigation site: a scheme that reads the worker's own
+#: disk, an origin that would be handed the sign-in the step performs next, a
+#: value that forges a second record in a log or a request, and the cloud
+#: instance-metadata address.
+HOSTILE_URL_VALUES: Final[tuple[tuple[str, str], ...]] = (
+    ("file-scheme", "file:///etc/passwd"),
+    ("userinfo", "https://qa:secret@credential-sink.example/employees"),
+    ("newline", "https://userdata.invalid/employees\nX-Injected: 1"),
+    ("metadata-address", "http://169.254.169.254/latest/meta-data/"),
+)
 
 # --------------------------------------------------------------------------- #
 # Log vocabulary
@@ -301,8 +375,11 @@ USERDATA_VALUES: Final[dict[str, str]] = {
 ELEMENT_PREFIX: Final[str] = "element."
 
 #: Operations dropped from every ordered comparison.  A lookup is not an effect
-#: on the page, and whether one happens depends on the shape of a wait call
-#: site, which is the one thing these tests deliberately do not fix.
+#: on the page: it is the ``PageFactory``-proxy dereference of
+#: ``EmployeeP.java:10-12``, which the ordered views would drown out.  Their
+#: exact number is pinned instead by :func:`assert_one_lookup_per_access`, one
+#: per lower-case accessor access and none for a wait, whose locator constant
+#: is resolved inside the predicate rather than at the call site.
 LOOKUP_OPERATIONS: Final[frozenset[str]] = frozenset({"find_element", "find_elements"})
 
 #: The two entries :class:`StepProbe` adds to the driver's log.  They are
@@ -310,18 +387,26 @@ LOOKUP_OPERATIONS: Final[frozenset[str]] = frozenset({"find_element", "find_elem
 #: is how a delay's *position* inside a step is asserted.
 PROBE_OPERATIONS: Final[frozenset[str]] = frozenset({"sleep", "wait"})
 
-#: Canonical wait kinds, keyed by helper name.  ``visibility_of(element)`` and
-#: ``visibility_of_element_located(locator)`` are the same parity fact reached
-#: two ways, so both normalise to ``"visible"``; anything else keeps its own
-#: name, because a different predicate is a behaviour change and must fail.
+#: Canonical wait kinds, keyed by helper name.  ``wait_visible`` and
+#: ``wait_visible_element`` both resolve
+#: ``EC.visibility_of_element_located(locator)`` - one predicate under two
+#: names, as ``app/automation/waits.py``'s surface table states - so both
+#: record as ``"visible"``; anything else keeps its own name, because a
+#: different predicate is a behaviour change and must fail.
 WAIT_KIND_ALIASES: Final[dict[str, str]] = {
     "wait_visible": "visible",
     "wait_visible_element": "visible",
 }
 
 #: Keyword names a wait helper may carry its target under, consulted only when
-#: the target was not passed positionally.
-WAIT_TARGET_KEYWORDS: Final[tuple[str, ...]] = ("element", "locator", "title")
+#: the target was not passed positionally.  These are the two parameter names
+#: ``app/automation/waits.py`` declares for the helpers this module uses -
+#: ``locator`` for the visibility wait and ``title`` for the title wait.  There
+#: is deliberately no ``element`` keyword: a visibility wait handed an
+#: already-resolved element would perform its lookup before the wait existed,
+#: under the ten-second implicit wait rather than the 3 seconds
+#: ``EmployeeStage.java:14`` allows it.
+WAIT_TARGET_KEYWORDS: Final[tuple[str, ...]] = ("locator", "title")
 
 #: Sentinel for "no value found", distinguishable from a legitimate ``None``.
 _UNSET: Final[Any] = object()
@@ -355,22 +440,23 @@ def pristine_namespace(namespace: dict[str, Any]) -> dict[str, Any]:
 
 
 class WaitCall(NamedTuple):
-    """One explicit wait, normalised so the assertion outlives the call shape.
+    """One explicit wait, as the call site passed it.
 
     :param kind: Canonical predicate name - ``"visible"`` or ``"title_is"``
         for this module - resolved through :data:`WAIT_KIND_ALIASES`.
-    :param target: What was waited on: the locator pair for an element or
-        locator target, the expected title string for a title wait.
+    :param target: What was waited on, recorded by reference and not copied:
+        the page class's own upper-case locator constant for a visibility
+        wait, the expected title string for a title wait.  Keeping the object
+        itself is what lets a test compare it with ``is`` against
+        ``EmployeePage.<NAME>``, so a same-valued pair built elsewhere - or
+        belonging to another page object - cannot satisfy the assertion.
     :param timeout: The timeout exactly as the call site passed it, with no
         normalisation whatever - the parity fact is the number 3.
-    :param from_element: Whether the target arrived as a located element,
-        which is what makes the call site perform its own extra lookup.
     """
 
     kind: str
     target: Any
     timeout: Any
-    from_element: bool
 
 
 class StepProbe:
@@ -389,13 +475,15 @@ class StepProbe:
         the suite runs in milliseconds.
 
     every ``wait_*`` helper bound in the namespace
-        Recorded as a :class:`WaitCall`.  Installing over all of them, rather
-        than over the one name the port happens to use today, is what lets
-        ``app/automation`` change the call-site shape without silently
-        disabling these assertions: an un-intercepted helper would run a real
-        ``WebDriverWait`` against the stub, and the import-boundary test
-        guarantees the helpers are bound as module globals so there is nothing
-        to miss.
+        Recorded as a :class:`WaitCall`.  Every such name is intercepted, not
+        just the two the module imports, because an un-intercepted helper
+        would construct a real ``WebDriverWait`` and poll the stub; the
+        import-boundary test guarantees the helpers are bound as module
+        globals, so patching the namespace leaves nothing to miss.  Each
+        recorded target must be a locator pair or a title string -
+        :func:`_wait_target` rejects anything else - which is how an
+        element-shaped visibility call is caught here rather than passing
+        under the implicit wait.
 
     the ``app.config`` accessors bound in the namespace
         Recorded in call order and answered from :data:`CONFIG_SENTINELS`, so
@@ -427,8 +515,6 @@ class StepProbe:
 
         #: The ``app.config`` accessor names found bound in the namespace.
         self.config_accessor_names: tuple[str, ...] = ()
-
-    # -- installation ------------------------------------------------------ #
 
     def install(
         self,
@@ -491,8 +577,6 @@ class StepProbe:
 
         return self
 
-    # -- the recorders ----------------------------------------------------- #
-
     def _record_sleep(self, seconds: Any) -> None:
         """Stand in for ``time.sleep``: record the delay and return at once.
 
@@ -516,23 +600,19 @@ class StepProbe:
 
             :param args: Positional arguments the call site passed.
             :param kwargs: Keyword arguments the call site passed.
-            :returns: The element the wait was given, or ``True`` for a
-                locator or title target - the contract of the helper it
-                stands in for, and discarded by every call site in this
-                module either way.
+            :returns: ``True``, standing in for whatever the real helper
+                resolves to - the web element for
+                ``visibility_of_element_located`` and a boolean for
+                ``title_is``.  Every call site in this module discards the
+                result, and resolving the locator here would add a
+                ``find_element`` to the log that the port never performed,
+                since the real lookup happens inside the predicate.
             """
             target, timeout = _wait_arguments(name, args, kwargs)
-            resolved, from_element = _normalise_wait_target(name, target)
-            call = WaitCall(_wait_kind(name), resolved, timeout, from_element)
+            call = WaitCall(_wait_kind(name), _wait_target(name, target), timeout)
             self.waits.append(call)
             self.driver.calls.append(("wait", (call.kind, call.target, call.timeout)))
-
-            # ``wait_visible_element`` resolves to the element it was given and
-            # ``wait_title_is`` to a boolean.  Every call site in this module
-            # discards the result, so returning the argument (or ``True``)
-            # reproduces the contract without performing a further lookup that
-            # would show up in the log as an effect the port never caused.
-            return target if from_element else True
+            return True
 
         return recorder
 
@@ -583,9 +663,12 @@ def _wait_arguments(
     """Extract the target and the timeout from one wait call.
 
     Every helper in ``app/automation/waits.py`` takes its target first and its
-    timeout second, with ``driver`` keyword-only; both forms - positional and
-    ``timeout=`` - are accepted here so that a call-site refactor is not
-    mistaken for a parity failure.
+    timeout second, with ``driver`` keyword-only.  Both spellings of the
+    timeout - positional and ``timeout=`` - name the same argument and are
+    read the same way here, because the parity fact is the number 3 from
+    ``EmployeeStage.java:14`` and not the punctuation that carries it.  The
+    target's *shape* is a different matter and is checked, not absorbed: see
+    :func:`_wait_target`.
 
     :param name: The helper's name, for the failure messages.
     :param args: Positional arguments as passed.
@@ -636,30 +719,47 @@ def _keyword_target(name: str, kwargs: dict[str, Any]) -> Any:
     )
 
 
-def _normalise_wait_target(name: str, target: Any) -> tuple[Any, bool]:
-    """Reduce a wait target to the locator or title it identifies.
+def _wait_target(name: str, target: Any) -> Any:
+    """Check a wait target against the two shapes the contract permits.
+
+    The port's visibility waits take a **locator**, never a resolved element:
+    ``app/automation/waits.py``'s ``wait_visible_element`` passes what it is
+    given to ``EC.visibility_of_element_located``, so the lookup re-runs on
+    every poll inside the 3 seconds ``EmployeeStage.java:14`` allows - which is
+    what the ``PageFactory`` proxy behind ``visibilityOf(employeePage.field)``
+    did at ``:38``, ``:40`` and ``:42``.  An element resolved at the call site
+    would move that lookup out of the wait and under the ten-second implicit
+    wait ``app/automation/driver.py`` sets, so a target carrying a ``locator``
+    attribute is rejected here rather than reduced to its locator: absorbing it
+    would hide exactly the defect this check exists to surface.
 
     :param name: The helper's name, for the failure message.
-    :param target: A located element, a ``(strategy, value)`` locator pair or
-        an expected-title string.
-    :returns: ``(normalised target, whether it arrived as an element)``.
-    :raises AssertionError: For any other kind of target, which would mean the
-        port is waiting on something neither Java call site waits on.
+    :param target: A ``(strategy, value)`` locator pair - a page class's own
+        upper-case constant - or an expected-title string.
+    :returns: The target unchanged, by reference, so a caller can compare it
+        with ``is`` against ``EmployeePage.<NAME>``.
+    :raises AssertionError: For a located element, or for any other kind of
+        target, either of which would mean the port is waiting on something
+        the Java call sites do not wait on.
     """
-    locator = getattr(target, "locator", None)
+    if hasattr(target, "locator"):
+        raise AssertionError(
+            f"{name} was passed the resolved element {target!r}; every "
+            f"visibility wait in the port takes a page locator constant so "
+            f"that EmployeeStage.java:14's 3 seconds gate the lookup inside "
+            f"EC.visibility_of_element_located"
+        )
 
-    if locator is not None:
-        return tuple(locator), True
-
-    if isinstance(target, (tuple, list)) and len(target) == 2:
-        return tuple(target), False
+    if isinstance(target, tuple) and len(target) == 2:
+        return target
 
     if isinstance(target, str):
-        return target, False
+        return target
 
     raise AssertionError(
         f"{name} was called with an unrecognised target {target!r}; "
-        f"EmployeeStage.java waits on a located element or a title string"
+        f"EmployeeStage.java waits on a page locator ({WAIT_TIMEOUT}s "
+        f"visibility, :38, :40, :42) or a title string (:31, :71, :87)"
     )
 
 
@@ -682,8 +782,9 @@ def timeline(driver: Any) -> tuple[tuple[Any, ...], ...]:
 
     The view that asserts *position*: DOM effects, fixed delays and explicit
     waits interleaved exactly as the step performed them.  Lookups are dropped
-    because whether a wait argument causes one depends on the call site's
-    shape, which these tests deliberately do not fix.
+    because a ``PageFactory``-proxy dereference (``EmployeeP.java:10-12``) is
+    not one of the operations the Java body performs on the page; their exact
+    number is pinned separately by :func:`assert_one_lookup_per_access`.
 
     :param driver: The ``StubDriver`` the step ran against.
     :returns: The ordered timeline.
@@ -717,31 +818,82 @@ def assert_one_lookup_per_access(driver: Any, probe: StepProbe) -> None:
 
     ``PageFactory``'s proxy re-located on every invocation
     (``LoginP.java:9-11``), so the port's accessors must too.  The expected
-    count is *derived from what was recorded* - one lookup per element
-    operation, plus one per wait that was handed an element - which keeps the
-    assertion exact while surviving a wait call site that takes a locator
-    instead of an element.
+    count is *derived from what was recorded* - exactly one lookup per element
+    operation - which keeps the assertion exact without re-listing the
+    accesses each step makes.
+
+    A wait contributes nothing to this count, and that is the locator-only
+    contract stated as a number: every visibility wait is handed a page
+    locator constant, so the call site performs no lookup of its own and the
+    resolution happens inside ``EC.visibility_of_element_located``, gated by
+    the 3 seconds ``EmployeeStage.java:14`` fixes.  A wait handed a resolved
+    element would raise this count by one - and :func:`_wait_target` rejects
+    that shape before it can - so a surplus ``find_element`` is a real defect
+    rather than a call-shape artefact.
 
     :param driver: The ``StubDriver`` the step ran against.
-    :param probe: The probe whose waits were recorded.
+    :param probe: The probe whose waits were recorded, for the message.
     :returns: ``None``.
     """
-    element_operations = sum(
+    expected = sum(
         1 for operation, _ in driver.calls if operation.startswith(ELEMENT_PREFIX)
     )
-    element_waits = sum(1 for wait in probe.waits if wait.from_element)
-    expected = element_operations + element_waits
 
     assert driver.count_of("find_element") == expected, (
         f"expected {expected} find_element calls - one per accessor access, "
-        f"{element_operations} for element operations and {element_waits} for "
-        f"element-target waits - but the log holds "
-        f"{driver.count_of('find_element')}: {driver.operations()}"
+        f"and none for the {len(probe.waits)} recorded wait(s), which take "
+        f"locators - but the log holds {driver.count_of('find_element')}: "
+        f"{driver.operations()}"
     )
     assert driver.count_of("find_elements") == 0, (
         f"EmployeeP.java declares no List<WebElement> field, so no plural "
         f"lookup may happen: {driver.calls}"
     )
+
+
+def assert_visibility_targets_are_page_locator_constants(
+    probe: StepProbe, *expected: tuple[str, str]
+) -> None:
+    """Assert the visibility waits took these page constants, by identity.
+
+    The parity subject of ``EmployeeStage.java:38``, ``:40`` and ``:42`` is not
+    only *which element* is awaited but *what the wait receives*: the port
+    passes ``EmployeePage.<NAME>`` itself, which
+    ``EC.visibility_of_element_located`` then resolves once per poll inside the
+    3-second window of ``:14``.  Identity is therefore the comparison - ``is``
+    against the class attribute rather than ``==`` against a same-valued pair -
+    so neither a locator rebuilt at the call site nor an identical pair
+    belonging to another page object can satisfy it, and a resolved element
+    cannot reach here at all because :func:`_wait_target` refuses it.
+
+    :param probe: The probe whose waits were recorded.
+    :param expected: The page class's own constants, in call order, one per
+        visibility wait the step is expected to perform.
+    :returns: ``None``.
+    """
+    recorded = [wait for wait in probe.waits if wait.kind == "visible"]
+
+    assert len(recorded) == len(expected), (
+        f"expected {len(expected)} visibility wait(s), recorded "
+        f"{[wait.target for wait in recorded]}"
+    )
+
+    for index, (wait, constant) in enumerate(zip(recorded, expected, strict=True)):
+        name = next(
+            (
+                key
+                for key, value in EmployeePage.LOCATORS.items()
+                if value is constant
+            ),
+            repr(constant),
+        )
+
+        assert wait.target is constant, (
+            f"visibility wait {index} took {wait.target!r}; EmployeeStage.java "
+            f"awaits the field EmployeePage.{name} holds the locator for, and "
+            f"the wait must receive that constant itself"
+        )
+        assert wait.timeout == WAIT_TIMEOUT
 
 
 def assert_message_less(excinfo: pytest.ExceptionInfo[AssertionError]) -> None:
@@ -890,10 +1042,6 @@ def _record_executed_test(request: pytest.FixtureRequest) -> None:
 
 @functools.cache
 def module_source() -> str:
-    """The step module's source text.
-
-    :returns: ``features/steps/employee_steps.py`` decoded as UTF-8.
-    """
     return STEP_MODULE_PATH.read_text(encoding="utf-8")
 
 
@@ -1007,12 +1155,24 @@ def module_matchers(registry: Any) -> dict[str, tuple[Any, ...]]:
 # =========================================================================== #
 
 #: ``EmployeeP.java:59-63`` - the three operations ``login()`` performs, in
-#: order, with the credentials ``:60-61`` hard-codes.  Appears at three call
-#: sites: ``EmployeeStage.java:25``, ``:61`` and ``:94``.
+#: order, typing the two values its caller supplied.  Appears at three call
+#: sites: ``EmployeeStage.java:25``, ``:61`` and ``:94``, each of which reads
+#: the ``username`` and ``password`` properties here and passes them in.
 LOGIN_OPERATIONS: Final[tuple[tuple[Any, ...], ...]] = (
     ("element.send_keys", EmployeePage.INPUT_LOGIN, LOGIN_EMAIL),
     ("element.send_keys", EmployeePage.INPUT_PASS, LOGIN_PASSWORD),
     ("element.click", EmployeePage.LOGIN_BUTTON),
+)
+
+#: The configuration reads one sign-in step performs, in order: the ``url`` it
+#: navigates to, then the two credentials it passes to ``login()``.  Named once
+#: because ``EmployeeStage.java:24-25``, ``:60-61`` and ``:93-94`` are three
+#: separate call sites that must each perform all three reads - a hoisted or
+#: cached value would show up as a missing read at the second and third.
+LOGIN_SITE_CONFIG_READS: Final[tuple[str, ...]] = (
+    "get_url",
+    "get_username",
+    "get_password",
 )
 
 #: The title the driver must report for the three steps that assert one, so a
@@ -1026,7 +1186,8 @@ TITLE_BY_PATTERN: Final[dict[str, str]] = {
 }
 
 #: The fixed delays each step performs, in order: the eight ``Thread.sleep``
-#: calls of ``EmployeeStage.java`` distributed across the four methods that
+#: calls of ``EmployeeStage.java:48``, ``:62``, ``:68``, ``:70``, ``:95``,
+#: ``:97``, ``:100`` and ``:103``, distributed across the four methods that
 #: make them, and an empty tuple for the eight methods that make none.
 SLEEPS_BY_PATTERN: Final[dict[str, tuple[int, ...]]] = {
     PHRASE_ORPHAN_LOGIN_PAGE: (),
@@ -1068,21 +1229,23 @@ WAITS_BY_PATTERN: Final[dict[str, tuple[tuple[str, Any, int], ...]]] = {
     PHRASE_EDITED_NAME: (),
 }
 
-#: The ``app.config`` accessors each step calls, in order.  Five reads over
-#: three keys: ``web.table.url`` once, ``url`` at three separate call sites and
-#: ``EmplTitle`` once.
+#: The ``app.config`` accessors each step calls, in order.  Eleven reads over
+#: five keys: ``web.table.url`` once, ``EmplTitle`` once, and - at each of the
+#: three sign-in sites, in this order - ``url``, ``username`` and ``password``,
+#: the last two because the page object types what it is given (SEC2-F17) and
+#: the read belongs to this layer (AAP 0.4.2).
 CONFIG_READS_BY_PATTERN: Final[dict[str, tuple[str, ...]]] = {
     PHRASE_ORPHAN_LOGIN_PAGE: ("get_web_table_url",),
-    PHRASE_DASHBOARD: ("get_url",),
+    PHRASE_DASHBOARD: LOGIN_SITE_CONFIG_READS,
     PHRASE_EMPLOYEES_STAGE: ("get_empl_title",),
     PHRASE_CHALLENGES_STAGE: (),
     PHRASE_DEPARTMENTS_STAGE: (),
     PHRASE_LAST_STAGE_TITLE: (),
-    PHRASE_EMPLOYEES_DASHBOARD: ("get_url",),
+    PHRASE_EMPLOYEES_DASHBOARD: LOGIN_SITE_CONFIG_READS,
     PATTERN_CREATE_EMPLOYEE: (),
     PHRASE_CREATED_MESSAGE: (),
     PHRASE_LISTED_EMPLOYEES: (),
-    PHRASE_EDIT_EMPLOYEE: ("get_url",),
+    PHRASE_EDIT_EMPLOYEE: LOGIN_SITE_CONFIG_READS,
     PHRASE_EDITED_NAME: (),
 }
 
@@ -1107,10 +1270,12 @@ ASSERT_COUNT_BY_FUNCTION: Final[dict[str, int]] = {
 }
 
 #: Names that must not appear anywhere in the step module.  ``print`` and the
-#: keyboard/action-chain helpers are the negatives the Employee class has -
-#: unlike ``Sales.java`` and ``Notes.java`` it prints nothing, sends no key and
-#: builds no action chain - and the rest would mean the module had reached past
-#: ``app.automation`` for a driver or a wait it must not own.
+#: keyboard/action-chain helpers are the negatives the Employee class has:
+#: ``EmployeeStage.java:1-113`` prints nothing where ``Sales.java:34-35`` and
+#: ``Crm.java:51-52`` do, sends no key where ``Notes.java:35`` and
+#: ``Sales.java:68`` do, and builds no action chain where ``Notes.java:78``
+#: does.  The rest would mean the module had reached past ``app.automation``
+#: for a driver or a wait it must not own.
 FORBIDDEN_NAMES: Final[tuple[str, ...]] = (
     "print",
     "Keys",
@@ -1177,9 +1342,10 @@ FORBIDDEN_IMPORTS: Final[tuple[str, ...]] = (
 def concrete_phrases() -> tuple[tuple[str, str], ...]:
     """Each registered pattern paired with a phrase that resolves it.
 
-    :returns: ``(pattern, phrase)`` pairs in ``EmployeeStage.java`` order.  The
-        eleven fixed patterns are their own phrases; the parameterized one is
-        instantiated with the first ``Examples`` value the feature supplies.
+    :returns: ``(pattern, phrase)`` pairs in ``EmployeeStage.java:16-107``
+        declaration order.  The eleven fixed patterns are their own phrases;
+        the parameterized one of ``:66`` is instantiated with the first
+        ``Examples`` value the feature supplies, ``EmployeeFc.feature:23``.
     """
     return tuple(
         (
@@ -1285,8 +1451,9 @@ def test_step_decorators_are_step_only_and_declared_in_java_order() -> None:
 
     The registry says which bucket a definition landed in; the source says what
     was written.  Both are checked, because ``@step`` is the only decorator the
-    port may use and the twelve patterns must appear in ``EmployeeStage.java``
-    declaration order.
+    port may use and the twelve patterns must appear in the declaration order
+    of ``EmployeeStage.java:16``, ``:22``, ``:28``, ``:35``, ``:45``, ``:50``,
+    ``:58``, ``:66``, ``:76``, ``:84``, ``:91`` and ``:107``.
     """
     pairs, decorators = decorated_patterns()
 
@@ -1298,11 +1465,14 @@ def test_import_boundary_is_the_five_permitted_modules() -> None:
     """Pins AAP 0.4.2's import boundary for ``employee_steps``.
 
     Five from-imports and nothing else: the fixed-delay primitive, behave's
-    ``@step``, the wait helpers from ``app.automation``, the three ``app.config``
-    accessors and ``EmployeePage``.  The names taken from ``app.automation`` are
-    checked by shape rather than by identity, because which wait helper
-    expresses ``visibilityOf`` is that package's business; what may not change
-    is that waits are the only thing imported from it.
+    ``@step``, the wait helpers from ``app.automation``, the five ``app.config``
+    accessors and ``EmployeePage``.  The ``app.config`` list is an **equality**
+    against :data:`CONFIG_ACCESSOR_KEYS`, so the two credential accessors
+    SEC2-F17 moved to this layer are as pinned as the three navigation and
+    title ones, and a sixth would fail here.  The names taken from
+    ``app.automation`` are checked by shape rather than by identity, because
+    which wait helper expresses ``visibilityOf`` is that package's business;
+    what may not change is that waits are the only thing imported from it.
     """
     imports = imported_names()
 
@@ -1325,7 +1495,7 @@ def test_module_reaches_past_no_layer_and_names_no_forbidden_helper() -> None:
     nothing, and the port may not acquire any of those.  Nor may it import the
     browser library, the interaction helpers, the properties reader or any
     reporting, service or web module - the configuration surface it is allowed
-    is the three ``app.config`` accessors.
+    is the five ``app.config`` accessors.
     """
     imports = imported_names()
 
@@ -1500,10 +1670,11 @@ def test_orphan_step_passes_an_unset_url_through_unguarded(
 ) -> None:
     """Pins the None-tolerance of ``EmployeeStage.java:18-19``.
 
-    ``ConfigurationReader.getProperty`` returns ``null`` for an undefined key
-    and ``:19`` hands it straight to ``get()``; the reference validates
-    nothing, so the port must not either.  A pre-emptive check here would fail
-    a scenario the reference lets reach the driver.
+    ``ConfigurationReader.getProperty`` (``ConfigurationReader.java:27-29``)
+    returns ``null`` for an undefined key and ``:19`` hands it straight to
+    ``get()``; the reference validates nothing, so the port must not either.
+    A pre-emptive check here would fail a scenario the reference lets reach
+    the driver.
     """
     unset = dict.fromkeys(CONFIG_SENTINELS, None)
     match, probe = drive(
@@ -1532,11 +1703,13 @@ def test_dashboard_step_navigates_to_url_then_signs_in(
 ) -> None:
     """Pins ``EmployeeStage.java:24-25``: navigate to ``url``, then ``login()``.
 
-    Navigation first and sign-in second, with the credentials
-    ``EmployeeP.java:60-61`` hard-codes, carried over verbatim per AAP 0.8.
-    Three separate lookups for the three login operations, because the Java
-    ``PageFactory`` proxy re-located on every invocation.  No wait, no delay,
-    and ``web.table.url`` is not read here.
+    Navigation first and sign-in second, and the two credentials the sign-in
+    types are read here, from the ``username`` and ``password`` properties, and
+    passed to ``login()`` - the page object holds neither value and reads no
+    configuration (SEC2-F17, AAP 0.4.2).  Three separate lookups for the three
+    login operations, because the Java ``PageFactory`` proxy re-located on
+    every invocation.  No wait, no delay, and ``web.table.url`` is not read
+    here.
     """
     match, probe = drive(resolve_step, monkeypatch, fake_context, PHRASE_DASHBOARD)
     covers(match)
@@ -1545,7 +1718,7 @@ def test_dashboard_step_navigates_to_url_then_signs_in(
 
     assert effectful(stub_driver) == expected
     assert timeline(stub_driver) == expected
-    assert probe.config_reads == ["get_url"]
+    assert probe.config_reads == list(LOGIN_SITE_CONFIG_READS)
     assert probe.sleeps == []
     assert probe.waits == []
     assert_one_lookup_per_access(stub_driver, probe)
@@ -1586,7 +1759,7 @@ def test_employees_stage_waits_on_the_configured_title_and_asserts_the_literal(
         ("title",),
     )
     assert probe.waits == [
-        WaitCall("title_is", CONFIG_SENTINELS["get_empl_title"], WAIT_TIMEOUT, False)
+        WaitCall("title_is", CONFIG_SENTINELS["get_empl_title"], WAIT_TIMEOUT)
     ]
     assert probe.waits[0].target != TITLE_EMPLOYEES, (
         "the 3-second wait of EmployeeStage.java:31 takes the configured "
@@ -1625,7 +1798,7 @@ def test_employees_stage_assertion_rejects_any_other_title(
         ("title",),
     )
     assert probe.waits == [
-        WaitCall("title_is", CONFIG_SENTINELS["get_empl_title"], WAIT_TIMEOUT, False)
+        WaitCall("title_is", CONFIG_SENTINELS["get_empl_title"], WAIT_TIMEOUT)
     ]
 
 
@@ -1647,6 +1820,12 @@ def test_challenges_stage_walks_three_click_then_wait_pairs(
     one about to be clicked.  That is what the source does and it is preserved,
     so the wait targets are asserted against the preceding click's locator
     explicitly - a "corrected" pairing would pass an order-only check.
+
+    Each wait receives the page class's own upper-case constant, asserted by
+    identity: the Java awaits ``visibilityOf(employeePage.badgesBtn)`` on a
+    ``PageFactory`` proxy that re-locates per poll, so the port's
+    ``EC.visibility_of_element_located`` must be given the locator and do the
+    same, inside the 3 seconds ``:14`` allows.
     """
     match, probe = drive(resolve_step, monkeypatch, fake_context, PHRASE_CHALLENGES_STAGE)
     covers(match)
@@ -1673,6 +1852,12 @@ def test_challenges_stage_walks_three_click_then_wait_pairs(
         "element the line before it clicked"
     )
     assert [wait.timeout for wait in probe.waits] == [WAIT_TIMEOUT] * 3
+    assert_visibility_targets_are_page_locator_constants(
+        probe,
+        EmployeePage.BADGES_BTN,
+        EmployeePage.CHALLENGES_BTN,
+        EmployeePage.GOALS_HISTORY_BTN,
+    )
     assert probe.sleeps == []
     assert probe.config_reads == []
     assert_one_lookup_per_access(stub_driver, probe)
@@ -1824,7 +2009,7 @@ def test_employees_dashboard_navigates_signs_in_delays_then_opens_the_stage(
     )
     assert probe.sleeps == [SLEEP_SHORT]
     assert probe.waits == []
-    assert probe.config_reads == ["get_url"]
+    assert probe.config_reads == list(LOGIN_SITE_CONFIG_READS)
     assert_one_lookup_per_access(stub_driver, probe)
     assert stub_driver.count_of("find_element") == 4
 
@@ -1867,7 +2052,7 @@ def test_create_employee_delays_clicks_delays_waits_then_types_the_name(
         ("element.click", EmployeePage.SAVED_MESSAGE),
     )
     assert probe.sleeps == [SLEEP_SHORT, SLEEP_SHORT]
-    assert probe.waits == [WaitCall("title_is", TITLE_NEW, WAIT_TIMEOUT, False)]
+    assert probe.waits == [WaitCall("title_is", TITLE_NEW, WAIT_TIMEOUT)]
     assert probe.config_reads == [], (
         "EmployeeStage.java:66-74 reads no property; the title it waits on is "
         "the hard-coded 'New - Odoo'"
@@ -2019,7 +2204,7 @@ def test_listed_employees_waits_on_and_asserts_the_same_literal_title(
         ("wait", "title_is", TITLE_EMPLOYEES, WAIT_TIMEOUT),
         ("title",),
     )
-    assert probe.waits == [WaitCall("title_is", TITLE_EMPLOYEES, WAIT_TIMEOUT, False)]
+    assert probe.waits == [WaitCall("title_is", TITLE_EMPLOYEES, WAIT_TIMEOUT)]
     assert probe.config_reads == [], (
         "EmployeeStage.java:87 waits on the literal 'Employees - Odoo'; only "
         ":31 reads the EmplTitle property"
@@ -2091,7 +2276,7 @@ def test_edit_employee_walks_the_whole_twelve_statement_edit_flow(
         "EmployeeStage.java:91-105 builds no explicit wait; its four fixed "
         "delays are the whole of its synchronization"
     )
-    assert probe.config_reads == ["get_url"]
+    assert probe.config_reads == list(LOGIN_SITE_CONFIG_READS)
     assert stub_driver.calls_of("find_element").count(EmployeePage.NAME_EDIT) == 2, (
         "EmployeeStage.java:101-102 reach the name field twice, so the "
         "un-cached accessor must locate it twice"
@@ -2148,11 +2333,14 @@ def test_the_three_login_call_sites_each_perform_the_same_three_operations(
 ) -> None:
     """Pins ``EmployeeStage.java:25``, ``:61`` and ``:94`` as three separate sites.
 
-    Each navigates to the ``url`` property and then calls ``login()`` with no
-    arguments, and each ``login()`` performs the three operations of
-    ``EmployeeP.java:60-62`` in order through three separate lookups.  The
-    ``url`` read is counted here too: three reads at three call sites, which
-    must not be collapsed into one hoisted read.
+    Each navigates to the ``url`` property and then calls ``login()`` with the
+    ``username`` and ``password`` values it has just read, and each ``login()``
+    performs the three operations of ``EmployeeP.java:60-62`` in order through
+    three separate lookups.  The configuration reads are counted here too:
+    three per site, nine in all, because ``ConfigurationReader.getProperty`` is
+    called afresh at each Java line and a value hoisted to module level or
+    memoized in this module would bind whichever worker process imported it
+    first.
     """
     reads: list[str] = []
 
@@ -2175,7 +2363,7 @@ def test_the_three_login_call_sites_each_perform_the_same_three_operations(
             EmployeePage.LOGIN_BUTTON,
         )
 
-    assert reads == ["get_url"] * 3
+    assert reads == list(LOGIN_SITE_CONFIG_READS) * 3
 
 
 def test_configuration_keys_resolve_through_app_config_end_to_end(
@@ -2185,16 +2373,19 @@ def test_configuration_keys_resolve_through_app_config_end_to_end(
     fake_context: Any,
     stub_driver: Any,
 ) -> None:
-    """Pins the three key *names* - ``web.table.url``, ``url``, ``EmplTitle``.
+    """Pins the five key *names* this module reads, end to end.
 
-    The other configuration assertions in this module replace the accessors
-    with recorders, which proves *which accessor* a step calls.  This one
-    leaves the real accessors in place and installs values through
+    ``web.table.url``, ``url`` and ``EmplTitle``, plus the ``username`` and
+    ``password`` the sign-in steps pass to ``login()``.  The other
+    configuration assertions in this module replace the accessors with
+    recorders, which proves *which accessor* a step calls.  This one leaves the
+    real accessors in place and installs values through
     ``app.config.set_userdata`` - the behave-userdata channel AAP 0.4.1 puts
     ahead of the properties file - so it proves the keys themselves: swapping
     ``url`` for ``web.table.url`` anywhere in the chain lands the wrong value
-    on the driver, and the mixed-case ``EmplTitle`` of ``EmployeeStage.java:31``
-    must stay mixed case to resolve at all.
+    on the driver, the mixed-case ``EmplTitle`` of ``EmployeeStage.java:31``
+    must stay mixed case to resolve at all, and a credential read under a
+    mis-spelled key types ``None`` into the form instead of the value.
     """
     request.addfinalizer(lambda: config.set_userdata(None))
     config.set_userdata(USERDATA_VALUES)
@@ -2202,6 +2393,8 @@ def test_configuration_keys_resolve_through_app_config_end_to_end(
     assert config.get_web_table_url() == USERDATA_VALUES["web.table.url"]
     assert config.get_url() == USERDATA_VALUES["url"]
     assert config.get_empl_title() == USERDATA_VALUES["EmplTitle"]
+    assert config.get_username() == USERDATA_VALUES["username"]
+    assert config.get_password() == USERDATA_VALUES["password"]
 
     stub_driver.clear_calls()
     match, _ = drive(
@@ -2218,6 +2411,14 @@ def test_configuration_keys_resolve_through_app_config_end_to_end(
     covers(match)
 
     assert stub_driver.calls_of("get") == ((USERDATA_VALUES["url"],),)
+    assert stub_driver.calls_of("element.send_keys") == (
+        (EmployeePage.INPUT_LOGIN, USERDATA_VALUES["username"]),
+        (EmployeePage.INPUT_PASS, USERDATA_VALUES["password"]),
+    ), (
+        "the sign-in step must read the username and password properties at "
+        "its login() call site and pass them to the page object, which holds "
+        "neither value itself"
+    )
 
     stub_driver.clear_calls()
     stub_driver.title = TITLE_EMPLOYEES
@@ -2227,8 +2428,69 @@ def test_configuration_keys_resolve_through_app_config_end_to_end(
     covers(match)
 
     assert probe.waits == [
-        WaitCall("title_is", USERDATA_VALUES["EmplTitle"], WAIT_TIMEOUT, False)
+        WaitCall("title_is", USERDATA_VALUES["EmplTitle"], WAIT_TIMEOUT)
     ]
+
+
+@pytest.mark.parametrize(
+    ("phrase", "key"),
+    NAVIGATION_SITES,
+    ids=[f"{key}-{phrase}" for phrase, key in NAVIGATION_SITES],
+)
+@pytest.mark.parametrize(
+    "value",
+    [pytest.param(value, id=case) for case, value in HOSTILE_URL_VALUES],
+)
+def test_every_navigation_site_refuses_a_destination_outside_the_policy(
+    phrase: str,
+    key: str,
+    value: str,
+    request: pytest.FixtureRequest,
+    resolve_step: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_context: Any,
+    stub_driver: Any,
+) -> None:
+    """Pins the configured-destination policy at all four navigation sites.
+
+    Every site is driven, not a representative one: the class reads ``url`` at
+    three separate call sites and ``web.table.url`` at a fourth, so a policy
+    that held at the first navigation and not at the others would leave three
+    of them open.  Three of these steps sign in immediately after navigating
+    through ``EmployeeP.java:60-62``, which is why the assertion is that
+    **nothing** was recorded rather than merely that the navigation carried a
+    different value.
+
+    The real accessors are left in place - ``config_values={}`` installs no
+    recorder over them - and the value arrives through
+    ``app.config.set_userdata``, so what is exercised is the accessor's own
+    decision.  The unset-key path asserted elsewhere in this module is
+    untouched: ``None`` still reaches ``get()``.
+    """
+    request.addfinalizer(lambda: config.set_userdata(None))
+    config.set_userdata({**USERDATA_VALUES, key: value})
+
+    stub_driver.clear_calls()
+    match, probe = prepare(
+        resolve_step, monkeypatch, fake_context, phrase, config_values={}
+    )
+    covers(match)
+
+    with pytest.raises(ValueError) as excinfo:
+        match.run(fake_context)
+
+    assert timeline(stub_driver) == (), (
+        f"{phrase!r} acted on the browser with a refused destination: "
+        f"{stub_driver.calls}"
+    )
+    assert stub_driver.calls == []
+    assert probe.sleeps == []
+    assert probe.waits == []
+
+    message = str(excinfo.value)
+    assert key in message, "the message must name the key"
+    assert "not navigable" in message, "the raise is not the policy's"
+    assert value not in message, "the refused destination was reported back"
 
 
 def test_the_eight_fixed_delays_are_one_of_seven_seconds_and_seven_of_three(
@@ -2268,6 +2530,11 @@ def test_the_six_explicit_waits_all_carry_the_three_second_timeout(
     every timeout in the module is 3 - three ``titleIs`` waits and three
     ``visibilityOf`` waits, on the targets each line names.  The six other
     methods wait not at all.
+
+    The three visibility targets are re-checked by identity against the page
+    class, which is what makes "the targets each line names" a statement about
+    the locator the wait resolves rather than about a pair that merely compares
+    equal to it.
     """
     walked = walk_every_step(resolve_step, monkeypatch, fake_context)
     recorded = {
@@ -2282,19 +2549,32 @@ def test_the_six_explicit_waits_all_carry_the_three_second_timeout(
     assert [wait[0] for wait in every_wait].count("title_is") == 3
     assert [wait[0] for wait in every_wait].count("visible") == 3
 
+    assert_visibility_targets_are_page_locator_constants(
+        walked[PHRASE_CHALLENGES_STAGE][1],
+        EmployeePage.BADGES_BTN,
+        EmployeePage.CHALLENGES_BTN,
+        EmployeePage.GOALS_HISTORY_BTN,
+    )
+
+    for pattern, (_, probe, _) in walked.items():
+        if pattern != PHRASE_CHALLENGES_STAGE:
+            assert_visibility_targets_are_page_locator_constants(probe)
+
 
 def test_every_configuration_read_in_the_class_is_one_of_the_five(
     resolve_step: Any,
     monkeypatch: pytest.MonkeyPatch,
     fake_context: Any,
 ) -> None:
-    """Pins the five configuration reads over three keys, per step.
+    """Pins the eleven configuration reads over five keys, per step.
 
     ``web.table.url`` at ``:18``; ``url`` at ``:24``, ``:60`` and ``:93``;
-    ``EmplTitle`` at ``:31``.  The remaining seven methods read nothing, and
-    the accessors bound in the module namespace are exactly the three the port
-    is allowed - a fourth would mean the configuration surface had grown past
-    the six keys AAP 0.4.1 inventories.
+    ``EmplTitle`` at ``:31``; and ``username`` and ``password`` beside each of
+    those three ``url`` reads, at the ``login()`` call sites the page object no
+    longer reads for itself (SEC2-F17, AAP 0.4.2).  The remaining seven methods
+    read nothing, and the accessors bound in the module namespace are exactly
+    the five the port is allowed - a sixth would mean the configuration surface
+    had grown past the six keys AAP 0.4.1 inventories.
     """
     walked = walk_every_step(resolve_step, monkeypatch, fake_context)
     recorded = {
@@ -2303,8 +2583,10 @@ def test_every_configuration_read_in_the_class_is_one_of_the_five(
     every_read = [read for reads in recorded.values() for read in reads]
 
     assert recorded == CONFIG_READS_BY_PATTERN
-    assert len(every_read) == 5
+    assert len(every_read) == 11
     assert every_read.count("get_url") == 3
+    assert every_read.count("get_username") == 3
+    assert every_read.count("get_password") == 3
     assert every_read.count("get_web_table_url") == 1
     assert every_read.count("get_empl_title") == 1
 
@@ -2378,10 +2660,12 @@ PARITY_TESTS: Final[dict[str, tuple[str, ...]]] = {
     PHRASE_ORPHAN_LOGIN_PAGE: (
         "test_orphan_step_navigates_to_the_web_table_url",
         "test_orphan_step_passes_an_unset_url_through_unguarded",
+        "test_every_navigation_site_refuses_a_destination_outside_the_policy",
         "test_configuration_keys_resolve_through_app_config_end_to_end",
     ),
     PHRASE_DASHBOARD: (
         "test_dashboard_step_navigates_to_url_then_signs_in",
+        "test_every_navigation_site_refuses_a_destination_outside_the_policy",
         "test_the_three_login_call_sites_each_perform_the_same_three_operations",
         "test_configuration_keys_resolve_through_app_config_end_to_end",
     ),
@@ -2401,6 +2685,7 @@ PARITY_TESTS: Final[dict[str, tuple[str, ...]]] = {
     ),
     PHRASE_EMPLOYEES_DASHBOARD: (
         "test_employees_dashboard_navigates_signs_in_delays_then_opens_the_stage",
+        "test_every_navigation_site_refuses_a_destination_outside_the_policy",
         "test_the_three_login_call_sites_each_perform_the_same_three_operations",
     ),
     PATTERN_CREATE_EMPLOYEE: (
@@ -2418,6 +2703,7 @@ PARITY_TESTS: Final[dict[str, tuple[str, ...]]] = {
     ),
     PHRASE_EDIT_EMPLOYEE: (
         "test_edit_employee_walks_the_whole_twelve_statement_edit_flow",
+        "test_every_navigation_site_refuses_a_destination_outside_the_policy",
         "test_the_three_login_call_sites_each_perform_the_same_three_operations",
     ),
     PHRASE_EDITED_NAME: ("test_edited_name_step_clicks_and_checks_nothing",),

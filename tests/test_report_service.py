@@ -6,17 +6,25 @@ place it: AAP 0.3.3's *"one merged result set, four independent writers, none
 aware of the others"*, driven after the per-worker documents have been merged
 so that **every artifact has exactly one producer** (AAP 0.4.1, the concurrency
 note).  What this module gates is therefore not the content of any artifact -
-each writer's own test module owns that - but the fan-out's five observable
+each writer's own test module owns that - but the fan-out's six observable
 properties:
 
 * the **order** the four writers run in, which AAP 0.4.1's exit table made
   observable by giving a writer failure a row of its own;
 * **one invocation each**, which is what "exactly one producer" means in code;
 * the **identity** of the document all four receive, and its immutability;
+* the run's one **generation time**, resolved before the fan-out and carried in
+  that document, which is what makes the two human artifacts of one run report
+  the same instant instead of each writer's own render time;
 * what an **empty run** produces, which is the exit table's zero-scenario row;
 * what **survives a writer failure**, which is the exit table's writer-failure
   row: *"The artifacts written before the failure remain; the failing writer is
   named on stderr, and the run does not delete completed artifacts."*
+* the **publication boundary**: the claim on the build output the caller holds
+  is verified immediately before each writer, so a run that has lost it stops
+  instead of publishing into a workspace another run has taken over.  Area 11
+  covers it, and states there why the boundary is a *check* rather than an
+  all-or-nothing promotion of the four artifacts.
 
 Two facts about the module under test shape every test below, and both were
 measured against it rather than assumed.
@@ -53,8 +61,10 @@ import dataclasses
 import inspect
 import json
 import logging
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Final, NamedTuple
 
@@ -62,13 +72,23 @@ import pytest
 
 from app.reporting import (
     new_result_set,
+    pretty_reports,
     write_cucumber_json,
     write_html_report,
     write_pretty_reports,
     write_rerun_txt,
 )
+
+# Not from the barrel: ``app/reporting/__init__.py`` advertises the writers and
+# the schema's operations rather than its formatting helper, and the generation
+# stamp the fan-out resolves has to be held to that one format.  Read-only in
+# this module, like ``pretty_reports`` above, whose ``format_build_date`` is
+# called to derive what the report tree must show for a given instant.
+from app.reporting.events import format_timestamp
 from app.services import (
     WRITER_SEQUENCE,
+    PublicationBoundaryLost,
+    PublicationGuard,
     ReportOutcome,
     WriterResult,
     WriterSpec,
@@ -136,6 +156,30 @@ PLUGIN_DECLARATION_ORDER: Final[tuple[str, ...]] = (
     "rerun_txt",
     "pretty_reports",
 )
+
+#: The port's one timestamp shape: millisecond precision, three fractional
+#: digits always, and a literal ``Z`` - the JVM generator's
+#: ``yyyy-MM-dd'T'HH:mm:ss.SSSXXX`` applied in UTC, which
+#: ``app/reporting/events.py``'s ``format_timestamp`` produces.  Used both to
+#: judge a resolved stamp and to find the one timestamp an empty run's page
+#: carries.
+TIMESTAMP_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"
+)
+
+#: The same shape as a ``strptime`` format, for the round-trip that proves a
+#: resolved stamp is the format's own output and not merely pattern-shaped.
+#: ``%z`` accepts the literal ``Z`` as UTC.
+TIMESTAMP_STRPTIME_FORMAT: Final[str] = "%Y-%m-%dT%H:%M:%S.%f%z"
+
+#: A generation time a test pins through ``generated_at=``.  Deliberately not
+#: the sample document's own value, so that "the keyword wins" is observable.
+PINNED_GENERATED_AT: Final[str] = "2022-09-07T15:39:04.123Z"
+
+#: The label ``app/templates/artifact/metadata.html`` gives the generation-time
+#: row.  The row is rendered only when the value is non-empty, so its presence
+#: is half of what the cross-artifact test asserts.
+GENERATED_LABEL: Final[str] = "Report generated"
 
 #: Logger the module under test writes to - ``logging.getLogger(__name__)`` in
 #: its own source.  Named here because the failure tests assert on the record
@@ -420,13 +464,14 @@ def service_records(
 # =========================================================================== #
 # Source-scan helpers
 #
-# Four of this module's assertions are about the module's *text* rather than
+# Five of this module's assertions are about the module's *text* rather than
 # its behaviour, because they are prohibitions: a path literal that is not
 # there, an import that is not there, a rerun branch that is not there, a
-# second call site that is not there.  None of those can be observed from a
-# call, and all four are stated contracts - so they are read out of the source
-# with ast, never with a regular expression over raw text, which would match
-# inside the docstrings that legitimately discuss all four.
+# second call site that is not there, and a ``raise`` of the boundary error
+# that is not there.  None of those can be observed from a call, and all five
+# are stated contracts - so they are read out of the source with ast, never
+# with a regular expression over raw text, which would match inside the
+# docstrings that legitimately discuss all five.
 # =========================================================================== #
 
 
@@ -588,6 +633,32 @@ def _branch_identifiers(tree: ast.Module) -> frozenset[str]:
                 found.add(node.id)
             elif isinstance(node, ast.Attribute):
                 found.add(node.attr)
+
+    return frozenset(found)
+
+
+def _raised_names(tree: ast.Module) -> frozenset[str]:
+    """Every identifier appearing inside a ``raise`` statement of a module.
+
+    The exception's own class and any attribute path leading to it, which is
+    what proves an exception type is *constructed and carried* rather than
+    thrown: the boundary error reaches ``app/cli.py`` on
+    :attr:`app.services.ReportOutcome.error`, never up the stack.
+
+    :param tree: The parsed module.
+    :returns: The identifiers read out of every ``raise`` subtree; empty for a
+        module with no ``raise`` statement at all.
+    """
+    found: set[str] = set()
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Raise):
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Name):
+                found.add(inner.id)
+            elif isinstance(inner, ast.Attribute):
+                found.add(inner.attr)
 
     return frozenset(found)
 
@@ -803,6 +874,53 @@ class TestWriterSequence:
         )
         assert unresolvable.destination(tmp_artifact_root) is None
 
+    def test_writer_spec_names_its_artifact_by_a_relative_identifier(
+        self, tmp_artifact_root: Path
+    ) -> None:
+        """``artifact_id()`` is the relative spelling, from the paths table.
+
+        The identifier a **log record** calls the artifact by, as distinct from
+        :meth:`~app.services.WriterSpec.destination`, which is the absolute
+        path a caller acts on.  Both come from
+        :mod:`app.utils.paths` - the identifier from
+        :data:`~app.utils.paths.ARTIFACT_SPECS`, so this module still spells no
+        path and the two renderings of one artifact cannot drift apart.
+
+        It is independent of ``base`` by construction, which is the point: a
+        record must not vary with the workspace a run happened to execute in,
+        because an archived console log naming an absolute CI path discloses
+        topology rather than diagnosing anything (CWE-200/532).
+
+        Like ``destination()`` it is read while a failure is already being
+        reported, so an unrecognisable key degrades to the key itself - which
+        still names the artifact - instead of raising.
+        """
+        by_name = {spec.name: spec for spec in WRITER_SEQUENCE}
+
+        assert by_name["cucumber_json"].artifact_id() == (
+            paths.CUCUMBER_JSON_RELPATH
+        )
+        assert by_name["rerun_txt"].artifact_id() == paths.RERUN_TXT_RELPATH
+        assert by_name["html_report"].artifact_id() == (
+            paths.CUCUMBER_REPORTS_HTML_RELPATH
+        )
+        assert by_name["pretty_reports"].artifact_id() == (
+            paths.PRETTY_REPORTS_RELPATH
+        )
+
+        # No absolute component, whatever the base the writers are given.
+        for spec in WRITER_SEQUENCE:
+            identifier = spec.artifact_id()
+            assert not Path(identifier).is_absolute(), identifier
+            assert str(tmp_artifact_root) not in identifier, identifier
+
+        unresolvable = WriterSpec(
+            name="cucumber_json",
+            write=by_name["cucumber_json"].write,
+            artifact_key="no-such-artifact",
+        )
+        assert unresolvable.artifact_id() == "no-such-artifact"
+
     def test_barrel_re_exports_the_identical_sequence(self) -> None:
         """``app.services.WRITER_SEQUENCE`` is the defining module's own tuple.
 
@@ -931,18 +1049,23 @@ class TestFanOut:
             )
 
     def test_base_is_keyword_only_on_the_fan_out_itself(self) -> None:
-        """``generate_reports(result_set, *, base=None)``.
+        """``generate_reports(result_set, *, base=None, guard=None, generated_at=None)``.
 
-        The document is the fan-out's subject and ``base`` its one seam; making
-        it keyword-only keeps a call site from ever confusing the two.
+        The document is the fan-out's subject and the other three are its
+        seams and overrides - the directory the destinations resolve against,
+        the claim on the build output the publication is checked against, and
+        the generation time to report - so making all three keyword-only keeps
+        a call site from ever confusing them with the document, and giving each
+        a default keeps ``app/cli.py``'s call valid as written.
         """
         signature = inspect.signature(generate_reports)
         parameters = signature.parameters
 
-        assert list(parameters) == ["result_set", "base"]
+        assert list(parameters) == ["result_set", "base", "guard", "generated_at"]
         assert parameters["result_set"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
-        assert parameters["base"].kind is inspect.Parameter.KEYWORD_ONLY
-        assert parameters["base"].default is None
+        for name in ("base", "guard", "generated_at"):
+            assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+            assert parameters[name].default is None
 
     def test_writes_no_file_of_its_own(
         self, writers: WriterHarness, sample_result_set: Any, tmp_artifact_root: Path
@@ -1337,9 +1460,19 @@ class TestWriterFailure:
         fault or a model error need not mention a path of its own, so a record
         naming only the writer cannot be acted on.  It is resolved from the
         spec's ``artifact_key`` against the same ``base`` the writer was given
-        - so it is that writer's own destination - and the same value is
+        - so it is that writer's own destination - and that resolved path is
         carried onward on :attr:`~app.services.ReportOutcome.failed_path` for
         ``app/cli.py`` to name without deriving a path of its own.
+
+        What the **record** names it by is the relative identifier of the same
+        artifact, ``WriterSpec.artifact_id()``: ``target/cucumber-reports.html``
+        rather than an absolute path under this test's temporary root.  A
+        console log is archived and shared, so the absolute location of the
+        workspace a run executed in is disclosure and not diagnosis
+        (CWE-200/532), and the relative spelling is the one a reader acts on -
+        it is what ``README.md`` quotes and what the Jenkins publisher's
+        narrowed ``fileIncludePattern`` matches.  Both halves are asserted
+        here: the identifier is present, and no part of the absolute root is.
         """
         failure = WriterBroke("template fault")
         writers.install(fails={"html_report": failure})
@@ -1361,9 +1494,9 @@ class TestWriterFailure:
             record for record in errors if "html_report" in record.getMessage()
         ]
         assert naming, [record.getMessage() for record in errors]
-        assert str(expected_destination) in naming[0].getMessage(), (
-            naming[0].getMessage()
-        )
+        message = naming[0].getMessage()
+        assert paths.CUCUMBER_REPORTS_HTML_RELPATH in message, message
+        assert str(tmp_artifact_root) not in message, message
         assert naming[0].exc_info is not None, (
             "the failure was reported without its traceback"
         )
@@ -1384,10 +1517,9 @@ class TestWriterFailure:
         ``app/cli.py``'s ``_writer_failure_status`` emits the consequence,
         including ``"Not attempted after <writer> failed: ..."`` from
         :attr:`~app.services.ReportOutcome.skipped`, which
-        ``tests/test_cli.py`` asserts.  Naming them here as well - which this
-        module did until the duplication was reviewed - made one incident two
-        ERROR records under two logger names, inflating the error count a CI
-        console shows and leaving neither layer the account of it.
+        ``tests/test_cli.py`` asserts.  Naming them here as well would make one
+        incident two ERROR records under two logger names, inflating the error
+        count a CI console shows and leaving neither layer the account of it.
 
         So what is asserted is both halves of that rule: the names are on the
         outcome for the command line to read, and this module emitted exactly
@@ -1432,6 +1564,21 @@ class TestWriterFailure:
         assert [record.levelno for record in records] == [logging.INFO] * 4
         for name in EXPECTED_WRITER_NAMES:
             assert any(name in record.getMessage() for record in records), name
+
+        # Each progress record names its artifact by the relative identifier
+        # the paths module publishes, and none of them carries the absolute
+        # root the writers were pointed at - the same disclosure rule the
+        # failure record follows.
+        messages = [record.getMessage() for record in records]
+        for relpath in (
+            paths.CUCUMBER_JSON_RELPATH,
+            paths.RERUN_TXT_RELPATH,
+            paths.CUCUMBER_REPORTS_HTML_RELPATH,
+            paths.PRETTY_REPORTS_RELPATH,
+        ):
+            assert any(relpath in message for message in messages), relpath
+        for message in messages:
+            assert str(tmp_artifact_root) not in message, message
 
     @pytest.mark.parametrize(
         "failure",
@@ -1605,7 +1752,7 @@ class TestCallerBoundary:
         }, sorted(rerun_identifiers)
 
     def test_the_barrel_re_exports_the_whole_fan_out_surface(self) -> None:
-        """``app.services`` advertises the five names this module imports.
+        """``app.services`` advertises every name this module publishes.
 
         ``app/services/__init__.py`` calls itself the one import surface for
         ``app/cli.py`` and for this test module, so the barrel is the seam used
@@ -1620,6 +1767,8 @@ class TestCallerBoundary:
             "WriterSpec": WriterSpec,
             "WriterResult": WriterResult,
             "ReportOutcome": ReportOutcome,
+            "PublicationGuard": report_service.PublicationGuard,
+            "PublicationBoundaryLost": report_service.PublicationBoundaryLost,
         }
 
         for name, obj in expected.items():
@@ -1815,6 +1964,656 @@ class TestDeterminism:
 
         written = [str(path) for path in outcome.written]
         assert written != sorted(written)
+
+
+# =========================================================================== #
+# Area 11 - the publication boundary
+#
+# The four artifacts sit at fixed paths every run in a checkout shares, so two
+# runs publishing at once leave a workspace holding a mixture of both - this
+# run's JSON beside that run's HTML, each naming scenarios, step arguments and
+# screenshots from a different execution.  What prevents that is the claim
+# ``app/cli.py`` holds on the build output from before the clean step until
+# after this fan-out; what the fan-out adds is the *check*, made immediately
+# before each writer, so a run that has lost the claim stops instead of
+# writing into a workspace another run has taken over.
+#
+# Why a check and not an atomic promotion of the four, which is the shape a
+# reader might expect and must not "restore": AAP 0.4.1's exit table requires
+# the artifacts written before a failure to REMAIN - "the failing writer is
+# named on stderr, and the run does not delete completed artifacts" - so a
+# staged set promoted only on complete success would contradict the frozen
+# exit contract, because a stopped run would then publish nothing at all.
+# Per-artifact atomicity is the writers' own contract, and the two HTML
+# writers already replace their output in one indivisible step.  Nothing below
+# asserts all-or-nothing publication, and the retention test states the row it
+# would break.
+# =========================================================================== #
+
+
+class _ScriptedGuard:
+    """A publication guard that answers from a script and records every check.
+
+    The whole of :class:`app.services.PublicationGuard` is ``is_held()``, so a
+    double drives every branch of the boundary - and driving it from a
+    *script* is what makes "read once, immediately before each writer"
+    assertable rather than inferred: the answers are consumed one per check, so
+    a guard built with ``(True, True, False)`` is held for the first two
+    writers and gone for the third.
+
+    The real implementer is ``app.services.RunLock``, whose ``is_held()``
+    re-checks that its open descriptor still resolves from the lock file's
+    name; that behaviour belongs to ``tests/test_test_run_service.py`` and
+    nothing here depends on it.  The fan-out reads the claim *structurally*,
+    which is what lets it verify the boundary without importing the sibling
+    service AAP 0.4.2's dependency graph keeps it away from.
+    """
+
+    def __init__(
+        self,
+        answers: Sequence[bool] = (True,),
+        *,
+        witness: Callable[[], int] | None = None,
+    ) -> None:
+        """Build one scripted guard.
+
+        :param answers: The answers to give, one per check, in order.  The last
+            entry is repeated for every check beyond the script, so a
+            one-element script answers the same way for a whole fan-out.
+        :param witness: Called at each check, its value appended to
+            :attr:`witnessed` - the writer-call count in every use below, so
+            that *when* the claim was read is observable.
+        :raises AssertionError: If the script is empty, which would leave a
+            check with no answer to give.
+        """
+        assert answers, "a scripted guard needs at least one answer"
+        self._answers = tuple(answers)
+        self._witness = witness
+        self.calls = 0
+        self.witnessed: list[int] = []
+
+    def is_held(self) -> bool:
+        """Give the next scripted answer, recording that the claim was read.
+
+        :returns: This check's answer - the script's entry for it, or the
+            script's last entry once the script is exhausted.
+        """
+        if self._witness is not None:
+            self.witnessed.append(self._witness())
+        answer = self._answers[min(self.calls, len(self._answers) - 1)]
+        self.calls += 1
+        return answer
+
+
+class TestPublicationBoundary:
+    """The claim on the build output, verified before each writer publishes.
+
+    Two runs sharing a checkout publish to one set of fixed paths, so the
+    boundary is what keeps one run's reports - and the credentials, step
+    arguments and screenshots inside them - from being interleaved with
+    another's.  The fan-out's half of that is the check: it stops before the
+    next writer the moment the claim is gone.
+
+    **The set is deliberately not promoted atomically**, and no test here
+    asserts that it is: AAP 0.4.1's writer-failure row requires the artifacts
+    written before a stop to remain, and "the run does not delete completed
+    artifacts", so a staged set promoted only on complete success would leave a
+    stopped run with no artifacts at all and contradict that row.
+    """
+
+    def test_no_guard_publishes_every_artifact_exactly_as_before(
+        self, writers: WriterHarness, sample_result_set: Any, tmp_artifact_root: Path
+    ) -> None:
+        """``guard=None`` - the default, stated explicitly - changes nothing.
+
+        The parameter is a seam and not a mode: a caller that has established
+        exclusivity some other way, and every test in this module that is about
+        something else, passes no claim and gets the historical fan-out -
+        four writers, in order, and a successful outcome.
+        """
+        writers.install()
+
+        outcome = generate_reports(
+            sample_result_set, base=tmp_artifact_root, guard=None
+        )
+
+        assert writers.called_names == EXPECTED_WRITER_NAMES
+        assert outcome.ok is True
+        assert outcome.failed_writer is None
+        assert outcome.error is None
+        assert outcome.skipped == ()
+        assert len(outcome.written) == 4
+
+    def test_a_held_claim_publishes_all_four_and_is_read_around_every_writer(
+        self, writers: WriterHarness, sample_result_set: Any, tmp_artifact_root: Path
+    ) -> None:
+        """A claim held throughout costs five checks and stops nothing.
+
+        The count is the contract: one check per writer, so the boundary
+        cannot be read once at the start - which would let the claim lapse in
+        the middle of a publication - nor re-read inside a writer's own work,
+        where it would make the number of checks depend on the artifact; and
+        **one more after the last writer**, because the four pre-writer checks
+        cannot cover the interval during which the last writer ran, which is
+        the one interval a run would otherwise publish across without ever
+        looking again.  ``witness`` records the writer-call count at each
+        check, so the checks are pinned to their positions in the sequence:
+        ``[0, 1, 2, 3]`` before each writer and ``4`` after the last.
+        """
+        writers.install()
+        guard = _ScriptedGuard((True,), witness=lambda: len(writers.calls))
+
+        outcome = generate_reports(
+            sample_result_set, base=tmp_artifact_root, guard=guard
+        )
+
+        assert writers.called_names == EXPECTED_WRITER_NAMES
+        assert outcome.ok is True
+        assert outcome.boundary_lost is False
+        assert len(outcome.written) == 4
+        assert guard.calls == len(EXPECTED_WRITER_NAMES) + 1 == 5
+        assert guard.witnessed == [0, 1, 2, 3, 4]
+
+    def test_a_claim_lost_while_the_last_writer_ran_is_reported(
+        self, writers: WriterHarness, sample_result_set: Any, tmp_artifact_root: Path
+    ) -> None:
+        """Losing the claim during the final write is not reported as success.
+
+        The four artifacts are on disk and are **kept** - nothing in the
+        fan-out deletes an artifact - but the workspace they were written into
+        is no longer this run's, so the set cannot be vouched for as one run's
+        work.  That outcome names no writer, because none failed: it carries
+        :attr:`~app.services.ReportOutcome.boundary_lost`, which is what makes
+        :attr:`~app.services.ReportOutcome.ok` false and what ``app/cli.py``
+        turns into its artifact-failure class.
+        """
+        writers.install()
+        # Held for each of the four pre-writer checks, gone by the fifth.
+        guard = _ScriptedGuard((True, True, True, True, False))
+
+        outcome = generate_reports(
+            sample_result_set, base=tmp_artifact_root, guard=guard
+        )
+
+        assert writers.called_names == EXPECTED_WRITER_NAMES
+        assert outcome.boundary_lost is True
+        assert outcome.ok is False
+        assert outcome.failed_writer is None, "no writer failed, so none is named"
+        assert outcome.error is None
+        assert outcome.skipped == ()
+        assert len(outcome.written) == 4
+        assert guard.calls == 5
+
+    def test_a_claim_lost_before_the_first_writer_publishes_nothing(
+        self, writers: WriterHarness, sample_result_set: Any, tmp_artifact_root: Path
+    ) -> None:
+        """A claim already gone stops the fan-out with nothing on disk.
+
+        The four writers are the **genuine** entry points here, so a boundary
+        that failed to stop them would leave four real artifacts in the
+        temporary root; the empty directory is therefore evidence rather than a
+        restatement of the recorders' behaviour.  Nothing is deleted to reach
+        that state - nothing was written.
+
+        The outcome is a complete account for ``app/cli.py``: the writer that
+        did not run, the three never attempted, an empty ``written``, and the
+        destination the stopped writer was going to produce - resolved against
+        the same ``base`` the writer would have used.
+        """
+        writers.install(real=EXPECTED_WRITER_NAMES)
+        guard = _ScriptedGuard((False,), witness=lambda: len(writers.calls))
+
+        outcome = generate_reports(
+            sample_result_set, base=tmp_artifact_root, guard=guard
+        )
+
+        assert writers.called_names == ()
+        assert guard.calls == 1
+        assert guard.witnessed == [0]
+
+        assert outcome.ok is False
+        assert outcome.failed_writer == "cucumber_json"
+        assert outcome.skipped == ("rerun_txt", "html_report", "pretty_reports")
+        assert outcome.written == ()
+        assert outcome.results == ()
+        assert isinstance(outcome.error, PublicationBoundaryLost), outcome.error
+        assert outcome.failed_path == paths.cucumber_json_path(tmp_artifact_root)
+
+        assert list(tmp_artifact_root.iterdir()) == []
+        assert not paths.target_root(tmp_artifact_root).exists()
+
+    def test_a_claim_lost_part_way_keeps_the_artifacts_already_published(
+        self, writers: WriterHarness, sample_result_set: Any, tmp_artifact_root: Path
+    ) -> None:
+        """The retention row, over a boundary loss instead of a writer fault.
+
+        The first two writers are genuine, so ``cucumber.json`` and
+        ``rerun.txt`` are really on disk when the claim lapses; their bytes are
+        captured the instant each writer returned and compared against disk
+        after the fan-out returned, which is what proves the boundary path
+        neither rewrote nor removed them.  **This is the test an atomic
+        promotion would break**: AAP 0.4.1's writer-failure row keeps "the
+        artifacts written before the failure", so a staged set promoted only on
+        complete success would have to discard these two.
+
+        The stopped writer differs from a *failed* one in the record as well:
+        it gets no :class:`~app.services.WriterResult` at all, because it never
+        ran, while a writer that raised is recorded with its exception.
+        """
+        writers.install(real=("cucumber_json", "rerun_txt"))
+        guard = _ScriptedGuard(
+            (True, True, False), witness=lambda: len(writers.calls)
+        )
+
+        outcome = generate_reports(
+            sample_result_set, base=tmp_artifact_root, guard=guard
+        )
+
+        # Stopped before the third writer, and the fourth never reached.
+        assert writers.called_names == ("cucumber_json", "rerun_txt")
+        assert "html_report" not in writers.called_names
+        assert "pretty_reports" not in writers.called_names
+        assert guard.calls == 3
+        assert guard.witnessed == [0, 1, 2]
+
+        assert outcome.ok is False
+        assert outcome.failed_writer == "html_report"
+        assert outcome.skipped == ("pretty_reports",)
+        assert isinstance(outcome.error, PublicationBoundaryLost), outcome.error
+        assert outcome.failed_path == (
+            paths.cucumber_reports_html_path(tmp_artifact_root)
+        )
+
+        # Exactly the first two artifacts, in writer order, and no record for
+        # the writer that did not run.
+        json_path = paths.cucumber_json_path(tmp_artifact_root)
+        rerun_path = paths.rerun_txt_path(tmp_artifact_root)
+        assert outcome.written == (json_path, rerun_path)
+        assert tuple(result.name for result in outcome.results) == (
+            "cucumber_json",
+            "rerun_txt",
+        )
+        assert all(result.error is None for result in outcome.results)
+
+        # Still there afterwards, byte for byte what their writers left.
+        for path in outcome.written:
+            assert path.is_file(), f"{path} was removed when the claim lapsed"
+        assert writers.snapshots["cucumber_json"] == json_path.read_bytes()
+        assert writers.snapshots["rerun_txt"] == rerun_path.read_bytes()
+
+        # And nothing the two stopped writers would have produced.
+        assert not paths.cucumber_reports_html_path(tmp_artifact_root).exists()
+        assert not paths.pretty_reports_html_dir(tmp_artifact_root).exists()
+
+    def test_a_lost_claim_logs_one_error_naming_the_writer_and_destination(
+        self,
+        writers: WriterHarness,
+        sample_result_set: Any,
+        tmp_artifact_root: Path,
+        service_records: Callable[[], list[logging.LogRecord]],
+    ) -> None:
+        """One ``ERROR`` record, and no traceback on it.
+
+        ``app/logging_config.py`` routes ``WARNING`` and above to stderr, so
+        one ``ERROR`` record is how the operator learns the publication
+        stopped - and one is the count, because every other fact travels on the
+        outcome for ``app/cli.py`` to report exactly once.  The record names
+        the writer that did not run and the destination it was going to
+        produce; ``exc_info`` is absent because nothing was raised, and a
+        traceback of the check itself would point at this module rather than at
+        the run that took the workspace over.
+        """
+        writers.install(real=("cucumber_json",))
+        guard = _ScriptedGuard((True, False))
+
+        outcome = generate_reports(
+            sample_result_set, base=tmp_artifact_root, guard=guard
+        )
+        assert outcome.failed_writer == "rerun_txt"
+
+        expected_destination = paths.rerun_txt_path(tmp_artifact_root)
+        assert outcome.failed_path == expected_destination
+
+        errors = [
+            record
+            for record in service_records()
+            if record.levelno == logging.ERROR
+        ]
+        messages = [record.getMessage() for record in errors]
+        assert len(errors) == 1, messages
+        assert "rerun_txt" in messages[0], messages[0]
+        assert str(expected_destination) in messages[0], messages[0]
+        assert errors[0].exc_info is None, (
+            "a boundary check raises nothing, so it must carry no traceback"
+        )
+
+    def test_a_writer_that_raises_under_a_held_claim_reports_its_own_failure(
+        self, writers: WriterHarness, sample_result_set: Any, tmp_artifact_root: Path
+    ) -> None:
+        """A held claim leaves the writer-failure path exactly as it was.
+
+        The two causes of an artifact failure stay distinguishable **by type**,
+        which is what lets a consumer tell "this writer broke" from "another
+        run took the workspace": the writer's own exception is carried
+        unchanged and is not a
+        :exc:`~app.services.PublicationBoundaryLost`, and the failing writer -
+        unlike a stopped one - is recorded with its exception in ``results``.
+        """
+        failure = WriterBroke("template fault")
+        writers.install(fails={"html_report": failure})
+        guard = _ScriptedGuard((True,), witness=lambda: len(writers.calls))
+
+        outcome = generate_reports(
+            sample_result_set, base=tmp_artifact_root, guard=guard
+        )
+
+        assert outcome.ok is False
+        assert outcome.error is failure
+        assert isinstance(outcome.error, WriterBroke)
+        assert not isinstance(outcome.error, PublicationBoundaryLost)
+        assert outcome.failed_writer == "html_report"
+        assert outcome.skipped == ("pretty_reports",)
+        assert outcome.failed_path == (
+            paths.cucumber_reports_html_path(tmp_artifact_root)
+        )
+
+        assert tuple(result.name for result in outcome.results) == (
+            "cucumber_json",
+            "rerun_txt",
+            "html_report",
+        )
+        assert outcome.results[-1].error is failure
+
+        # Three writers attempted, so three checks - the claim is read before
+        # a writer and never after one has already failed.
+        assert guard.calls == 3
+        assert guard.witnessed == [0, 1, 2]
+
+
+class TestPublicationGuardContract:
+    """``PublicationGuard`` and ``PublicationBoundaryLost`` as types.
+
+    Both are part of the surface ``app/services/__init__.py`` advertises, and
+    both are typed the way they are so that ``app/cli.py`` can hand its run
+    lock over - and tell a lost boundary from a writer fault - without either
+    module importing the other (AAP 0.4.2).
+    """
+
+    def test_the_guard_is_a_runtime_checkable_structural_protocol(self) -> None:
+        """Anything with ``is_held`` is a guard; anything without one is not.
+
+        Structural and runtime-checkable is what carries the claim across the
+        dependency boundary: ``app.services.RunLock`` is never named by the
+        fan-out, and a two-line double is a guard on the same terms as the real
+        lock.  ``isinstance`` is the form that matters, since a caller may hold
+        any object at all; ``issubclass`` works too because the protocol
+        declares a method and no data member.
+        """
+
+        class Claim:
+            """A two-line stand-in for the command line's run lock."""
+
+            def is_held(self) -> bool:
+                """:returns: Always ``True``."""
+                return True
+
+        class NotAClaim:
+            """Lock-shaped, but answering a different question."""
+
+            def held(self) -> bool:
+                """:returns: Always ``True``."""
+                return True
+
+        assert isinstance(Claim(), PublicationGuard)
+        assert issubclass(Claim, PublicationGuard)
+        assert not isinstance(NotAClaim(), PublicationGuard)
+        assert not isinstance(object(), PublicationGuard)
+        assert isinstance(_ScriptedGuard(), PublicationGuard)
+
+    def test_the_boundary_error_is_a_runtime_error(self) -> None:
+        """``PublicationBoundaryLost`` is a real exception type, not a string.
+
+        A class rather than a message so that
+        :attr:`app.services.ReportOutcome.error` carries the same kind of value
+        whatever stopped the publication - and one that is *distinguishable*
+        from a writer's own failure even when that failure is itself a
+        :exc:`RuntimeError`, which is the property the writer-fault test in
+        :class:`TestPublicationBoundary` relies on: :class:`WriterBroke` is a
+        ``RuntimeError`` too, and neither class is a subclass of the other.
+        """
+        assert issubclass(PublicationBoundaryLost, RuntimeError)
+        assert issubclass(WriterBroke, RuntimeError)
+        assert not issubclass(WriterBroke, PublicationBoundaryLost)
+        assert not issubclass(PublicationBoundaryLost, WriterBroke)
+
+        error = PublicationBoundaryLost("the claim is gone")
+        assert isinstance(error, RuntimeError)
+        assert str(error) == "the claim is gone"
+
+    def test_the_boundary_error_is_carried_on_the_outcome_never_raised(
+        self,
+        writers: WriterHarness,
+        sample_result_set: Any,
+        tmp_artifact_root: Path,
+        service_source: ast.Module,
+    ) -> None:
+        """A lost claim returns an outcome; it never propagates.
+
+        ``app/cli.py`` owns every exit status, so a boundary loss has to reach
+        it as a value rather than as a traceback out of the fan-out - and this
+        test needs no ``pytest.raises`` to say so: a raise would fail it at the
+        call.  The textual half is the stronger statement of the same rule: the
+        module constructs the class and never names it in a ``raise``
+        statement, asserted over the parsed source because an absence cannot be
+        observed from a call.
+        """
+        writers.install()
+        guard = _ScriptedGuard((False,))
+
+        outcome = generate_reports(
+            sample_result_set, base=tmp_artifact_root, guard=guard
+        )
+
+        assert isinstance(outcome, ReportOutcome)
+        assert isinstance(outcome.error, PublicationBoundaryLost), outcome.error
+        assert outcome.failed_writer == EXPECTED_WRITER_NAMES[0]
+        assert outcome.ok is False
+
+        identifiers = _identifiers(service_source)
+        assert "PublicationBoundaryLost" in identifiers
+        assert "PublicationBoundaryLost" not in _raised_names(service_source)
+
+# Area 12 - the run's one generation time
+#
+# A run has one generation time and the fan-out is where it is resolved: the
+# last point at which the four artifacts are still one thing.  Two properties
+# are asserted here, and the second is why the first matters.
+#
+# *One stamp, one object.*  The document either already carries the stamp - the
+# collector writes it at close and the merge keeps the latest - or is stamped
+# once here and handed on as a single shallow copy, so the identity contract of
+# Area 2 holds either way and the caller's own document is never written to.
+#
+# *One document, one answer.*  While each HTML writer read its own clock for a
+# document that carried no stamp, an empty run put a generation time on
+# ``target/cucumber-reports.html`` and left the report tree's Date cell empty,
+# and the value changed on every render.  The cross-artifact test below drives
+# the real writers and compares the two human artifacts against each other,
+# which is the only place that disagreement was ever observable.
+# =========================================================================== #
+
+
+class TestGenerationStamp:
+    """One ``generated_at`` per run, resolved before the fan-out."""
+
+    def test_a_stampless_document_is_stamped_once_for_all_four_writers(
+        self, writers: WriterHarness, tmp_artifact_root: Path
+    ) -> None:
+        """One instant, in one object, reaching all four writers.
+
+        ``new_result_set()`` carries ``generated_at`` as ``None`` - the
+        empty-run shape, where nothing was selected and so nothing was ever
+        stamped.  The fan-out resolves the stamp once: a value per writer would
+        be four instants in one run's artifacts, and a copy per writer would
+        reopen the identity contract Area 2 pins.
+        """
+        writers.install()
+        document = new_result_set()
+
+        generate_reports(document, base=tmp_artifact_root)
+
+        assert len(writers.calls) == len(EXPECTED_WRITER_NAMES)
+        first = writers.calls[0].result_set
+        for call in writers.calls:
+            assert call.result_set is first, (
+                f"{call.name} received a different document object"
+            )
+
+        stamps = {call.result_set["generated_at"] for call in writers.calls}
+        assert len(stamps) == 1, f"the writers saw several instants: {stamps}"
+        stamp = stamps.pop()
+        assert isinstance(stamp, str)
+        assert stamp
+
+    def test_the_resolved_stamp_is_the_projects_one_timestamp_format(
+        self, writers: WriterHarness, tmp_artifact_root: Path
+    ) -> None:
+        """The stamp is indistinguishable from a result-backed one.
+
+        ``app/reporting/events.py``'s ``format_timestamp`` is the port's single
+        timestamp format - millisecond precision and a literal ``Z``, the JVM
+        generator's ``yyyy-MM-dd'T'HH:mm:ss.SSSXXX`` in UTC - so a stamp
+        resolved by the fan-out must round-trip through it unchanged, or an
+        artifact would display a generation time in a shape no other timestamp
+        on it uses.
+        """
+        writers.install()
+
+        generate_reports(new_result_set(), base=tmp_artifact_root)
+
+        stamp = writers.call_for("cucumber_json").result_set["generated_at"]
+        assert TIMESTAMP_PATTERN.fullmatch(stamp), stamp
+        parsed = datetime.strptime(stamp, TIMESTAMP_STRPTIME_FORMAT)
+        assert format_timestamp(parsed) == stamp
+
+    def test_stamping_leaves_the_callers_own_document_untouched(
+        self, writers: WriterHarness, tmp_artifact_root: Path
+    ) -> None:
+        """The stamp goes on a copy, never on the caller's object.
+
+        The fan-out documents its input as read-only for a reason Area 3 states
+        in full - the same object reaches every writer, so a write to it would
+        corrupt the input of each writer still to run - and a stamp is a write
+        like any other.  Deep-compared against a deep copy taken beforehand, so
+        a stamp landing anywhere in the document is caught, not only at its top
+        level.
+        """
+        writers.install()
+        document = new_result_set()
+        expected = copy.deepcopy(document)
+
+        generate_reports(document, base=tmp_artifact_root)
+
+        assert document == expected
+        assert document["generated_at"] is None
+        # The writers did see a stamp; it was simply not this object's.
+        assert writers.call_for("html_report").result_set["generated_at"]
+        assert writers.call_for("html_report").result_set is not document
+
+    def test_a_document_that_carries_a_stamp_is_passed_through_by_identity(
+        self, writers: WriterHarness, sample_result_set: Any, tmp_artifact_root: Path
+    ) -> None:
+        """The normal case: the run's own stamp, and the caller's own object.
+
+        ``tests/fixtures/sample_results.json`` carries ``generated_at`` the way
+        a merged document from a real run does, so nothing is resolved and
+        nothing is copied - which is what keeps AAP 0.3.3's "one merged result
+        set" literally one object here.
+        """
+        writers.install()
+        recorded = sample_result_set["generated_at"]
+        assert recorded, "the fixture must carry a generation stamp"
+
+        generate_reports(sample_result_set, base=tmp_artifact_root)
+
+        for call in writers.calls:
+            assert call.result_set is sample_result_set, (
+                f"{call.name} received a copy of a document that needed none"
+            )
+            assert call.result_set["generated_at"] == recorded
+
+    def test_the_explicit_keyword_pins_the_value_for_every_writer(
+        self, writers: WriterHarness, sample_result_set: Any, tmp_artifact_root: Path
+    ) -> None:
+        """``generated_at=`` wins over the document, on one shared copy.
+
+        The override exists so a caller that holds the instant - a test, or a
+        tool re-rendering a stored document against a known time - can pin what
+        every artifact of the fan-out reports, without any writer being told
+        anything: the value travels in the document.
+        """
+        writers.install()
+        recorded = sample_result_set["generated_at"]
+        assert recorded != PINNED_GENERATED_AT
+
+        generate_reports(
+            sample_result_set,
+            base=tmp_artifact_root,
+            generated_at=PINNED_GENERATED_AT,
+        )
+
+        first = writers.calls[0].result_set
+        for call in writers.calls:
+            assert call.result_set is first
+            assert call.result_set["generated_at"] == PINNED_GENERATED_AT
+        assert first is not sample_result_set
+        assert sample_result_set["generated_at"] == recorded
+
+    def test_one_stampless_document_reports_one_time_in_both_human_artifacts(
+        self, tmp_artifact_root: Path
+    ) -> None:
+        """The property the fan-out's stamp exists for, over the real writers.
+
+        An empty run is the case that exposed the defect: with no stamp in the
+        document, the self-contained page invented its render time while the
+        report tree - whose Date cell is deliberately result-backed and has no
+        clock behind it - stayed empty, so one document described itself two
+        ways.  The stamp is recovered from the page rather than pinned, because
+        what is under test is the value the fan-out resolved rather than one
+        this test chose: it is read from the descriptor row that displays it,
+        the first timestamp after that row's label, so the assertion is about
+        the instant the page actually reports.
+
+        ``app.reporting.pretty_reports.format_build_date`` is read here to
+        derive what the tree must show for that same stamp: the two artifacts
+        present the instant differently - ISO on the page, the reference's
+        ``07 Sep 2022, 15:39`` shape in the tree - so agreement is asserted
+        through the tree's own formatter rather than by looking for one string
+        in both files.
+        """
+        outcome = generate_reports(new_result_set(), base=tmp_artifact_root)
+        assert outcome.ok, outcome.error
+
+        page = paths.cucumber_reports_html_path(tmp_artifact_root).read_text(
+            encoding="utf-8"
+        )
+        labelled = page.find(GENERATED_LABEL)
+        assert labelled != -1, "the page states no generation time at all"
+        found = TIMESTAMP_PATTERN.search(page, labelled)
+        assert found is not None, "the generation-time row carries no timestamp"
+        stamp = found.group()
+
+        expected_tree_date = pretty_reports.format_build_date(
+            {"generated_at": stamp}
+        )
+        assert expected_tree_date, "the tree's formatter must render the stamp"
+
+        index = paths.pretty_reports_index_path(tmp_artifact_root).read_text(
+            encoding="utf-8"
+        )
+        assert expected_tree_date in index, (
+            f"the report tree omits the run's generation time {stamp}"
+        )
 
 
 # =========================================================================== #

@@ -1,16 +1,7 @@
-# Test-only dependencies - Testinium-QA (Python 3.14 port)
-# Exact pins per technical specification 0.5.1.
-# This manifest chains no other manifest; it stands alone. Its consumers
-# (scripts/run_tests.sh, scripts/run_tests.ps1 and the Makefile) install it
-# together with requirements.txt in a single pip invocation.
-
-# Unit-test runner for the port's own suite under tests/ - replaces junit:junit.
+# Test-only pins for the port's own suite, exact per specification 0.5.1; this
+# manifest chains no other manifest.
 pytest==9.1.1
 
-# Coverage measurement for the four per-package coverage gates: app/utils 90,
-# app/pages 85, app/automation 80, app/reporting 80. The Makefile `coverage`
-# target is their canonical declaration, and both runner scripts apply the
-# same four scoped commands ahead of the browser run - CI must not depend on
-# make being installed - so this pin is required by the pipeline and not only
-# by a developer command.
+# pytest-cov backs the four scoped coverage gates (app/utils 90, app/pages 85,
+# app/automation 80, app/reporting 80), which CI runs, not only a developer.
 pytest-cov==7.0.0

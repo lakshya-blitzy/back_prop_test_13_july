@@ -1,73 +1,29 @@
 """Application-level HTTP error handlers for the read-only artifact viewer.
 
-Two handlers, one entry point, and no capability of its own.  This module
-answers a request the viewer cannot serve - status 404 - and a request that
-broke while being served - status 500 - and it does nothing else.
-
-Provenance
-----------
-This file has no counterpart in the Java implementation the project ports.
-AAP 0.4.1 maps it accordingly: *"``app/errors.py``, ``app/logging_config.py``
-| CREATE | -- | No source: handlers for the added HTTP surface"*.  The whole
-HTTP surface is an addition rather than preserved behaviour - deviation 12 of
-the AAP's inventory, authorized by its Conflict 3, which resolves the clash
-between a request mandating a Flask application and a specification stating
-the system has no traditional application UI by holding Flask *"to the minimum
-it compels - a read-only viewer over the artifacts a run already produces"*.
-Nothing beyond that minimum belongs here, which is why there is no error
-taxonomy below: no 400, 403, 405 or 503 handler, no problem-details envelope,
-no error identifier, and no monitoring hook.
-
-The public surface
-------------------
-:func:`register_error_handlers` and nothing else.  It is called from
-``create_app()`` in ``app/__init__.py`` and from nowhere else: AAP 0.4.2 makes
-that factory the sole registration point for the blueprint and the
-command-line surface, and keeping handler registration behind one function
-called from the same place upholds that discipline instead of working around
-it.
-
-The direction of dependency is one-way and deliberate.  This module defines no
-route, imports no blueprint, and is imported by no view.  ``app/web/routes.py``
-raises or aborts; the factory wires both sides; the two never reference each
-other.
+Two handlers and one entry point: 404 for a request the viewer cannot serve,
+500 for a request that broke while being served, and nothing else.
+:func:`register_error_handlers` is the whole public surface, called from
+``create_app()`` in ``app/__init__.py``, which AAP 0.4.2 makes the sole place
+the viewer is wired together.  The dependency runs one way: this module
+defines no route, imports no blueprint and is imported by no view.  There is
+no wider taxonomy - no 400, 403, 405 or 503 handler, no problem-details
+envelope, no error identifier, no monitoring hook - because the HTTP surface
+is held to the read-only minimum (AAP deviation 12, under its Conflict 3).
 
 One response for every cause
 ----------------------------
-Most 404s this handler serves are not a mistyped URL.  They are the
-data-availability rule AAP 0.3.1 states once for all four report routes: when
-the results artifact a run writes is absent, unreadable or unparseable, the
-route answers 404, and it answers *"the same response for all three causes,
-because a run has not produced usable results and the distinction is not the
-viewer's to make."*  That artifact is deliberately not named anywhere in this
-file - ``app/utils/paths.py`` owns every artifact path in the port, and a
-handler that discloses none of them has no use for one.
-
-That collapse is the single most important behaviour in this file, and it is
-counter-intuitive: a good error handler usually says which thing went wrong.
-Here it must not.  The response carries no cause, no code and no diagnostic
-detail, so the three causes are indistinguishable from each other and from the
-remaining causes the same status covers:
-
-* an out-of-range feature index on the feature route;
-* either index out of range on the scenario route;
-* on the artifact route - a name outside the allowlist, an allowlisted name
-  with nothing behind it, a directory that is not the report tree, a path that
-  resolves outside the artifact root, and any worker-intermediates path, which
-  must never be reachable.
-
-Ten causes, one response.  A rejected traversal or worker-intermediates path
-is answered with a plain 404 rather than a 403, and the response never echoes
-the rejected name and never carries a filesystem path: reflecting either would
-confirm the layout to a prober and would separate a probe from an honest
-mistake.  Diagnosis lives in the process log - the rejecting route logs the
-rejection it detected, and this module logs a cause-neutral line of its own -
-never in the body.
-
-Byte-identity across the ten causes is a property of the rendered pages
-themselves, which carry no dynamic content whatsoever, and of the messages
-below, which are constants.  Nothing here consults the request in order to be
-helpful, and nothing may start to.
+Most 404s here are not a mistyped URL.  AAP 0.3.1 gives all four report
+routes one data-availability rule - an absent, unreadable or unparseable
+results artifact answers 404, *"the same response for all three causes"* - to
+which the index routes add an out-of-range feature or scenario index, and the
+artifact route adds a name off the allowlist, an allowlisted name with nothing
+behind it, a directory, a path resolving outside the artifact root, and any
+worker-intermediates path.  Ten causes, one response: no cause, code or
+diagnostic detail reaches the body, a rejected traversal is answered 404
+rather than 403, and neither the rejected name nor any filesystem path is
+echoed, so a probe cannot be told from an honest mistake.  Nothing here
+consults the request in order to be helpful; diagnosis lives in the log, where
+the rejecting route records what it detected.
 
 Content negotiation
 -------------------
@@ -93,6 +49,25 @@ The JSON body is a small object carrying the same cause-neutral message and
 the status code.  It is not a problem-details document; RFC 7807 is beyond the
 minimum Conflict 3 compels.
 
+One cache policy, on every body this module renders
+---------------------------------------------------
+An error body is not neutral in what it discloses to a cache.  A 404 rendered
+here is most often the data-availability answer for a run whose artifacts have
+just been removed, and the 500 page is served for a request that broke while
+rendering run evidence, so neither may be kept by a browser or a private
+intermediary after the run it describes is gone (CWE-525).  Every response
+built below therefore carries ``Cache-Control: no-store, private, max-age=0``
+and the HTTP/1.0 ``Pragma: no-cache``, on the JSON body, the HTML page and the
+plain-text fallback alike.
+
+The policy is declared here as a local constant rather than imported from
+``app/web/routes.py``, which states the same one for its own responses, and for
+exactly the reason :data:`JSON_ENDPOINTS` is a literal: this module must not
+import the blueprint or its view module.  The route module's hook cannot cover
+these bodies anyway - an unmatched URL matches no blueprint, so no
+blueprint-level hook ever runs for it - which is why the statement exists twice
+and must stay identical in both places.
+
 The internal-error handler
 --------------------------
 The response says that the request could not be completed and that the problem
@@ -103,10 +78,13 @@ read it and a caller cannot.
 
 Logging is acquired from the standard library - ``logging.getLogger(__name__)``
 - and ``app/logging_config.py`` is deliberately not imported: that module
-installs handlers and is called only by the two process entry points, and
-every other module in the port acquires its logger directly.  Its handler
-split sends WARNING and above to the error stream, so the traceback this
-module records lands there without this module knowing anything about streams.
+installs handlers, is called once per process by that process's own entry
+point - for this module's purposes, ``create_app()`` - and every other module
+in the port acquires its logger directly.  Its handler split sends WARNING and
+above to the error stream, so the traceback this module records lands there
+without this module knowing anything about streams, and the sanitizing
+formatter on that handler bounds and renders the traceback safely without this
+module preparing it.
 
 What either handler's record says about the request is bounded too: the
 method, the path with its query string removed, and the matched endpoint - and
@@ -173,9 +151,13 @@ implements them faithfully:
    ``app.pages``, ``app.automation`` or ``app.logging_config`` import, no
    ``selenium``, no ``behave``, and no path literal naming the output
    directory.
-9. **Coverage.**  This module sits outside the four gated packages, so no
-   numeric threshold applies to it; both handlers are still covered on both
-   negotiation branches.
+9. **Cache policy.**  Every 404 and 500 answered here - JSON, HTML and the
+   plain-text fallback - carries ``Cache-Control: no-store, private,
+   max-age=0`` and ``Pragma: no-cache``, including for an unmatched URL, which
+   no blueprint hook can reach.
+10. **Coverage.**  This module sits outside the four gated packages, so no
+    numeric threshold applies to it; both handlers are still covered on both
+    negotiation branches.
 """
 
 from __future__ import annotations
@@ -186,23 +168,12 @@ from typing import Final
 
 from flask import Flask, Response, jsonify, render_template, request
 
-# The published surface is the registration function alone.  The constants
-# below are documented and stable enough for a test to read, but they are not
-# part of what another module may rely on: the factory calls one function.
 __all__ = ["register_error_handlers"]
 
-#: Module logger, acquired from the standard library exactly as every other
-#: module in the port does.  ``app/logging_config.py`` installs the handlers
-#: for the whole ``app`` hierarchy and is not imported here; before it runs,
-#: the standard library's own last-resort handler still carries WARNING and
-#: above to the error stream, so nothing this module logs is ever lost.
 logger = logging.getLogger(__name__)
 
-#: The not-found page.  A Jinja loader name, resolved against the application
-#: package's template directory - not a filesystem path.
 NOT_FOUND_TEMPLATE: Final[str] = "errors/404.html"
 
-#: The internal-error page, under the same loader.
 INTERNAL_ERROR_TEMPLATE: Final[str] = "errors/500.html"
 
 #: Endpoints whose successful response is JSON, and whose errors therefore are
@@ -212,28 +183,39 @@ INTERNAL_ERROR_TEMPLATE: Final[str] = "errors/500.html"
 #: fixes the same names and calls them a contract rather than a preference.
 JSON_ENDPOINTS: Final[frozenset[str]] = frozenset({"web.reports_summary"})
 
-#: The one thing a 404 says.  Cause-neutral by requirement: it names none of
-#: the ten causes, echoes nothing the caller sent, and carries no path.  The
-#: HTML wording lives in the template; this is the JSON and plain-text body,
-#: and the two agree in substance.
 NOT_FOUND_MESSAGE: Final[str] = (
     "Not found. This viewer renders only the report artifacts a completed "
     "test run has already written, and it has nothing to show for this "
     "request. Runs are started from the command line with run-tests."
 )
 
-#: The one thing a 500 says.  It states that a record was made, and names no
-#: log, no destination and no detail, because where the record went is
-#: operator knowledge rather than a caller's business.
 INTERNAL_ERROR_MESSAGE: Final[str] = (
     "Internal server error. The problem has been recorded in the server log, "
     "and no details of it are reported here."
 )
 
-#: Media types the negotiation weighs, and nothing else.
 _JSON_MIMETYPE: Final[str] = "application/json"
 _HTML_MIMETYPE: Final[str] = "text/html"
 _TEXT_MIMETYPE: Final[str] = "text/plain"
+
+#: What every body this module renders tells a cache.  ``no-store`` rather
+#: than ``no-cache``: RFC 9111 makes ``no-cache`` a revalidation requirement,
+#: so the representation is still written to disk and merely checked before
+#: reuse, while ``no-store`` forbids keeping it at all.  ``private`` bars a
+#: shared cache from holding it even where a proxy ignores the first
+#: directive, and ``max-age=0`` is the same statement for a cache that
+#: predates them both.  ``app/web/routes.py`` declares this policy separately
+#: for its own responses, for the reason :data:`JSON_ENDPOINTS` is a literal:
+#: this module imports nothing from ``app.web``.
+_CACHE_CONTROL_POLICY: Final[str] = "no-store, private, max-age=0"
+
+#: The HTTP/1.0 spelling, for an intermediary that understands nothing newer.
+_PRAGMA_POLICY: Final[str] = "no-cache"
+
+#: The two header names, written once so the three body builders below cannot
+#: spell either of them differently.
+_CACHE_CONTROL_HEADER: Final[str] = "Cache-Control"
+_PRAGMA_HEADER: Final[str] = "Pragma"
 
 #: Log line for a routine not-found.  DEBUG rather than WARNING on purpose: a
 #: 404 is the viewer's ordinary answer before a run has produced results, and
@@ -265,9 +247,6 @@ _INTERNAL_ERROR_LOG_MESSAGE: Final[str] = (
     "status 500"
 )
 
-#: Log line for the guarded render's own failure.  Distinct from the two
-#: above, so a template or URL-building fault is not mistaken for the error
-#: that brought the handler here in the first place.
 _RENDER_FAILURE_LOG_MESSAGE: Final[str] = (
     "Rendering the error page %r failed; answering status %d as plain text"
 )
@@ -297,7 +276,6 @@ def _wants_json() -> bool:
 
     accepted = request.accept_mimetypes
     if not accepted:
-        # No Accept header at all: HTML is the viewer's default surface.
         return False
 
     best = accepted.best_match((_JSON_MIMETYPE, _HTML_MIMETYPE))
@@ -305,6 +283,29 @@ def _wants_json() -> bool:
         best == _JSON_MIMETYPE
         and accepted[_JSON_MIMETYPE] > accepted[_HTML_MIMETYPE]
     )
+
+
+def _no_store(response: Response) -> Response:
+    """Apply the no-store policy to one error body.
+
+    Every response this module answers with goes through here, so the policy
+    holds for all three shapes - JSON, the rendered page, and the plain-text
+    fallback a failed render produces - and cannot be forgotten by one of
+    them.
+
+    Args:
+        response: The response about to be returned to the framework.
+
+    Returns:
+        The same response, carrying the policy.  Assigned rather than
+        appended, so a value the framework may already have set is replaced
+        instead of joined - a response advertising both would leave the weaker
+        directive in force for a cache that read it first.
+
+    """
+    response.headers[_CACHE_CONTROL_HEADER] = _CACHE_CONTROL_POLICY
+    response.headers[_PRAGMA_HEADER] = _PRAGMA_POLICY
+    return response
 
 
 def _json_response(status: HTTPStatus, message: str) -> Response:
@@ -315,12 +316,13 @@ def _json_response(status: HTTPStatus, message: str) -> Response:
         message: The cause-neutral message for this status.
 
     Returns:
-        A JSON response whose status code and ``status`` member agree.
+        A JSON response whose status code and ``status`` member agree,
+        carrying the no-store policy.
 
     """
     response = jsonify(error=message, status=int(status))
     response.status_code = int(status)
-    return response
+    return _no_store(response)
 
 
 def _plain_response(status: HTTPStatus, message: str) -> Response:
@@ -331,13 +333,16 @@ def _plain_response(status: HTTPStatus, message: str) -> Response:
         message: The cause-neutral message for this status.
 
     Returns:
-        A ``text/plain`` response disclosing nothing about why the page failed.
+        A ``text/plain`` response disclosing nothing about why the page
+        failed, carrying the no-store policy.
 
     """
-    return Response(
-        f"{message}\n",
-        status=int(status),
-        mimetype=_TEXT_MIMETYPE,
+    return _no_store(
+        Response(
+            f"{message}\n",
+            status=int(status),
+            mimetype=_TEXT_MIMETYPE,
+        )
     )
 
 
@@ -363,19 +368,19 @@ def _html_response(template: str, status: HTTPStatus, message: str) -> Response:
 
     Returns:
         The rendered page, or the plain-text equivalent at the same status.
+        Either way the response carries the no-store policy.
 
     """
     try:
         body = render_template(template)
-    # A handler must not raise, whatever the page does; see the docstring. The
-    # suppression covers the deliberate breadth of the catch and, as in
-    # app/web/__init__.py, its own possible unusedness under a linter
-    # configuration that selects neither rule.
+    # Broad on purpose: any ordinary fault in a page must degrade to the
+    # plain-text body at the same status rather than escape a handler.
+    # ``KeyboardInterrupt`` and ``SystemExit`` are not caught here.
     except Exception:  # noqa: BLE001,RUF100
         logger.exception(_RENDER_FAILURE_LOG_MESSAGE, template, int(status))
         return _plain_response(status, message)
 
-    return Response(body, status=int(status), mimetype=_HTML_MIMETYPE)
+    return _no_store(Response(body, status=int(status), mimetype=_HTML_MIMETYPE))
 
 
 def _exception_context(error: object) -> BaseException | bool:
@@ -479,21 +484,16 @@ def register_error_handlers(flask_app: Flask) -> None:
     """Attach the not-found and internal-error handlers to an application.
 
     The one entry point of this module, called from ``create_app()`` in
-    ``app/__init__.py`` and from nowhere else, so that the application factory
-    stays the single place the viewer is wired together.
+    ``app/__init__.py`` so that the factory stays the single place the viewer
+    is wired together.  Only these two statuses are registered: every route is
+    read-only and takes no input beyond two integer path segments and an
+    artifact name, so the surface has no bad-request, forbidden or
+    method-not-allowed condition of its own to describe.
 
-    Only these two statuses are registered.  Every route is read-only and
-    takes no input beyond two integer path segments and an artifact name, so
-    the surface has no bad-request, forbidden or method-not-allowed condition
-    of its own to describe, and inventing handlers for them would grow an
-    error taxonomy the system does not have.
-
-    Registration is per application and holds no module-level state: the
-    handlers are plain module functions, so calling this on a second
-    application registers the same two functions there without either
-    application observing the other.  Calling it twice on one application is
-    equally harmless - the second registration replaces the first with the
-    identical function.
+    Registration holds no module-level state - the handlers are plain module
+    functions - so a second application gets the same two functions without
+    either application observing the other, and calling this twice on one
+    application replaces each registration with the identical function.
 
     Args:
         flask_app: The application to attach the handlers to.

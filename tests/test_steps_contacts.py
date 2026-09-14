@@ -1,104 +1,46 @@
 r"""Behavioural parity tests for ``features/steps/contacts_steps.py``.
 
-The authority for every expectation below is the Java source at pinned
-revision ``47e9d697e4a9a85da889f94a846fdf47af28a240``, which AAP 0.2.1 holds
-REFERENCE and never modifies:
-``src/main/java/com/testinium/step_definitions/Contacts.java`` (105 lines, 14
-live step definitions) and its page object
-``src/main/java/com/testinium/pages/ContactsP.java`` (65 lines, 16
-``@FindBy`` fields).  Nothing here is derived from the Python implementation:
-each table states the Java line it pins, so a port that drifts from the source
-fails even when it stays internally consistent.
+Authority: ``step_definitions/Contacts.java`` (105 lines; fourteen live
+definitions annotated between ``:17`` and ``:101``, plus the commented-out
+fifteenth at ``:90-93`` that AAP 0.2.2 preserves unported) and
+``pages/ContactsP.java`` (65 lines; sixteen ``@FindBy`` fields at ``:14-61``),
+at pinned revision ``47e9d697e4a9a85da889f94a846fdf47af28a240``, held
+REFERENCE by AAP 0.2.1.  Every table states the Java line it pins, so a
+drifting port fails even while staying self-consistent.
 
-What this module discharges
----------------------------
-AAP 0.4.1's **per-module parity obligation** for the Contacts area: *"for each
-of the ten step modules, ``tests/test_steps_<area>.py`` drives the module
-against a stubbed driver and asserts, for every step method in the
-corresponding Java class, that the port performs the same observable
-operations in the same order - the same navigation targets ..., the same
-locators as declared in the paired page object, the same wait target and
-timeout, ... the same hard-coded literals and expected values, the same
-assertion subject and message text, and the same no-ops where a Java method's
-body is empty.  A step method with no corresponding assertion in its module's
-test is a gap, and the module test enumerates the Java class's methods so an
-omission fails rather than passes silently."*
+This module discharges AAP 0.4.1's per-module parity obligation for the
+Contacts area: for every step method of the paired class, the same observable
+operations in the same order - the same page-object locators, wait target and
+timeout, literals, expected values, assertion subject and message text, and
+the same no-ops.  :data:`JAVA_METHODS` inventories the Java class and
+:data:`BEHAVIOUR_CASES` the fourteen driven bodies with their ordered logs;
+:func:`test_every_java_method_has_a_behavioural_case` asserts the two agree in
+both directions, so a deleted case turns the suite red rather than quietly
+shrinking coverage.  Three parity risks own a section each:
 
-Two tables make that enumeration real, and they are deliberately **separate**:
+1. **Three near-collision phrases** (``:29``, ``:36``, ``:41``).  ``User
+   enters name "X"``, ``User enters "X"`` and ``User enters "X" and "Y"``
+   overlap, and the middle one swallows the third under behave's default field
+   matcher; each is asserted to resolve to *exactly one* definition.
+2. **Five fixed delays** (``:19``, ``:25``, ``:57``, ``:64``, ``:98``) in
+   three positional shapes - before the only click, between two clicks, after
+   the only click.  AAP 0.4.1 requires them at the same call sites, never
+   converted into explicit waits.
+3. **Three explicit waits** (``:31``, ``:50``, ``:82``), all on the 20-second
+   timeout of ``:15``, two *after* the click they follow and one on an element
+   other than the one clicked.  Each is asserted to receive the
+   ``ContactsPage`` constant itself, by identity: the lookup belongs inside
+   ``visibility_of_element_located``, per poll, where those 20 seconds gate it
+   and not the 10-second implicit wait ``app/automation/driver.py`` sets - so
+   a lookup recorded in front of a wait is a parity failure.
 
-``JAVA_METHODS``
-    The 14-row inventory of the Java class - line, annotation keyword,
-    annotation text, method name.  The authority.
-``BEHAVIOUR_CASES``
-    The 14 driven bodies, each with its ordered call log.
-
-:func:`test_every_java_method_has_a_behavioural_case` asserts the two agree,
-in both directions, which is the gap detector: deleting a behavioural case
-turns the suite red instead of quietly shrinking the coverage, and a
-fifteenth definition appearing in the registry fails
-:func:`test_contacts_steps_registers_exactly_fourteen_definitions`.
-
-Contacts is the largest of the ten step classes and carries the suite's three
-sharpest parity risks, so each gets its own section:
-
-1. **Three near-collision phrases** (``Contacts.java:29``, ``:36``, ``:41``).
-   ``User enters name "X"``, ``User enters "X"`` and ``User enters "X" and
-   "Y"`` overlap, and the middle one will swallow the third under behave's
-   default field matcher.  Every one is asserted to resolve to *exactly one*
-   definition through the real registry.
-2. **Five fixed delays** (``:19``, ``:25``, ``:57``, ``:64``, ``:98``), whose
-   *positions* are three distinct shapes - before the only click, between two
-   clicks, after the only click.  AAP 0.4.1 requires them reproduced as fixed
-   delays at the same call sites and never converted into explicit waits.
-3. **Three explicit waits** (``:31``, ``:50``, ``:82``), all on the
-   20-second timeout of ``Contacts.java:15``, two of them *after* the click
-   they follow and one of them on an element other than the one clicked.
-
-How a step body is reached, and why nothing here sleeps or opens a browser
--------------------------------------------------------------------------
-``tests/conftest.py`` owns the whole seam and this module adds nothing to it:
-:fixture:`resolve_step` resolves a phrase through behave's own registry,
-:class:`~conftest.StepMatch` runs the body, :fixture:`fake_context` supplies
-the ``context`` it reads and :fixture:`stub_driver` records every element
-operation in one ordered log.
-
-Two bindings are additionally intercepted in the step module's own globals -
-behave's loader execs each step file, so each has a private globals dict and
-patching it reaches that module alone:
-
-* the **fixed-delay binding**, because the five delays total fifteen seconds
-  of real time and a unit suite may not spend it;
-* the **wait helper**, because it would otherwise resolve this worker's
-  session through the driver lifecycle and try to launch a browser.
-
-Both recorders append to the *same* ordered log as the element operations, as
-:data:`DELAY_OPERATION` and :data:`WAIT_OPERATION`, so a delay's or a wait's
-position among the clicks is directly assertable rather than merely its
-occurrence.  The wait helper is discovered **by prefix** rather than by name
-(:data:`WAIT_BINDING_PREFIX`), and its target and timeout are read
-shape-agnostically (:func:`_wait_subject`, :func:`_wait_timeout`), because the
-helper's name and argument shape are an implementation choice of
-``app/automation/waits.py`` while the wait's *target locator*, its *timeout*
-and its *order* are the Java contract.  For the same reason the expected call
-logs are stated without the lookup a wait performs on its own target, and
-:func:`_collapse_wait_lookups` removes it from the recorded log: a helper
-taking a located element resolves the accessor at the call site and one taking
-a locator resolves it inside the wait, and ``visibilityOf(contactP.nameInput)``
-is neither - it dereferences a lazy proxy.  Everything else in the log is
-compared for equality, entry by entry.
-
-``conftest.find_all_step_matches`` is imported directly rather than reached
-through a fixture, because proving a phrase resolves to *exactly one*
-definition needs every match rather than the first.  It loads the registry on
-first use through the same one-per-session cache the :fixture:`step_registry`
-fixture populates - ``tests/conftest.py`` is a real module here, registered
-under that name by pytest before this file is imported - so no test pays for a
-second load and none relies on an import-time side effect.  The fixture itself
-is requested by the tests that need the registry *object*.
-
-The module under test is production code and is never modified from here.
-Where a test states an expectation the implementation does not meet, the
-implementation is what changes.
+``tests/conftest.py`` owns the seam - phrase resolution through behave's own
+registry, the body run, the ``context`` and the one ordered log of element
+operations.  Two bindings are intercepted in the step module's private
+globals: the fixed delay, whose five sites are fifteen real seconds a unit
+suite may not spend, and the wait helpers, which would otherwise launch a
+browser.  Both append to that same log, so a delay's or a wait's position
+among the clicks is directly assertable.
 """
 
 from __future__ import annotations
@@ -120,8 +62,9 @@ from app.pages import ContactsPage
 # --------------------------------------------------------------------------- #
 
 #: The step module under test, as behave's registry reports it - the ``stem``
-#: of the file the definition was loaded from.  Used to prove that a phrase
-#: resolved *here* and not into a sibling area's module.
+#: of the file the definition was loaded from.  Every resolution assertion
+#: compares against it, which is what proves a phrase resolved *here* rather
+#: than into another area's step module.
 STEP_MODULE_NAME: Final[str] = "contacts_steps"
 
 #: Repository-relative path of that module, for the source-inspection tests.
@@ -181,9 +124,10 @@ WAIT_OPERATION: Final[str] = "wait"
 DELAY_BINDING: Final[str] = "sleep"
 
 #: Prefix every wait helper of ``app/automation/waits.py`` shares.  Discovery
-#: is by prefix so that this module asserts the wait's target, timeout and
-#: order - the Java contract - without pinning which helper the call site
-#: chose or what argument shape it has.
+#: is by prefix so that a wait taken through any of them is intercepted and
+#: none reaches a real browser; which of them a call site chose is not the
+#: Java contract, while the locator it waits on, the 20 seconds of
+#: ``Contacts.java:15`` and the position among the clicks are.
 WAIT_BINDING_PREFIX: Final[str] = "wait"
 
 #: The parameterless phrase used only to reach the step module's globals dict,
@@ -211,12 +155,12 @@ STEP_BUCKETS: Final[tuple[str, ...]] = ("step", "given", "when", "then")
 
 
 class FindBy(NamedTuple):
-    """One ``@FindBy`` field of ``ContactsP.java``, and the constant porting it."""
+    """One ``@FindBy`` field of ``ContactsP.java:14-61``, and its constant."""
 
     #: The ``app/pages/contacts_page.py`` constant name.
     constant: str
 
-    #: Declaration line in ``ContactsP.java``.
+    #: Declaration line of the field in ``ContactsP.java``, within ``:14-61``.
     line: int
 
     #: The ``(strategy, selector)`` pair the annotation declares.
@@ -271,9 +215,9 @@ POSITIONAL_SELECTORS: Final[tuple[tuple[str, int, str], ...]] = (
 
 
 class JavaMethod(NamedTuple):
-    """One live step definition of ``Contacts.java``."""
+    """One live step definition of ``Contacts.java:17-104``."""
 
-    #: Line of the annotation in ``Contacts.java``.
+    #: Line of the annotation in ``Contacts.java``, within ``:17-101``.
     line: int
 
     #: The annotation itself - ``When`` or ``Then``.  Cucumber-JVM matches on
@@ -402,10 +346,10 @@ JAVA_METHODS: Final[tuple[JavaMethod, ...]] = (
 #: resolve to nothing at all.
 DEAD_PHRASE: Final[str] = "User clicks and goes directly to the profile"
 
-#: Two phrases ``Contact.feature`` uses that ``Contacts.java`` does **not**
-#: declare, because the source declares them in another class.  A second
-#: declaration here would make either ambiguous, so each is asserted to
-#: resolve outside this module.
+#: Two phrases ``Contact.feature`` uses that ``Contacts.java:17-104`` does
+#: **not** declare, because the source declares them in another class -
+#: ``Session.java:12`` and ``Notes.java:44``.  A second declaration here would
+#: make either ambiguous, so each is asserted to resolve outside this module.
 FOREIGN_PHRASES: Final[tuple[tuple[str, str, str], ...]] = (
     ("User login to test other features", "session_steps", "Session.java:12"),
     ("User clicks save button", "notes_steps", "Notes.java:44"),
@@ -489,41 +433,6 @@ def _wait(locator: Locator) -> Call:
         ``Contacts.java:15``.
     """
     return (WAIT_OPERATION, (locator, WAIT_TIMEOUT_SECONDS))
-
-
-def _collapse_wait_lookups(calls: tuple[Call, ...]) -> tuple[Call, ...]:
-    """Fold away the lookup a wait performs on its own target.
-
-    The one normalization applied to an otherwise byte-for-byte log
-    comparison, and it exists because *where* the wait's target is located is
-    the helper's shape rather than the source's behaviour.  A helper taking an
-    already located element makes the call site resolve the page accessor
-    first, which the log shows as a ``find_element`` immediately before the
-    wait; a helper taking a locator has the wait resolve it internally, which
-    the log does not show at all.  ``Contacts.java`` does neither explicitly -
-    ``visibilityOf(contactP.nameInput)`` dereferences a lazy proxy - so the
-    lookup is dropped when it sits directly in front of a wait on the same
-    locator, and *what* is waited on, for how long, and in what order relative
-    to every other operation all stay asserted exactly.
-
-    :param calls: The log as recorded.
-    :returns: The log with each wait's own preceding lookup removed.
-    """
-    collapsed: list[Call] = []
-
-    for entry in calls:
-        operation, args = entry
-
-        if (
-            operation == WAIT_OPERATION
-            and collapsed
-            and collapsed[-1] == (FIND_OPERATION, args[0])
-        ):
-            collapsed.pop()
-
-        collapsed.append(entry)
-
-    return tuple(collapsed)
 
 
 class Case(NamedTuple):
@@ -758,7 +667,8 @@ SHAPE_AFTER: Final[str] = "after-the-only-click"
 class DelaySite(NamedTuple):
     """One ``Thread.sleep(3000)`` call site and its position in the body."""
 
-    #: Line of the ``Thread.sleep`` call in ``Contacts.java``.
+    #: Line of the ``Thread.sleep(3000)`` call in ``Contacts.java`` - one of
+    #: ``:19``, ``:25``, ``:57``, ``:64``, ``:98``.
     line: int
 
     #: The phrase whose body holds it.
@@ -785,7 +695,8 @@ DELAY_SITES: Final[tuple[DelaySite, ...]] = (
 class WaitSite(NamedTuple):
     """One ``wait.until(visibilityOf(...))`` call site and its position."""
 
-    #: Line of the ``wait.until`` call in ``Contacts.java``.
+    #: Line of the ``wait.until(visibilityOf(...))`` call in ``Contacts.java``
+    #: - one of ``:31``, ``:50``, ``:82``.
     line: int
 
     #: The phrase whose body holds it.
@@ -855,7 +766,9 @@ class WaitRecord(NamedTuple):
     #: The globals binding the call site used, for a failure message.
     helper: str
 
-    #: The locator of whatever the wait was applied to.
+    #: The locator the call site passed, as it passed it - the ``ContactsPage``
+    #: constant itself, which is what the target assertions compare by
+    #: identity.
     locator: Locator
 
     #: The timeout the call site supplied.
@@ -879,51 +792,46 @@ def _is_locator(value: Any) -> bool:
     )
 
 
-def _locator_of(value: Any) -> Locator | None:
-    """Extract the locator a wait argument identifies, accepting either shape.
+def _page_constant_name(locator: Any) -> str | None:
+    """Name the ``ContactsPage`` constant *locator* **is**, by identity.
 
-    :param value: One argument the call site passed.
-    :returns: The ``(strategy, selector)`` pair it identifies - from a located
-        element's ``locator`` attribute, or the value itself when the call
-        site passed a raw pair - or ``None`` when it identifies no element.
-
-    Both shapes are accepted deliberately: whether the helper takes an already
-    located element or a locator belongs to ``app/automation/waits.py``, while
-    *which element* is waited on belongs to ``Contacts.java``.
+    :param locator: A locator a wait call site passed.
+    :returns: The upper-case constant's name when *locator* is that class
+        attribute itself, or ``None`` when it is merely an equal-valued pair
+        built somewhere else.
     """
-    attached = getattr(value, "locator", None)
-
-    if _is_locator(attached):
-        return attached
-
-    if _is_locator(value):
-        return value
+    for name, value in ContactsPage.LOCATORS.items():
+        if locator is value:
+            return name
 
     return None
 
 
-def _wait_subject(
-    args: Sequence[Any], kwargs: Mapping[str, Any]
-) -> tuple[Any, Locator]:
-    """Return the argument identifying the element waited on, and its locator.
+def _wait_locator(args: Sequence[Any], kwargs: Mapping[str, Any]) -> Locator:
+    """Return the locator a wait call site waits on.
 
     :param args: Positional arguments the call site passed.
     :param kwargs: Keyword arguments the call site passed.
-    :returns: That argument unchanged - so the recorder can hand it back as
-        the helper's own result - paired with the locator it identifies.
-    :raises AssertionError: When no argument identifies an element, which
-        means the call site's target cannot be checked against the Java one.
+    :returns: The ``(strategy, selector)`` pair, which is what the call site
+        passes and what the recorder hands back as the helper's own result.
+    :raises AssertionError: When no argument is a locator.  A wait given an
+        already resolved element would have had that element looked up before
+        the wait existed, under the 10-second implicit wait
+        ``app/automation/driver.py`` sets, so the 20 seconds of
+        ``Contacts.java:15`` would never have gated the lookup - the target
+        could then be read out of the element, but the timing the source
+        specifies would already be gone, which is why it fails here instead.
     """
     for value in (*args, *kwargs.values()):
-        locator = _locator_of(value)
-
-        if locator is not None:
-            return value, locator
+        if _is_locator(value):
+            return value
 
     raise AssertionError(
-        f"an explicit wait was called with no identifiable element: "
-        f"args={args!r} kwargs={kwargs!r}. Contacts.java:31, :50 and :82 each "
-        f"wait on a named page element, so the call site must pass one"
+        f"an explicit wait was called with no locator: args={args!r} "
+        f"kwargs={kwargs!r}. Contacts.java:31, :50 and :82 wait on "
+        f"visibilityOf(<@FindBy field>), whose lookup happens inside the "
+        f"predicate on every poll, so the port passes the ContactsPage "
+        f"constant and never an already resolved element"
     )
 
 
@@ -1054,8 +962,6 @@ class ContactsSteps:
             "app.automation.waits.get_driver", _refuse_session, raising=False
         )
 
-    # -- the two recorders -------------------------------------------------- #
-
     def _delay(self, seconds: float) -> None:
         """Record a fixed delay instead of taking it.
 
@@ -1070,25 +976,22 @@ class ContactsSteps:
 
         :param helper: The binding's name, carried into the record so a
             failure names the call site's own helper.
-        :returns: A callable accepting any argument shape, which records the
-            wait and returns its subject - what every helper in
-            ``app/automation/waits.py`` resolves to for a visibility
-            condition, so a call site that uses the result keeps working.
+        :returns: A callable that records the wait and returns the locator it
+            was given, so a call site that uses the result keeps working.  No
+            body in ``Contacts.java:17-104`` uses a wait's result.
         """
 
         def recorder(*args: Any, **kwargs: Any) -> Any:
-            subject, locator = _wait_subject(args, kwargs)
+            locator = _wait_locator(args, kwargs)
             timeout = _wait_timeout(args, kwargs)
 
             self.waits.append(
                 WaitRecord(helper, locator, timeout, len(self._driver.calls))
             )
             self._driver.calls.append((WAIT_OPERATION, (locator, timeout)))
-            return subject
+            return locator
 
         return recorder
-
-    # -- driving a step ----------------------------------------------------- #
 
     def run(self, phrase: str) -> Any:
         """Resolve *phrase* through the real registry and run its body.
@@ -1109,8 +1012,6 @@ class ContactsSteps:
         self._driver.clear_calls()
         self.delays.clear()
         self.waits.clear()
-
-    # -- reading what happened ---------------------------------------------- #
 
     @property
     def calls(self) -> tuple[Call, ...]:
@@ -1315,7 +1216,9 @@ def _java_ids(rows: Sequence[Any]) -> list[str]:
 
 
 # =========================================================================== #
-# The 14-method census: Contacts.java's inventory against behave's registry
+# The 14-method census: Contacts.java:17-104's inventory against behave's
+# registry - annotations at :17, :23, :29, :36, :41, :47, :54, :61, :67, :72,
+# :79, :85, :95 and :101
 # =========================================================================== #
 
 
@@ -1360,13 +1263,14 @@ def test_registered_patterns_are_the_java_annotations(step_registry: Any) -> Non
 def test_java_annotation_resolves_to_exactly_one_definition(
     method: JavaMethod,
 ) -> None:
-    """Each of the 14 phrases reaches its own method - the phrase table.
+    """Each of the 14 phrases reaches its own method - ``Contacts.java:17-104``.
 
     Resolution goes through behave's real registry, and the function reached
-    must be the one named after the Java method it ports
-    (``Contacts.java:<line>``).  Exactly one match, always: ``@step`` reaches
-    every keyword, so two overlapping patterns can both match one phrase
-    without either being a duplicate registration behave would have rejected.
+    must be the one named after the Java method it ports, at the
+    ``Contacts.java`` line the parametrized case is named for.  Exactly one
+    match, always: ``@step`` reaches every keyword, so two overlapping patterns
+    can both match one phrase without either being a duplicate registration
+    behave would have rejected.
     """
     matches = find_all_step_matches(method.phrase)
 
@@ -1386,7 +1290,7 @@ def test_java_annotation_resolves_to_exactly_one_definition(
 def test_every_definition_registers_in_the_keyword_agnostic_bucket(
     step_registry: Any,
 ) -> None:
-    """All 14 register with ``@step`` - ``Contacts.java``'s 10 When + 4 Then.
+    """All 14 register with ``@step`` - ``Contacts.java:17-104``, 10 When, 4 Then.
 
     Cucumber-JVM matches a step by its text alone, so the annotation keyword
     is irrelevant at match time; behave resolves by the effective step type,
@@ -1514,14 +1418,16 @@ def test_positional_selector_keeps_its_java_index(
 def test_step_performs_the_java_operations_in_order(
     case: Case, contacts: ContactsSteps, stub_driver: Any
 ) -> None:
-    """One Java method, its whole observable sequence - ``Contacts.java``.
+    """One Java method, its whole observable sequence - ``Contacts.java:17-104``.
 
-    The log is compared for equality rather than containment, so an extra
-    lookup, a missing clear, a transposed pair of sends, a dropped delay or an
-    added assertion all fail.  Each expected entry names the page constant the
-    Java body targets, so the chain ``@FindBy`` -> constant -> operation is
-    closed.  :func:`_collapse_wait_lookups` is the single normalization, and
-    it removes nothing the source specifies.
+    The log is compared for equality rather than containment, and without any
+    normalization, so an extra lookup, a missing clear, a transposed pair of
+    sends, a dropped delay or an added assertion all fail.  Each expected
+    entry names the page constant the Java body targets, so the chain
+    ``@FindBy`` -> constant -> operation is closed.  A wait contributes no
+    ``find_element`` of its own: it is handed the locator and resolves it
+    inside ``visibility_of_element_located``, so a lookup appearing in front
+    of one would mean the target had been resolved before the wait existed.
     """
     for locator, value in case.texts:
         stub_driver.set_text(locator, value)
@@ -1532,7 +1438,16 @@ def test_step_performs_the_java_operations_in_order(
     assert match.func.__name__ == case.func
     assert match.args == ()
     assert match.kwargs == dict(case.kwargs)
-    assert _collapse_wait_lookups(contacts.calls) == case.calls
+    assert contacts.calls == case.calls
+
+    # Every wait was handed a ContactsPage class attribute itself, not an
+    # equal-valued pair assembled at the call site and not a resolved element.
+    for record in contacts.waits:
+        assert _page_constant_name(record.locator) is not None, (
+            f"{case.func} waited on {record.locator!r}, which is not a "
+            f"ContactsPage constant; Contacts.java:31, :50 and :82 wait on "
+            f"@FindBy fields, whose port is the upper-case constant"
+        )
 
 
 # =========================================================================== #
@@ -1819,7 +1734,16 @@ def test_explicit_wait_target_timeout_and_order(
 
     record = contacts.waits[0]
 
-    assert record.locator == site.locator
+    # Identity, not equality: the call site passed the ContactsPage constant
+    # the Java ``@FindBy`` field ports, so the wait resolves it inside its own
+    # predicate on every poll under these 20 seconds.  An element resolved at
+    # the call site would have been looked up beforehand, under the 10-second
+    # implicit wait ``app/automation/driver.py`` sets.
+    assert record.locator is site.locator, (
+        f"{site.phrase!r} (Contacts.java:{site.line}) waited on "
+        f"{record.locator!r}; the source waits on the field "
+        f"ContactsPage.{_page_constant_name(site.locator)} ports"
+    )
     assert record.timeout == WAIT_TIMEOUT_SECONDS
 
     clicks = contacts.positions_of(CLICK_OPERATION)
@@ -2034,11 +1958,14 @@ def test_module_imports_nothing_from_the_interaction_helpers(
 ) -> None:
     """No keyboard or action-chain helper - AAP 0.4.1 names this module for it.
 
-    ``Contacts.java`` is the one step class of the eleven that imports neither
-    the keyboard-key class nor the action-builder class.  Its five
-    ``sendKeys`` calls are plain sends on a located element, so importing a
-    key helper here would give the port a capability the source lacks - a
-    positive requirement, not an omission.
+    ``Contacts.java:3-9`` is the whole import list and holds neither
+    ``org.openqa.selenium.Keys`` nor
+    ``org.openqa.selenium.interactions.Actions``; of the eleven step classes
+    only ``Crm.java:9-10``, ``Notes.java:9-10`` and ``Sales.java:9`` import
+    either.  The four ``sendKeys`` calls at ``Contacts.java:33``, ``:38``,
+    ``:43`` and ``:44`` are plain sends on a located element, so a key helper
+    here would give the port a capability the source lacks - a positive
+    requirement, not an omission.
     """
     imports = _imports(step_module_tree)
     interaction_names = {"press_keys", "action_chain", "Keys", "ActionChains"}
@@ -2052,12 +1979,13 @@ def test_module_imports_nothing_from_the_interaction_helpers(
 
 
 def test_module_reads_no_configuration(step_module_tree: ast.Module) -> None:
-    """No configuration key - ``Contacts.java`` reads none.
+    """No configuration key - ``Contacts.java:3-9`` imports none.
 
-    ``ConfigurationReader`` is touched by ``Session.java``, ``LoginSD.java``
-    and ``EmployeeStage.java`` only; the Contacts class reads no property, so
-    its port imports nothing from the configuration module.  A default
-    injected here would be a value the source never supplies.
+    ``ConfigurationReader`` is imported by ``Session.java:4``,
+    ``LoginSD.java:4`` and ``EmployeeStage.java:4`` only; the Contacts class
+    reads no property, so its port imports nothing from the configuration
+    module.  A default injected here would be a value the source never
+    supplies.
     """
     imports = _imports(step_module_tree)
     config_names = {
@@ -2114,12 +2042,12 @@ def test_module_binds_the_standard_library_fixed_delay(
 def test_module_declares_no_module_level_state(step_module_tree: ast.Module) -> None:
     """No page instance, driver reference or wait object at module scope.
 
-    ``Contacts.java`` builds its page object and its 20-second wait as fields,
-    at glue construction.  Constructing either at module scope in Python would
-    bind whichever worker process imported the module first, so both move
-    inside the step bodies (AAP 0.4.2) - the page per call, the timeout as a
-    literal argument.  The field-type registration is a call, not an
-    assignment, so no module-level binding remains.
+    ``Contacts.java:13`` and ``:15`` build the page object and the 20-second
+    wait as fields, at glue construction.  Constructing either at module scope
+    in Python would bind whichever worker process imported the module first,
+    so both move inside the step bodies (AAP 0.4.2) - the page per call, the
+    timeout as a literal argument.  The field-type registration is a call, not
+    an assignment, so no module-level binding remains.
     """
     assignments = [
         node

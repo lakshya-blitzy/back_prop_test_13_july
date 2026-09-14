@@ -1,346 +1,61 @@
 {#-
-  ---------------------------------------------------------------------------
-  pretty/_stats_table.html - the grouped statistics table of the generated
-  report tree, shared by four of its six pages.
-  ---------------------------------------------------------------------------
+  pretty/_stats_table.html - the grouped twelve-column statistics table of the
+  generated report tree, shared by four of its six pages. Macro-only: it
+  renders no page and is never a render target, and consumers import it -
+  {% import 'pretty/_stats_table.html' as stats %} - because no macro reads an
+  ambient template variable; every value arrives as an argument.
 
-  A macro-only template. It renders no page, is never rendered standalone and
-  is never a target of app/reporting/pretty_reports.py, which renders only the
-  six page templates in this folder - overview_features, overview_failures,
-  overview_steps, overview_tags, feature and tag. The underscore prefix is the
-  folder's convention for a helper.
+  THE MACROS, each one's parameters and defaults documented at the macro:
+      stats_table(rows, first_column_label, totals=none, sortable=true)
+      stats_header(first_column_label)
+      stats_row(row)
+      stats_footer(totals, row_count=none)
+  An overview takes the sortable form, whose id is what _layout.html's
+  tablesorter initialisation binds to, and supplies totals for its footer; a
+  detail page holds one row, so it passes sortable=false and no totals.
 
-  Consumers import it; they never include it:
+  THE RENDER CONTEXT. A ROW is one mapping per feature or tag, or a detail
+  page's single subject: name; optional href, a plain relative filename
+  local_page_href must accept or the name renders unlinked; the six step and
+  three scenario counts in the column order below; duration_ns as RAW
+  NANOSECONDS, never a formatted string, since the sort attribute carries it
+  verbatim and _macros.html owns the human form; and status in any case,
+  folded by partials/status_badge.html. THE TOTALS mapping adds run-level sums
+  of those nine counts, duration_ns, the features count that is the
+  DENOMINATOR of the last percentage and the optional features_passed that is
+  its numerator. Every key of both is reached defensively, so an absent value
+  renders 0, an empty cell, plain text, Unknown or no footer instead of
+  raising.
 
-      {% import 'pretty/_stats_table.html' as stats %}
+  THE COLUMN SET IS FIXED AT TWELVE, grouped 1 + 6 + 3 + 2, Duration and
+  Status sitting under the Features heading as the generator groups them. The
+  grouping row's dont-sort class is LOAD-BEARING: the tablesorter
+  initialisation selects '> thead tr:not(.dont-sort) th', so that class alone
+  keeps the colspan row out of the sortable header set.
 
-  and then call stats.stats_table(...). The plain import form is deliberate.
-  No macro here reads an ambient template variable - every value a macro needs
-  arrives as an argument - and that restraint is what lets the same call
-  render identically from all four consuming pages.
+  CLASS VOCABULARY. The generator's bare classes are kept in full, and the
+  port's own are additive: tqa-link on the row-key anchor, tqa-duration on
+  both duration cells through the duration macros' extra_classes parameter,
+  data-report-status on the body row and the status cell, and tqa-table on the
+  table. tqa-table is REQUIRED rather than
+  decorative: main.css scopes the required status palette to .tqa-table
+  th.<status> and td.<status>, at a specificity that outranks cucumber.css's
+  bare status classes, and without it the header row and every skipped cell
+  render in the vendored light blue. main.css's rules for data-report-status
+  set custom properties only, so that hook paints nothing by itself.
 
-  ---------------------------------------------------------------------------
-  THE FOUR CONSUMERS, AND THE TWO VARIATIONS BETWEEN THEM
-  ---------------------------------------------------------------------------
-      overview_features.html   overview, first column "Feature", sortable,
-                               one row per feature, footer present.
-      overview_tags.html       overview, first column "Tag", sortable, one row
-                               per tag, footer present.
-      feature.html             detail, first column "Feature", NOT sortable,
-                               exactly one row, NO footer.
-      tag.html                 detail, first column "Tag", NOT sortable,
-                               exactly one row, NO footer.
+  STATE: none of report.js's three runtime classes (report-is-collapsed,
+  report-is-filtered-out, report-lightbox-is-open), which that script alone
+  writes and main.css alone reads, and no mutable ARIA mirror either - the
+  table's role and accessible name are static semantics. data-report-status
+  is classification, and no filtering hook is emitted, because these rows are
+  not independently hideable.
 
-  So the table varies in exactly two ways, and both are parameters:
-
-    1. THE CONTAINER. An overview emits
-
-           <table id="tablesorter" class="stats-table table-hover tqa-table">
-
-       and a detail page emits
-
-           <table class="stats-table tqa-table">
-
-       with no id and no table-hover; tqa-table is the port's own and is on
-       both, for the palette reason recorded under CLASS VOCABULARY. The id is what the tablesorter
-       initialisation in _layout.html binds to, so it is also what makes a
-       table sortable; a detail page shows a single row, where sorting means
-       nothing, and the reference does not wire it. THE TWO DETAIL PAGES MUST
-       PASS sortable=false. The default is true because three quarters of the
-       markup below is the overview form and the two overviews are the pages
-       that carry the id.
-
-    2. THE FOOTER. Present on the two overviews, absent from the two detail
-       pages. Passing no totals - or none - is what leaves it out, so a caller
-       never has to say twice that a single-row table has no column sums.
-
-  Everything else - the grouped two-row header, the twelve columns and their
-  order, the cell classes - is identical on all four pages and is written once
-  here.
-
-  ---------------------------------------------------------------------------
-  PROVENANCE: MEASURED, THEN CONFIRMED AGAINST THE GENERATOR ITSELF
-  ---------------------------------------------------------------------------
-  This is contract 2 of the port's two HTML artifacts, the tree the Java build
-  produced with me.jvt.cucumber:reporting-plugin 7.2.0 (pom.xml:66-70), which
-  pulls net.masterthought:cucumber-reporting 5.6.1 over Velocity 2.3.
-
-  The structure below was read out of the committed report tree at the pinned
-  reference revision and then checked line by line against that library's own
-  Velocity macros - templates/macros/report/statsTable.vm (the overview form),
-  templates/macros/report/reportTable.vm (the detail form) and
-  templates/macros/report/reportHeader.vm (the shared header) - so no part of
-  it rests on inference. Reading the generator settled two questions the
-  committed pages cannot answer, both recorded in the footer notes below.
-
-  The four overview pages carry unresolved merge markers and splice two
-  different runs, so their STRUCTURE is readable and their ARITHMETIC is not:
-  the same tree pairs data-value="9533750000" with body text 30.202 on one
-  side and 9.533 on the other, and the tags footer reports 0 passed scenarios
-  in its sum row and 100.00% passed in its percentage row. Nothing here is
-  derived from those numbers. Every count and every percentage is computed
-  from the normalised model by the macros in pretty/_macros.html.
-
-  ---------------------------------------------------------------------------
-  THE RENDER CONTEXT - the contract app/reporting/pretty_reports.py renders
-  against, and the contract tests/test_pretty_reports.py asserts. Neither
-  exists yet, so this declaration is the specification for both.
-  ---------------------------------------------------------------------------
-  ONE ROW - a mapping, one per feature on overview_features and per tag on
-  overview_tags, and the single subject row on the two detail pages:
-
-      name               string. The display text: the feature name, or the
-                         tag including its leading @. Escaped on the way out,
-                         never trusted markup.
-      href               string, OPTIONAL. The detail page this row links to,
-                         as a plain relative filename. Supplied on the two
-                         overviews and omitted on the two detail pages, where
-                         the row is the subject of the page the reader is
-                         already on. Absent, none or blank renders the name as
-                         plain text with no anchor at all - and so does a value
-                         local_page_href rejects, which is every destination
-                         that is not one of this tree's own page names.
-      steps_passed       integer. )
-      steps_failed       integer. )
-      steps_skipped      integer. ) the six step columns, in this order
-      steps_pending      integer. )
-      steps_undefined    integer. )
-      steps_total        integer. )
-      scenarios_passed   integer. )
-      scenarios_failed   integer. ) the three scenario columns
-      scenarios_total    integer. )
-      duration_ns        integer. RAW NANOSECONDS. Never a formatted string:
-                         the sort attribute carries this number verbatim and
-                         pretty/_macros.html owns the human rendering.
-      status             string. Any of the result model's status names, in
-                         any case; folded by partials/status_badge.html.
-
-  THE TOTALS - a mapping, on the two overviews only:
-
-      the same nine count keys, as run-level sums
-      duration_ns        integer. The run's total duration, raw nanoseconds.
-      features           integer. The number of features in the run. This is
-                         the DENOMINATOR of the last percentage only.
-      features_passed    integer, OPTIONAL. The numerator of that percentage.
-                         Absent answers 0.00% rather than failing.
-
-  Every key of both mappings is reached defensively. An absent count renders
-  0, an absent duration renders an empty cell, an absent href renders plain
-  text, an absent status renders Unknown and absent totals render no footer at
-  all - so the table renders under a strict undefined policy whatever the
-  model omits. A report is what a reader turns to when a run has gone wrong,
-  so malformed input has to render rather than take the page down.
-
-  NO FILENAME IS EVER COMPUTED HERE. Detail-page names are numeric hashes -
-  report-feature_<hash>.html and report-tag_<hash>.html, a fixed prefix, an
-  unsigned decimal hash and .html, with feature pages hashing the feature URI
-  and tag pages the tag name. That algorithm belongs to pretty_reports.py,
-  which derives it from cucumber-reporting 5.6.1 and confirms it against a
-  regenerated baseline; this table emits whatever href it is handed. Because
-  the feature URI moves into features/, the feature-page filenames necessarily
-  change, which is expected and not a defect.
-
-  ---------------------------------------------------------------------------
-  THE TWELVE COLUMNS, AND THE TWO FOOTER CELLS THAT DISAGREE ABOUT THEIR
-  SOURCE
-  ---------------------------------------------------------------------------
-  The grouping row spans them 1 + 6 + 3 + 2:
-
-      1        the row key            Feature or Tag
-      2 - 7    Steps                  passed failed skipped pending undefined
-                                      total
-      8 - 10   Scenarios              passed failed total
-      11 - 12  Features               duration status
-
-  Duration and Status sitting under a "Features" heading is the generator's
-  own grouping, measured on all four pages and reproduced rather than tidied.
-
-  The footer's sum row and percentage row do NOT read the same value in their
-  last cell, which is the one thing the committed pages could never have
-  revealed - the reference run has one feature and one tag, so both readings
-  are the number 1 there. The generator is unambiguous:
-
-      sum row, last cell          $items.size()   the number of rows in THIS
-                                                  table - features on the
-                                                  features page, TAGS on the
-                                                  tags page
-      percentage row, last cell   formatAsPercentage($report_summary.
-                                  getPassedFeatures(), $report_summary.
-                                  getFeatures())  run-level features, on both
-                                                  pages
-
-  stats_table therefore hands stats_footer the row count it just rendered, so
-  the whole-table macro reproduces $items.size() exactly; a caller invoking
-  stats_footer on its own falls back to the totals mapping's features key. The
-  percentage is always features_passed over features and never touches either.
-
-  The footer's nine count cells carry NO class of any kind - not the status
-  classes and not the total class the body row's two Total cells carry. Only
-  the tfoot element itself is classed, which is what tints the whole block.
-  Measured, and confirmed in statsTable.vm.
-
-  THE GENERATOR'S THIRTEENTH COLUMN IS NOT REPRODUCED. statsTable.vm and
-  reportHeader.vm both emit an extra Qualifier column when the report was
-  built for parallel testing. No reference page carries it, the port's
-  normalised model has no qualifier, and the column count is fixed at twelve.
-
-  ---------------------------------------------------------------------------
-  CLASS VOCABULARY - both, and exactly where each one belongs
-  ---------------------------------------------------------------------------
-  The bare generator classes are kept in full, because they are the report
-  contract and two of them are load-bearing rather than decorative:
-
-      stats-table table-hover   the table. app/static/vendor/css/cucumber.css
-                                styles table.stats-table and its cells.
-      header dont-sort          the grouping row. LOAD-BEARING: the
-                                tablesorter initialisation selects headers
-                                with '> thead tr:not(.dont-sort) th', so this
-                                class is the only thing that stops the colspan
-                                grouping row from being treated as three
-                                sortable headers. Never omit it.
-      passed failed skipped     the header cells, the non-zero count cells and
-      pending undefined         the status cell. The five backgrounds
-                                cucumber.css declares.
-      total                     the two Total columns and the tfoot.
-      tagname                   the row key cell, which cucumber.css left-
-                                aligns against the centred default.
-      duration                  the two duration cells. Right-aligned and
-                                non-wrapping there.
-
-  The port's own vocabulary is emitted alongside it, additively, in the four
-  places where it does not mask a measured value the report contract fixes:
-
-      tqa-link                  on the row-key anchor.
-      tqa-duration              on both duration cells, through the
-                                extra_classes parameter the duration macros
-                                expose for exactly this.
-      data-report-status        on the body row and on the status cell - the
-                                project's one status hook. Every rule main.css
-                                declares for this attribute sets custom
-                                properties only, so the hook itself paints
-                                nothing. The cell's visible background comes
-                                from its bare status class, which main.css
-                                overrides for this project's tables wherever
-                                the generator's own colour is not the one the
-                                required palette specifies - skipped being the
-                                case that matters, blue there and orange here.
-
-      tqa-table                 the table itself, and it is REQUIRED rather
-                                than decorative. It is the selector main.css
-                                scopes the required status palette to:
-                                .tqa-table th.skipped and .tqa-table
-                                td.skipped restate the skipped background as
-                                orange at specificity (0,2,1), where
-                                cucumber.css colours the bare .skipped class
-                                light blue #8AF at (0,1,0). AAP 0.3.4
-                                requires skipped and pending to be yellow or
-                                orange, so without this class on the table
-                                the twelve-cell header row and every skipped
-                                count cell render in the vendored blue and
-                                the required palette is simply absent from
-                                this surface. All seven statuses are restated
-                                the same way, so the whole column set moves
-                                together.
-
-  AN EARLIER REVISION WITHHELD tqa-table, and the measurement it was withheld
-  on no longer describes the stylesheet. That measurement was that
-  .tqa-table th { background-color: ... } at (0,1,1) would flatten the five
-  status header colours - rgb(146,221,150), rgb(242,146,140),
-  rgb(136,170,255), rgb(245,242,143), rgb(245,185,117) - and the lightgray
-  Total header to one grey. main.css now restates each status class scoped
-  inside .tqa-table at (0,1,1) + a class, which outranks its own generic
-  th rule, so those five keep a status colour and it is the required one; only
-  th.total and the three unclassed headers take the stylesheet's grey, and the
-  last body row's cells lose a 1px bottom border. Acceptance of these
-  artifacts is structural rather than a byte comparison, and a palette the
-  plan fixes explicitly outranks a vendored default that contradicts it.
-
-  The two load-bearing claims above were also confirmed at run time rather than
-  assumed. Clicking the Duration header sorts the rows 0.000, 0.067, 1.648,
-  24.654, 1:40.186 - numeric order by the sort attribute, where sorting the
-  displayed text would put 1:40.186 before 24.654 - and clicking each of the
-  three grouping cells changes nothing at all, which is the dont-sort class
-  doing its job. A detail page, carrying no id, gains no sorting behaviour from
-  the initialisation at all.
-
-  ---------------------------------------------------------------------------
-  CONSTRAINTS THIS FILE HOLDS TO
-  ---------------------------------------------------------------------------
-    - NO framework URL building. Every href is a value the caller passes in,
-      already a plain relative filename, because these pages are written to
-      disk and opened over the file protocol or straight from a build
-      workspace where an application route cannot resolve. Nothing here builds
-      an endpoint, and no absolute or protocol-relative URL appears - and
-      every one of them goes through local_page_href on the way out, so a
-      destination that is not a page this writer emits never reaches an
-      attribute. Autoescaping is no help there: it escapes HTML, and a
-      javascript: URL carries nothing HTML escaping touches.
-
-    - It declares no value pre-trusted and marks no output as ready-made
-      markup, leaning on the engine's own escaping of HTML templates instead.
-      It matters: feature names in this suite contain quotation marks, and the
-      reference generator escapes them too.
-
-    - It emits none of the three boolean state attributes main.css reads and
-      none of the state classes app/static/js/report.js sets at run time. The
-      stylesheet takes their absence to mean expanded, visible and closed, so
-      server output always describes the fully expanded, fully visible page -
-      which is what keeps the emitted tree legible with scripting off and
-      correct on paper. The status attribute above is a status hook, not a
-      state hook, and no filtering hook is emitted: these rows are not
-      independently hideable.
-
-    - The reference's irregular attribute whitespace - td      class="passed"
-      - is Velocity noise and is not reproduced. Acceptance of both HTML
-      artifacts is structural, never a byte comparison.
-
-    - It introduces no component library. The Bootstrap, jQuery, chart, table-
-      sorting, date and icon-font files inside the emitted tree are the
-      reference generator's own output, not a design system this port adopts.
-
-  TWELVE COLUMNS DO NOT FIT A NARROW SCREEN, so the table sits inside a
-  bounded scroll region - <div class="tqa-table-wrap" tabindex="0"
-  role="region" aria-label="..."> - which the macro owns rather than leaving to
-  its four callers, because a caller that forgot it would reintroduce the
-  defect on one page only. Measured unwrapped in a browser at a 390px window,
-  the features overview's document scrolled to 744px against a 488px viewport:
-  the whole page moved sideways, navigation and lead included, and the last
-  columns sat off-screen. main.css confines that overflow to the wrapper, so
-  the page stays at the viewport width and the table scrolls inside its own
-  box; its print rule drops both the constraint and the border, so the table
-  still prints at full width. The tabindex is not decoration: a region a
-  reader has to scroll must be reachable by keyboard, and the role and the
-  accessible name are what make it an announced region rather than an
-  anonymous scroller.
-
-  An earlier revision left the table unwrapped on the grounds that the
-  Bootstrap grid lays this markup out. The grid sets a column width; it does
-  not bound a child's overflow, which is what the measurement above shows and
-  what this wrapper fixes.
-
-  ACCESSIBILITY. The invisible part is applied, because it costs nothing
-  visually and cannot conflict with the measured design: scope on every header
-  cell, colgroup scope on the three grouping headers, and a real thead / tbody
-  / tfoot split. The scroll region above adds the one visible affordance, its
-  focus ring. Colour is never the only carrier of meaning here - the status
-  cell states its status in words beside the background, and each count sits
-  in a column whose header names it. Two measured details are corrected rather
-  than reproduced, because each of them costs a reader the table:
-    - THE ROW KEY IS A th scope="row". As a td it was a data cell, so a reader
-      hearing "24" in the ninth column heard the column header and not which
-      feature the number belongs to - on a twelve-column table that is the one
-      piece of context that makes the other eleven readable. The tagname class
-      is kept, so cucumber.css's own rule for the first column still applies
-      wherever it is a td elsewhere, and the vendored stylesheet's th rule
-      already left-aligns this one exactly as that rule did; a row header also
-      renders bold, which is the only visible difference and is what a row
-      header is.
-    - THE TABLE CARRIES A CAPTION, in the vendored .sr-only class, so it has
-      an accessible name without adding visible text the contract does not
-      have. A caption rather than aria-labelledby pointing at the page
-      heading: this macro is called from four page templates and a caption
-      names the table from inside it, with no id agreement to keep across all
-      four.
+  THE TABLE SITS IN ITS OWN SCROLL REGION - div.tqa-table-wrap with
+  tabindex="0", role="region" and an accessible name - owned by the macro
+  rather than by its four callers, since a caller that omitted it would
+  reintroduce the overflow of twelve columns on one page. main.css confines
+  that overflow to the wrapper and drops the constraint in print.
 -#}
 {#- Formatting, borrowed from its single owner. Every cell that carries a
     count, a duration, a percentage or a status label is built by a macro
@@ -444,38 +159,29 @@
 <tr data-report-status="{{ token }}">
       {#- The row key, as the row's own header cell: it identifies the eleven
           cells that follow, so it is a th with a row scope and not a data
-          cell. Both branches are the measured ones - an anchor when the
-          caller supplied a destination, plain text otherwise - and the
-          tagname class is unchanged.
+          cell, and it keeps the tagname class. An anchor where the caller
+          supplied a destination, plain text otherwise.
 
-          THE ALIGNMENT IS RESTORED INLINE, and the reason is the one thing
-          about this cell that is not obvious. cucumber.css centres the whole
-          table - `table.stats-table th, table.stats-table td { text-align:
-          center }` at its lines 154-158 - and exempts this column through
-          `table.stats-table td.tagname { text-align: left }` at 177-179. That
-          exemption is scoped to the ELEMENT, so the moment this cell became a
-          th it stopped matching and the column silently re-centred: measured
-          in Chrome as text-align center here against left on the reference
-          page, on a column of long feature and tag names. No vendored or
-          prefixed class can undo it - the centring selector is (0,1,2) and
-          Bootstrap's .text-left and the port's own .tqa-table rules are both
-          weaker - so the declaration is carried here, on the one cell whose
-          rule the element change de-matched. The durable home for it is a
-          prefixed rule in the port's own stylesheet, which this template does
-          not own; until that exists this attribute is what keeps the rendered
-          column identical to the measured one.
+          THE THREE INLINE DECLARATIONS ARE A SPECIFICITY CONSTRAINT, which is
+          the one thing about this cell that is not obvious. cucumber.css
+          centres the whole table - `table.stats-table th, table.stats-table
+          td { text-align: center }` at (0,1,2) - and exempts this column only
+          through `table.stats-table td.tagname { text-align: left }`, a rule
+          scoped to the td ELEMENT, so nothing a th can carry restores the
+          left alignment: Bootstrap's .text-left and the port's own .tqa-table
+          rules are both weaker. text-align is therefore declared here, on the
+          one cell no available selector reaches.
 
-          THE OTHER TWO DECLARATIONS GUARD THE SAME SEAM. A caller may add the
-          port's tqa-table class to this shared table - overview_steps.html
-          already carries it on its own table - and `.tqa-table th` sets
-          white-space: nowrap and the header background colour, both of which
-          are right for a header ROW and wrong for a row header inside the
-          body: measured on the steps page, the nowrap alone widened its key
-          column to 660px and pushed that table 110px past its container,
-          and the background tinted a body column the reference leaves white.
-          Declaring them here keeps this macro's rendering identical whether
-          or not that class is present. font-weight is deliberately not
-          among them: a row header reading bolder than its data is correct. #}
+          THE OTHER TWO GUARD THE SAME SEAM. A caller may add the port's
+          tqa-table class to this shared table - overview_steps.html carries
+          it on its own table - and `.tqa-table th` sets white-space: nowrap
+          and the header background colour, both right for a header ROW and
+          wrong for a row header inside the body: the nowrap alone widens this
+          key column past its container, and the background tints a body
+          column the contract leaves white. Declaring them here keeps this
+          macro's rendering identical whether or not that class is present.
+          font-weight is deliberately not among them: a row header reading
+          bolder than its data is correct. #}
       <th scope="row" class="tagname" style="text-align: left; white-space: normal; background-color: transparent">{% if link %}<a class="tqa-link" href="{{ link }}">{{ key_text }}</a>{% else %}{{ key_text }}{% endif %}</th>
       {{ fmt.count_cell(data.steps_passed, 'passed') }}
       {{ fmt.count_cell(data.steps_failed, 'failed') }}

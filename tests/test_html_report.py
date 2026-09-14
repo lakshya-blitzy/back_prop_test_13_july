@@ -1,62 +1,35 @@
 """Tests for the single self-contained HTML artifact, ``target/cucumber-reports.html``.
 
-This module is the gate for ``app/reporting/html_report.py`` and for the four
-templates that page is built from -- ``app/templates/artifact/report.html``,
-``artifact/metadata.html``, ``artifact/feature.html`` and
-``artifact/element.html`` -- together with the three partials they share with
-the pretty report tree and the HTTP views.  What it protects is the artifact's
-whole reason for existing: **one file, carrying everything, referencing
-nothing**.
+This module is the gate for ``app/reporting/html_report.py``, for the four
+``app/templates/artifact/*.html`` templates the page is built from and for the
+partials they share, and what it protects is the artifact's whole reason for
+existing: **one file, carrying everything, referencing nothing**.  The
+destination is ``CukesRunner.java:10`` and the acceptance criteria are AAP
+0.3.4's -- one file, no external URL or sibling reference, the declared title
+and charset, and every feature, scenario, step, status, timestamp and embedded
+screenshot of the result set present in the DOM.  The rest of the shape is
+fixed by the writer's own documented contract.
 
-AAP 0.3.4 states the acceptance criteria this module implements: one file, no
-external URL or sibling reference, the declared title and charset, and every
-feature, scenario, step, status, timestamp and embedded screenshot of the input
-result set present in the DOM.  ``html_report.py``'s own module docstring fixes
-the rest of the shape -- the doctype, ``<html lang="en">``, the tab-indented
-title and content-type meta, the percent-encoded inline SVG favicon, exactly
-one trailing newline, non-selected scenarios dropped before rendering, a test
-outcome that never raises, and no merge-conflict marker ever emitted.
-
-**There is no HTML golden fixture** (AAP 0.4.1 maps none, and the committed
-reference carries an unresolved merge block and predates the source), so every
-assertion here is structural: the page is parsed and interrogated, never
-compared byte for byte against a stored copy.
-
-Three deliberate choices are worth stating up front, because each keeps these
-tests honest under change that belongs to somebody else:
-
-*Parsing is stdlib only.*  :mod:`html.parser` builds the small element tree at
-the top of this file.  No parsing dependency is added: ``requirements-test.txt``
-pins the runner and the coverage plugin and nothing else.
-
-*State hooks are read through one named constant each, never spelled at a call
-site.*  ``partials/status_badge.html`` emits ``<span class="tqa-badge" ...>``
-whose text content is the status token capitalised, and that text is the
-badge's accessible name -- the stable half of the contract, which is why
-status is asserted through it rather than through an attribute.  Where an
-attribute genuinely has to be read, it is read through
-:data:`STATUS_HOOK_ATTRIBUTES`, :data:`SCREENSHOT_ATTRIBUTE`,
-:data:`LIGHTBOX_IMAGE_ATTRIBUTE` or :data:`FILTER_ATTRIBUTE`.  The shared
-partials have since consolidated onto the ``data-report-*`` vocabulary, and
-that migration moved a hook as well as renaming one: the screenshot hook sits
-on the trigger that opens the lightbox rather than on the thumbnail, so the
-thumbnail is reached through :func:`screenshot_images` and no test walks the
-images looking for it.
-
-*The sample result set is used for what it carries and synthetic documents for
-the rest.*  ``tests/fixtures/sample_results.json`` exercises passed, failed,
-skipped and undefined, a background repeated per scenario, a two-row outline, a
-scenario the tag expression did not select, two error messages with tracebacks,
-matched arguments and one PNG embedding.  Pending, untested, ambiguous, the
-``unknown`` fallback, the hostile values, the malformed embeddings and every
-empty shape are built here, in small documents whose intent is visible at the
-call site.
+AAP 0.3.4 maps no HTML golden fixture and the committed reference page carries
+an unresolved merge block, so every assertion is structural: the page is parsed
+with :mod:`html.parser` and interrogated, never compared byte for byte, and no
+parsing dependency is added.  Status is read through the badge's visible text,
+the half of the contract a reader sees, and an attribute that has to be read is
+reached through one named constant rather than spelled at a call site.
+``tests/fixtures/sample_results.json`` supplies the shapes it carries; every
+other shape is built here, in documents whose intent is visible at the call
+site.
 """
 
 from __future__ import annotations
 
+import ast
+import errno
+import os
 import re
+import stat
 from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Final
@@ -66,6 +39,7 @@ from jinja2 import Environment, FileSystemLoader
 from markupsafe import Markup
 
 from app.reporting import html_report as writer
+from app.reporting.aggregation import STATUS_ALIASES
 from app.reporting.html_report import (
     CSS_ASSET_PARTS,
     EMPTY_AGGREGATE_STATUS,
@@ -78,6 +52,7 @@ from app.reporting.html_report import (
     STATUS_PRECEDENCE,
     UNKNOWN_STATUS,
     build_environment,
+    build_metadata,
     build_render_context,
     build_summary,
     css_asset_path,
@@ -255,8 +230,48 @@ FILTER_ATTRIBUTE: Final[str] = "data-report-filter"
 #: Equal to the sample result set's own ``generated_at``.
 FIXED_GENERATED_AT: Final[str] = "2022-09-07T13:39:12.484Z"
 
+#: One descriptor row of the metadata block.  The block filters its rows on a
+#: non-empty value, so the class is what a test counts to see a row omitted.
+META_ITEM_CLASS: Final[str] = "tqa-meta-item"
+
+#: The label the metadata block gives the generation-time row.
+GENERATED_LABEL: Final[str] = "Report generated"
+
+#: The port's one timestamp shape -- millisecond precision, three fractional
+#: digits always, and a literal ``Z``, which is what
+#: ``app/reporting/events.py``'s ``format_timestamp`` emits.  Used to assert
+#: that a page rendered from a document carrying no timestamp carries none
+#: either.
+TIMESTAMP_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z"
+)
+
+#: The modules a clock reading would have to come from, and the calls that
+#: would read one.  Both are asserted absent from the writer's source: the
+#: generation time it displays is the run's, resolved once before the fan-out.
+CLOCK_MODULES: Final[frozenset[str]] = frozenset({"datetime", "time"})
+CLOCK_CALL_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        "now",
+        "utcnow",
+        "today",
+        "fromtimestamp",
+        "time",
+        "time_ns",
+        "monotonic",
+        "monotonic_ns",
+        "perf_counter",
+    }
+)
+
 #: The status the result model never produces, used to drive the fallback.
-GARBAGE_STATUS: Final[str] = "executing"
+#: It has to be outside both :data:`app.reporting.aggregation.KNOWN_STATUSES`
+#: and :data:`app.reporting.aggregation.STATUS_ALIASES`: every name in that
+#: alias table -- ``executing`` and ``unknown`` among them -- is a behave
+#: status the shared normaliser folds onto a Cucumber token, so none of them
+#: reaches the fallback any more.  This word is in neither collection, which is
+#: what makes it drive ``UNKNOWN_STATUS``.
+GARBAGE_STATUS: Final[str] = "no-such-status"
 
 #: One hostile value, carrying every class of character that has to survive the
 #: trip: markup, the three HTML-significant punctuation marks, an engine
@@ -287,9 +302,17 @@ HOSTILE_TAG: Final[str] = f"@{HOSTILE_VALUE}"
 
 #: A deterministic, well-formed 1x1 PNG payload, base64 as an embedding carries
 #: it.  The same bytes ``tests/conftest.py`` hands its stub driver.
+#:
+#: "Well-formed" is load-bearing rather than descriptive: every chunk's CRC is
+#: correct and the image data inflates to the size its header declares, so the
+#: payload survives the inline-PNG contract in
+#: ``app/reporting/screenshots.py`` that ``app/reporting/aggregation.py`` puts
+#: every attachment through before this writer's templates see it.  A payload
+#: that only *looked* like a PNG would be discarded there, and every
+#: assertion here about a rendered screenshot would pass vacuously.
 PNG_BASE64: Final[str] = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/"
-    "q842iQAAAABJRU5ErkJggg=="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAH/"
+    "VscvDQAAAABJRU5ErkJggg=="
 )
 
 #: The media type of a result screenshot, and one that is not an image at all.
@@ -307,6 +330,78 @@ FEATURE_KEYWORD: Final[str] = "Feature"
 #: A nanosecond duration for a synthetic step.  A real integer, because the
 #: step partial renders only an integer duration.
 SYNTHETIC_DURATION: Final[int] = 1_500_000_000
+
+#: The attribute marking a subtree the report script's status filter hides.
+#: The element is this page's filter unit, so nothing inside one carries it.
+FILTERABLE_ATTRIBUTE: Final[str] = "data-report-filterable"
+
+#: The hook-report block: the container class, and the fragment its accessible
+#: name always carries.  Together they are how a test finds the hook blocks of
+#: one element without depending on their position in the markup, and without
+#: mistaking the run's environment descriptor -- which uses the same class --
+#: for one.  The element template names each block for its own hook, so the
+#: name reads "After hook result for Scenario: <name>".
+META_CLASS: Final[str] = "tqa-meta"
+HOOK_REPORT_LABEL_INFIX: Final[str] = " result for "
+
+#: The two hook groups' labels, as the element template writes them.
+BEFORE_HOOK_LABEL: Final[str] = "Before hook"
+AFTER_HOOK_LABEL: Final[str] = "After hook"
+
+#: Where the port's own scenario-lifecycle hook lives, in the dotted form the
+#: model records and ``app/reporting/events.py`` defaults to.
+AFTER_HOOK_LOCATION: Final[str] = "features.environment.after_scenario"
+
+#: A hook duration distinct from every step duration on the page, so a test
+#: asserting the hook's own duration is absent cannot be satisfied by a
+#: coincidence with a step's.
+HOOK_DURATION: Final[int] = 412_000_000
+
+#: behave's own hook-failure status.  It is outside Cucumber's vocabulary, so
+#: the status normaliser answers ``unknown`` for it -- which is why the page
+#: carries the recorded word as text beside the implementation.
+BEHAVE_HOOK_ERROR_STATUS: Final[str] = "hook_error"
+
+# --------------------------------------------------------------------------- #
+# The publication contract's vocabulary
+#
+# ``write_html_report`` no longer names, creates or removes a temporary of its
+# own: the whole sequence belongs to
+# :func:`app.utils.paths.publish_artifact_file`, so what is named here is what
+# an observer outside the writer can see -- the shape of the authority's
+# temporary, the platform features the hostile cases need, and the file and
+# directory a refusal has to leave untouched.
+# --------------------------------------------------------------------------- #
+
+#: Whether this platform can create a symbolic link.  The hostile-link cases
+#: have nothing to plant without one, exactly as ``tests/test_paths.py``
+#: guards its own.
+SYMLINKS_AVAILABLE: Final[bool] = hasattr(os, "symlink")
+
+#: Whether this platform can create a hard link, for the destination case no
+#: symlink check can see.
+HARD_LINKS_AVAILABLE: Final[bool] = hasattr(os, "link")
+
+#: Whether a POSIX permission mode means anything here.  Windows expresses
+#: permissions as ACLs, so the owner-only policy has nothing to assert there.
+FILE_MODES_AVAILABLE: Final[bool] = hasattr(os, "fchmod")
+
+#: How the path authority's publication temporary is recognised from outside:
+#: dot-prefixed, so ``GET /artifacts/<name>`` cannot serve it while it exists,
+#: and suffixed so it is unmistakable in a directory listing.
+TEMPORARY_PREFIX: Final[str] = "."
+TEMPORARY_SUFFIX: Final[str] = ".partial"
+
+#: A file outside the artifact root for a hostile link to point at, and content
+#: distinctive enough that finding it altered -- or finding it gone -- is
+#: unambiguous.
+OUTSIDE_FILE_NAME: Final[str] = "outside-the-root.html"
+OUTSIDE_FILE_CONTENT: Final[str] = "<html>not the artifact</html>\n"
+
+#: The directory a hostile ``target/`` link points at.  The review's probe for
+#: this finding wrote the report into exactly such a directory, which is why
+#: every refusal test asserts it empty afterwards.
+OUTSIDE_DIR_NAME: Final[str] = "outside-the-root"
 
 # --------------------------------------------------------------------------- #
 # What the sample document is, pinned
@@ -631,7 +726,6 @@ class ParsedDocument(HTMLParser):
         self.stray_end_tags.append(tag)
 
     def handle_data(self, data: str) -> None:
-        """Append character data to whichever element is currently open."""
         self._open[-1].add_text(data)
 
 
@@ -806,6 +900,31 @@ def file_census(root: Path) -> set[str]:
     }
 
 
+def single_page_census(root: Path) -> set[str]:
+    """The census of a root holding the build directory and the page alone.
+
+    Named once, because every publication test asserts it and each of them is
+    really asserting the same two facts: the writer created the build directory
+    and the page it is allowed to create, and no publication temporary is left
+    behind -- after a successful write, and after a refused one, where the entry
+    at the destination is whatever the test planted there.
+    """
+    return {
+        paths.target_root(root).relative_to(root).as_posix(),
+        paths.cucumber_reports_html_path(root).relative_to(root).as_posix(),
+    }
+
+
+def permission_mode(path: Path) -> int:
+    """The POSIX permission bits of ``path``, special bits included.
+
+    ``stat.S_IMODE`` rather than a mask of ``st_mode``, so a set-group-id build
+    directory -- which a shared checkout can legitimately carry -- is visible
+    to the caller rather than silently dropped from the comparison.
+    """
+    return stat.S_IMODE(path.stat().st_mode)
+
+
 # --------------------------------------------------------------------------- #
 # Synthetic documents
 #
@@ -909,6 +1028,58 @@ def make_result_set(*features: dict[str, Any]) -> dict[str, Any]:
     return {"features": list(features)}
 
 
+def make_hook(
+    *,
+    status: Any = "passed",
+    location: str | None = AFTER_HOOK_LOCATION,
+    duration: int | None = HOOK_DURATION,
+    error_message: str | None = None,
+    embeddings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build one hook entry, in the shape ``app/reporting/events.py`` records.
+
+    :param status: The hook's own outcome.  Untyped at the call site because
+        behave's vocabulary reaches past Cucumber's -- ``hook_error`` and
+        ``cleanup_error`` are the values a real failing hook carries.
+    :param location: Dotted path of the hook implementation; ``None`` yields an
+        empty ``match``, which is how the model records a hook it has no path
+        for.
+    :param duration: Nanoseconds, or ``None`` to omit the key.
+    :param error_message: The hook's failure text, omitted when ``None``.
+    :param embeddings: Attachments hanging off the hook, omitted when ``None``.
+    :returns: The hook entry.
+    """
+    result: dict[str, Any] = {"status": status}
+    if duration is not None:
+        result["duration"] = duration
+    if error_message is not None:
+        result["error_message"] = error_message
+    entry: dict[str, Any] = {
+        "match": {"location": location} if location else {},
+        "result": result,
+    }
+    if embeddings is not None:
+        entry["embeddings"] = embeddings
+    return entry
+
+
+def hook_reports(scope: Element) -> list[Element]:
+    """Every hook-report block in ``scope``, in document order.
+
+    Found by the container class together with the accessible name the element
+    template gives it, so the environment descriptor -- which uses the same
+    class -- is never mistaken for one.  One block per reported hook.
+
+    :param scope: A subtree to search, usually ``document.root``.
+    :returns: The blocks, in document order.
+    """
+    return [
+        element
+        for element in scope.with_class(META_CLASS)
+        if HOOK_REPORT_LABEL_INFIX in element.attributes.get("aria-label", "")
+    ]
+
+
 def make_embedding(
     *,
     mime_type: Any = PNG_MIME_TYPE,
@@ -990,7 +1161,6 @@ def sample_dom(sample_document: str) -> ParsedDocument:
 
 @pytest.fixture
 def hostile_document() -> str:
-    """:func:`hostile_result_document` rendered."""
     return render_html_report(
         hostile_result_document(), generated_at=FIXED_GENERATED_AT
     )
@@ -998,7 +1168,6 @@ def hostile_document() -> str:
 
 @pytest.fixture
 def hostile_dom(hostile_document: str) -> ParsedDocument:
-    """The hostile render, parsed."""
     return parse_html(hostile_document)
 
 
@@ -1288,6 +1457,339 @@ def test_written_file_is_utf8_with_line_feeds_and_matches_the_render(
     assert written_dom.root.descendants("title")[0].text == DOCUMENT_TITLE
     assert external_references(written_dom) == []
     assert HOSTILE_VALUE in written_dom.root.text
+
+
+# --------------------------------------------------------------------------- #
+# Publication -- how the one file reaches its destination
+#
+# THE CONTRACT MOVED, AND THESE TESTS ARE WHERE IT IS HELD.  The writer used to
+# name its own temporary, open it with the builtin, sync it, rename it with
+# ``os.replace`` and unlink it on failure -- all resolved from pathnames, and
+# all after ``ensure_parent`` had verified the parent chain and *released* its
+# descriptor.  The review's probe swapped ``target/`` in that window and the
+# report was written outside the artifact root (CWE-59/CWE-367), so the whole
+# sequence now belongs to :func:`app.utils.paths.publish_artifact_file`, which
+# creates, writes, syncs and renames under one held directory descriptor.
+#
+# What that means for this file: nothing here may assert the writer's own
+# temporary name -- there is no longer one -- and what is asserted instead is
+# what an observer outside the writer can establish.  The temporary is
+# dot-prefixed and unservable while it exists and gone afterwards, the
+# destination is reached only by the rename, a hostile link or a hostile
+# directory component is refused before any byte is written, and the artifact
+# and its build directory are readable by their owner alone.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.skipif(
+    not FILE_MODES_AVAILABLE,
+    reason="this platform expresses permissions as ACLs, so the policy does not apply",
+)
+def test_the_published_page_and_its_build_directory_are_owner_only(
+    sample_result_set: Any, tmp_artifact_root: Path
+) -> None:
+    """The page is ``0600`` under a build directory that grants nobody else.
+
+    Measured output used to be ``0644`` under ``0755``, which exposed the run's
+    evidence -- failure text and screenshots of a logged-in session -- to every
+    local account (CWE-732/CWE-359).  The publication creates its temporary
+    ``O_CREAT|O_EXCL`` at :data:`~app.utils.paths.ARTIFACT_FILE_MODE` and the
+    rename carries that mode onto the destination, so publishing cannot loosen
+    what writing in place would not.  The directory is asserted through the
+    mask rather than against ``0700`` exactly, because a set-group-id checkout
+    keeps that bit while granting the group nothing.
+    """
+    written = write_html_report(
+        sample_result_set, base=tmp_artifact_root, generated_at=FIXED_GENERATED_AT
+    )
+
+    assert permission_mode(written) == paths.ARTIFACT_FILE_MODE
+    build_directory = paths.target_root(tmp_artifact_root)
+    assert permission_mode(build_directory) & paths.ARTIFACT_MODE_MASK == 0
+    assert permission_mode(build_directory) & stat.S_IRWXU == stat.S_IRWXU
+
+
+def test_the_publication_temporary_is_unservable_and_gone_afterwards(
+    sample_result_set: Any,
+    tmp_artifact_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bytes land in a dot-prefixed temporary, and only a rename publishes them.
+
+    This test replaces the assertion the old contract carried -- that the
+    temporary matched this writer's ``_TEMPORARY_NAME`` -- because that
+    constant is gone: the naming, the creation and the removal are the path
+    authority's, and the writer no longer has a temporary to name.  What
+    survives the move is the *observable* half, which is what mattered all
+    along, so it is asserted from outside the writer: while the publication is
+    open the build directory holds exactly one entry, it is dot-prefixed and
+    suffixed, it carries the destination's name, and
+    :func:`~app.utils.paths.resolve_artifact` refuses to serve it -- so
+    ``GET /artifacts/<name>`` cannot reach a half-written page.  The
+    destination does not exist yet at that moment, which is the proof it is
+    reached only by the rename, and afterwards the temporary is gone.
+    """
+    observed: list[tuple[tuple[str, ...], tuple[Path | None, ...]]] = []
+
+    @contextmanager
+    def observing_publication(
+        destination: Path, **options: Any
+    ) -> Iterator[Any]:
+        """Delegate to the real publication, snapshotting the directory inside it."""
+        with paths.publish_artifact_file(destination, **options) as stream:
+            entries = tuple(
+                sorted(entry.name for entry in Path(destination).parent.iterdir())
+            )
+            observed.append(
+                (
+                    entries,
+                    tuple(
+                        paths.resolve_artifact(name, tmp_artifact_root)
+                        for name in entries
+                    ),
+                )
+            )
+            yield stream
+
+    monkeypatch.setattr(writer, "publish_artifact_file", observing_publication)
+
+    written = write_html_report(
+        sample_result_set, base=tmp_artifact_root, generated_at=FIXED_GENERATED_AT
+    )
+
+    assert len(observed) == 1
+    entries, resolutions = observed[0]
+    assert len(entries) == 1
+    temporary_name = entries[0]
+    assert temporary_name.startswith(TEMPORARY_PREFIX)
+    assert temporary_name.endswith(TEMPORARY_SUFFIX)
+    assert written.name in temporary_name
+    assert written.name not in entries
+    assert resolutions == (None,)
+    assert file_census(tmp_artifact_root) == single_page_census(tmp_artifact_root)
+
+
+def test_a_fault_while_the_page_is_written_keeps_the_previous_page(
+    sample_result_set: Any,
+    tmp_artifact_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write that fails halfway leaves the last complete page and no scratch.
+
+    The seam is the stream the publication yields, wrapped so that half the
+    document reaches the real temporary and the write then fails the way a full
+    filesystem fails.  Everything else is the production route: a real
+    temporary under a real held descriptor, and the authority's own removal of
+    it on the way out.  The census is asserted rather than the exception alone,
+    because a cleanup that left the partial file behind would still raise.
+    """
+    first = write_html_report(
+        sample_result_set, base=tmp_artifact_root, generated_at=FIXED_GENERATED_AT
+    )
+    complete_page = first.read_bytes()
+
+    class HalfWritingStream:
+        """A stream that writes half of what it is given and then fails."""
+
+        def __init__(self, stream: Any) -> None:
+            self._stream = stream
+
+        def write(self, text: str) -> int:
+            written_half = self._stream.write(text[: len(text) // 2])
+            raise OSError(errno.ENOSPC, "No space left on device", written_half)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._stream, name)
+
+    @contextmanager
+    def half_writing_publication(
+        destination: Path, **options: Any
+    ) -> Iterator[Any]:
+        """Delegate to the real publication, handing out the failing stream."""
+        with paths.publish_artifact_file(destination, **options) as stream:
+            yield HalfWritingStream(stream)
+
+    monkeypatch.setattr(writer, "publish_artifact_file", half_writing_publication)
+
+    with pytest.raises(OSError) as failure:
+        write_html_report(
+            sample_result_set, base=tmp_artifact_root, generated_at=FIXED_GENERATED_AT
+        )
+    assert failure.value.errno == errno.ENOSPC
+
+    assert first.read_bytes() == complete_page
+    assert file_census(tmp_artifact_root) == single_page_census(tmp_artifact_root)
+
+
+def test_a_render_fault_reaches_no_file_at_all(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A template or asset fault happens before the publication opens anything.
+
+    The ordering the writer promises, asserted at its strongest: with no
+    previous page to fall back on, a failing render leaves the artifact root
+    exactly as it was -- no build directory, no temporary, no empty file at the
+    destination.
+    """
+
+    def exploding_render(*_args: Any, **_kwargs: Any) -> str:
+        raise RuntimeError("the template could not be rendered")
+
+    monkeypatch.setattr(writer, "render_html_report", exploding_render)
+
+    with pytest.raises(RuntimeError, match="could not be rendered"):
+        write_html_report(None, base=tmp_artifact_root)
+
+    assert file_census(tmp_artifact_root) == set()
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create symbolic links, so none can be refused",
+)
+def test_a_build_directory_swapped_before_the_rename_cannot_receive_the_page(
+    sample_result_set: Any,
+    tmp_artifact_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The page lands in the directory that was verified, not in the name's.
+
+    The other half of the finding, and the half a second pathname check cannot
+    close: the swap is made *after* the document has been written and *before*
+    the rename, which is the window a pathname-resolved ``os.replace`` leaves
+    open -- it would deposit the report in whatever directory ``target/`` now
+    answered to.  The rename is descriptor-relative, so the artifact reaches
+    the directory the publication verified and holds the whole document, and
+    the substituted directory receives nothing.
+    """
+    outside = tmp_path / OUTSIDE_DIR_NAME
+    outside.mkdir()
+    stashed = tmp_path / "stashed-build-directory"
+    verified = paths.ensure_dir(paths.target_root(tmp_artifact_root))
+    real_publication = paths.publish_artifact_file
+
+    @contextmanager
+    def publication_swapped_before_the_rename(
+        destination: Path, **options: Any
+    ) -> Iterator[Any]:
+        """Delegate, and substitute the build directory once the write is done."""
+        with real_publication(destination, **options) as stream:
+            yield stream
+            os.rename(verified, stashed)
+            os.symlink(outside, verified, target_is_directory=True)
+
+    monkeypatch.setattr(
+        writer, "publish_artifact_file", publication_swapped_before_the_rename
+    )
+
+    write_html_report(
+        sample_result_set, base=tmp_artifact_root, generated_at=FIXED_GENERATED_AT
+    )
+
+    assert file_census(outside) == set()
+    published = stashed / paths.CUCUMBER_REPORTS_HTML_NAME
+    assert file_census(stashed) == {published.name}
+    assert published.read_text(encoding="utf-8") == render_html_report(
+        sample_result_set, generated_at=FIXED_GENERATED_AT
+    )
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create symbolic links, so none can be refused",
+)
+def test_a_symlinked_destination_is_refused_and_its_target_survives(
+    sample_result_set: Any, tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """A link standing in for the page is refused, byte for byte intact outside.
+
+    The publication would replace the link rather than follow it, but the entry
+    *is* a file elsewhere: the artifact would go missing and the outside file
+    would be the one the next reader found.  Refused before anything is
+    written, with the outside file asserted unchanged and the build directory
+    holding nothing but the refused link.
+    """
+    outside = tmp_path / OUTSIDE_FILE_NAME
+    outside.write_text(OUTSIDE_FILE_CONTENT, encoding="utf-8")
+    destination = paths.cucumber_reports_html_path(tmp_artifact_root)
+    paths.ensure_dir(destination.parent)
+    destination.symlink_to(outside)
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        write_html_report(
+            sample_result_set, base=tmp_artifact_root, generated_at=FIXED_GENERATED_AT
+        )
+    assert destination.name in str(failure.value)
+    assert isinstance(failure.value, OSError)
+
+    assert outside.read_text(encoding="utf-8") == OUTSIDE_FILE_CONTENT
+    assert file_census(tmp_artifact_root) == single_page_census(tmp_artifact_root)
+    assert destination.is_symlink()
+
+
+@pytest.mark.skipif(
+    not HARD_LINKS_AVAILABLE,
+    reason="this platform cannot create hard links, so none can be refused",
+)
+def test_a_hard_linked_destination_is_refused_and_its_twin_survives(
+    sample_result_set: Any, tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """A page hard-linked to a file outside the root is refused the same way.
+
+    No symbolic link exists anywhere in this path, so no symlink check can see
+    it: the entry *is* the outside file, and the link count is the only thing
+    that can tell.  A rename over it would make the outside file disappear from
+    its own directory's point of view.
+    """
+    outside = tmp_path / OUTSIDE_FILE_NAME
+    outside.write_text(OUTSIDE_FILE_CONTENT, encoding="utf-8")
+    destination = paths.cucumber_reports_html_path(tmp_artifact_root)
+    paths.ensure_dir(destination.parent)
+    os.link(outside, destination)
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        write_html_report(
+            sample_result_set, base=tmp_artifact_root, generated_at=FIXED_GENERATED_AT
+        )
+    assert "hard link" in str(failure.value)
+    assert isinstance(failure.value, OSError)
+
+    assert outside.read_text(encoding="utf-8") == OUTSIDE_FILE_CONTENT
+    assert destination.read_text(encoding="utf-8") == OUTSIDE_FILE_CONTENT
+    assert file_census(tmp_artifact_root) == single_page_census(tmp_artifact_root)
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create symbolic links, so none can be refused",
+)
+def test_a_symlinked_build_directory_is_refused_and_nothing_is_written_through_it(
+    sample_result_set: Any, tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """A link standing in for ``target/`` is refused, and its destination stays empty.
+
+    **This is the test that proves the finding closed.**  The review's probe
+    used exactly this shape: with the parent verified and then released, the
+    temporary was created and renamed through the pathname, and the report
+    landed in whatever directory ``target/`` now answered to -- outside the
+    artifact root.  The outside directory is therefore asserted EMPTY, because
+    a refusal that has already created the temporary in the link's destination
+    is not a refusal.
+    """
+    outside = tmp_path / OUTSIDE_DIR_NAME
+    outside.mkdir()
+    paths.target_root(tmp_artifact_root).symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        write_html_report(
+            sample_result_set, base=tmp_artifact_root, generated_at=FIXED_GENERATED_AT
+        )
+    assert paths.TARGET_DIR_NAME in str(failure.value)
+    assert isinstance(failure.value, OSError)
+
+    assert file_census(outside) == set()
+    assert not paths.cucumber_reports_html_path(tmp_artifact_root).exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -1668,6 +2170,109 @@ def test_run_metadata_and_the_tally_are_present(
     assert f"{len(features)} Features" in page_text
     assert f"{len(scenarios)} Scenarios" in page_text
     assert f"{len(steps)} Steps" in page_text
+
+
+# --------------------------------------------------------------------------- #
+# The generation time, and the clock this writer does not have
+#
+# A run has one generation time, resolved once before the fan-out - by the
+# collector, or by ``app/services/report_service.py`` for a document that
+# carries none - and carried in the document every writer is handed.  This
+# writer therefore states the value it was given and never reads a clock: while
+# it did, an empty run's page carried the moment somebody rendered it while the
+# report tree's Date cell, which has no clock behind it, stayed empty for that
+# same document, and the page's value changed on every render.  An absent stamp
+# now costs the page a row, which is the same "state fewer facts rather than
+# invented ones" policy every other descriptor row follows.
+# --------------------------------------------------------------------------- #
+
+
+def test_metadata_over_a_document_with_no_generation_time_is_blank() -> None:
+    """No argument and no document value yields ``""``, never a clock reading.
+
+    Four shapes of stampless document, because the writer's reads are total and
+    each arrives in practice: nothing at all, a document carrying features but
+    no top-level stamp, one whose stamp is present but unusable --
+    ``new_result_set()`` carries ``generated_at`` as ``None`` until the
+    collector writes it, which is exactly the empty run this case exists for --
+    and a document with nothing in it whatever.
+    """
+    for result_set in (None, {"features": []}, {"generated_at": None}, {}):
+        metadata = build_metadata(result_set)
+        assert metadata["generated_at"] == "", result_set
+        assert metadata["started_at"] == "", result_set
+
+    # The explicit argument still wins, and the document's own value still
+    # stands in for it: what was removed is the clock behind them, not the
+    # order of preference.
+    assert (
+        build_metadata(None, generated_at=FIXED_GENERATED_AT)["generated_at"]
+        == FIXED_GENERATED_AT
+    )
+    assert (
+        build_metadata({"generated_at": FIXED_GENERATED_AT})["generated_at"]
+        == FIXED_GENERATED_AT
+    )
+
+
+def test_a_document_with_no_generation_time_renders_no_generated_row() -> None:
+    """The row is omitted rather than filled with the render-time clock.
+
+    ``app/templates/artifact/metadata.html`` filters its descriptor rows on a
+    non-empty value, so a blank stamp costs the page that one row and nothing
+    else: the document still renders whole, with its title, its doctype and the
+    probed environment rows, and nothing surfaces as the characters ``None``.
+    """
+    markup = render_html_report(None)
+    document = parse_html(markup)
+
+    assert markup_faults(document) == []
+    assert document.declarations == [DOCTYPE_DECLARATION]
+    assert document.root.descendants("title")[0].text == DOCUMENT_TITLE
+
+    rows = [row.normalized_text for row in document.root.with_class(META_ITEM_CLASS)]
+    assert rows, "the probed environment rows should still be there"
+    assert [row for row in rows if row.startswith(GENERATED_LABEL)] == [], rows
+    page_text = document.root.normalized_text
+    assert GENERATED_LABEL not in page_text
+    assert "None" not in document.root.text
+    assert TIMESTAMP_PATTERN.search(markup) is None, "the page carries a timestamp"
+
+
+def test_the_writer_holds_no_clock_of_its_own(repo_root: Path) -> None:
+    """Asserted over the module's source: no clock is read anywhere in it.
+
+    The strongest form the contract can take, and the reason it is read with
+    :mod:`ast` rather than with a regular expression: the module's prose
+    legitimately discusses generation times and the timestamp format, so only
+    the *code* can say whether a clock is reached.  Both halves are checked --
+    the modules that provide one are not imported, and no call that would read
+    one is made -- so a clock cannot come back as ``datetime.now(UTC)``, as a
+    bare ``time()`` over a module-level alias, or through an import this test
+    did not anticipate.
+    """
+    source = repo_root / "app" / "reporting" / "html_report.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            imported.append(node.module)
+    for module in CLOCK_MODULES:
+        assert module not in imported, f"{module} is imported by the writer"
+
+    called: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            called.append(node.func.id)
+        elif isinstance(node.func, ast.Attribute):
+            called.append(node.func.attr)
+    offending = sorted(set(called) & CLOCK_CALL_NAMES)
+    assert offending == [], f"the writer reads a clock: {offending}"
 
 
 # --------------------------------------------------------------------------- #
@@ -2476,3 +3081,307 @@ def test_two_writes_of_one_document_leave_identical_files(
         paths.target_root(tmp_artifact_root).relative_to(tmp_artifact_root).as_posix(),
         first.relative_to(tmp_artifact_root).as_posix(),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Hook results
+#
+# A hook is not a step, and on this page it is not only a screenshot carrier
+# either.  The port registers the scenario-lifecycle teardown as a real hook,
+# so the hook itself can fail - a session that will not quit, a teardown that
+# raises - and the element status this page reads folds every hook outcome into
+# its verdict.  A page that rendered only the steps therefore presented a red
+# scenario above a column of green steps with nothing anywhere to explain it,
+# and the hook's status and failure text are what close that gap.
+#
+# The three properties the block is held to: it reports every hook that did not
+# pass, it reports nothing for a run whose hooks passed, and it is not a step -
+# not counted as one, not timed as one, and not a filter unit of its own.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_hook_that_did_not_pass_reports_its_status_and_its_error_text() -> None:
+    """The failing hook's group, implementation, badge and traceback are shown.
+
+    Driven with a scenario whose every step passed, which is the case the gap
+    was about: the element is presented failed because of the hook alone, so
+    the hook's own row is the only thing on the page that can account for it.
+    The failure text is the hostile value, so the same assertion covers
+    escaping and the absence of engine evaluation.
+    """
+    element = make_element(
+        "A scenario whose teardown failed",
+        [make_step("a step that passed", status="passed")],
+        after=[
+            make_hook(
+                status="failed",
+                error_message=HOSTILE_VALUE,
+            )
+        ],
+        status="failed",
+    )
+    markup = render_html_report(
+        make_result_set(make_feature("Teardown", [element])),
+        generated_at=FIXED_GENERATED_AT,
+    )
+    document = parse_html(markup)
+    assert markup_faults(document) == []
+
+    scenario = document.root.with_class(SCENARIO_CLASS)[0]
+    blocks = hook_reports(scenario)
+    assert len(blocks) == 1, "the failing hook is not reported on the page"
+    block = blocks[0]
+
+    assert block.attributes["aria-label"] == (
+        f"{AFTER_HOOK_LABEL}{HOOK_REPORT_LABEL_INFIX}"
+        "Scenario: A scenario whose teardown failed"
+    )
+    rows = [row.normalized_text for row in block.with_class(META_ITEM_CLASS)]
+    assert rows == [
+        f"Hook {AFTER_HOOK_LABEL}",
+        f"Implementation {AFTER_HOOK_LOCATION}",
+        "Result Failed",
+    ]
+    assert [
+        item.attributes.get("data-report-status")
+        for item in block.with_class(BADGE_CLASS)
+    ] == ["failed"]
+    assert badge_labels(block) == ["Failed"]
+
+    # The failure text is a SIBLING of the block, not a cell inside it: the
+    # metadata grid is four columns wide from the 992px breakpoint, and a
+    # traceback sized by a quarter-width column wraps at about 28 characters.
+    errors = scenario.descendants(ERROR_ELEMENT)
+    assert len(errors) == 1
+    assert errors[0].text == HOSTILE_VALUE
+    assert errors[0].parent is not None
+    assert META_CLASS not in errors[0].parent.classes
+    assert HOSTILE_MARKUP not in markup
+    assert ESCAPED_HOSTILE_MARKUP in markup
+    assert HOSTILE_VALUE_EVALUATED not in document.root.text
+
+    # The scenario's own badge is still the first one inside it, so the
+    # element's status reading is untouched by the block added below it.
+    assert first_badge_label(scenario) == "Failed"
+
+
+def test_a_hook_status_outside_the_vocabulary_keeps_the_word_the_model_recorded()  -> None:
+    """A behave-only hook status is graded once, and an unreadable one keeps its word.
+
+    Two halves, because the shared status model decides the first of them.
+    ``hook_error`` is behave's name for an exception in hook code and
+    ``app/reporting/aggregation.py``'s ``STATUS_ALIASES`` folds it onto
+    ``failed`` -- the same answer ``target/cucumber.json`` publishes for it,
+    that table existing precisely so one run is not graded differently
+    depending on which artifact a reader opens.  The fold is applied to the
+    decorated copy this writer renders, so the page reports such a hook
+    **Failed** and the behave word is not on it.
+
+    The second half is the clause that word reaches when nothing in the project
+    can read the status: the block is still emitted, the badge reads Unknown
+    because a badge's label is its status's accessible name on every surface of
+    this port, and the recorded word travels as text beside the
+    implementation, since a row reading only "Unknown" would withhold the one
+    word naming what happened.  It is asserted against
+    ``artifact/element.html``'s own macro with an undecorated element, which is
+    the only shape that clause is reachable from once the authority
+    canonicalises every status it can name.  Both hook groups are covered in
+    each half, in the order the model carries them.
+    """
+    element = make_element(
+        "A scenario with two bad hooks",
+        [make_step("a step that passed", status="passed")],
+        before=[make_hook(status=BEHAVE_HOOK_ERROR_STATUS, location=None)],
+        after=[
+            make_hook(
+                status=BEHAVE_HOOK_ERROR_STATUS,
+                error_message="RuntimeError: teardown exploded",
+            )
+        ],
+        status="passed",
+    )
+    document = parse_html(
+        render_html_report(
+            make_result_set(make_feature("Hooks", [element])),
+            generated_at=FIXED_GENERATED_AT,
+        )
+    )
+    assert markup_faults(document) == []
+
+    scenario = document.root.with_class(SCENARIO_CLASS)[0]
+    blocks = hook_reports(scenario)
+    assert len(blocks) == 2, "both hook groups are reported"
+
+    # Named per hook, and numbered because this element has more than one, so
+    # two blocks of one page never share an accessible name.
+    heading = "Scenario: A scenario with two bad hooks"
+    assert [block.attributes["aria-label"] for block in blocks] == [
+        f"{BEFORE_HOOK_LABEL} 1{HOOK_REPORT_LABEL_INFIX}{heading}",
+        f"{AFTER_HOOK_LABEL} 2{HOOK_REPORT_LABEL_INFIX}{heading}",
+    ]
+
+    # The before-hook carried no location and the model's canonical word for
+    # both of these is one the page's own vocabulary names, so there is no
+    # parenthesis to carry and the location-less block states no
+    # implementation at all rather than an empty row.
+    assert [row.normalized_text for row in blocks[0].with_class(META_ITEM_CLASS)] == [
+        f"Hook {BEFORE_HOOK_LABEL}",
+        "Result Failed",
+    ]
+    assert [row.normalized_text for row in blocks[1].with_class(META_ITEM_CLASS)] == [
+        f"Hook {AFTER_HOOK_LABEL}",
+        f"Implementation {AFTER_HOOK_LOCATION}",
+        "Result Failed",
+    ]
+
+    assert [error.text for error in scenario.descendants(ERROR_ELEMENT)] == [
+        "RuntimeError: teardown exploded"
+    ]
+    assert badge_labels(blocks[0]) == ["Failed"]
+    assert badge_labels(blocks[1]) == ["Failed"]
+    assert status_token(BEHAVE_HOOK_ERROR_STATUS) == "failed"
+    assert STATUS_ALIASES[BEHAVE_HOOK_ERROR_STATUS] == "failed"
+
+    # The unreadable status, through the template's own macro and with no
+    # decoration in front of it: reported, badged Unknown, and the word kept
+    # beside the implementation -- or standing in for the one the hook has not
+    # got.
+    fragment = parse_html(
+        str(
+            build_environment()
+            .get_template("artifact/element.html")
+            .module.element_block(  # type: ignore[attr-defined]
+                make_element(
+                    "A scenario with two unreadable hook statuses",
+                    [make_step("a step that passed", status="passed")],
+                    before=[make_hook(status=GARBAGE_STATUS, location=None)],
+                    after=[
+                        make_hook(
+                            status=GARBAGE_STATUS,
+                            error_message="RuntimeError: teardown exploded",
+                        )
+                    ],
+                    status="passed",
+                ),
+                0,
+                0,
+            )
+        )
+    )
+    unreadable = hook_reports(fragment.root)
+    assert len(unreadable) == 2, "both hook groups are reported"
+    assert [
+        row.normalized_text for row in unreadable[0].with_class(META_ITEM_CLASS)
+    ] == [
+        f"Hook {BEFORE_HOOK_LABEL}",
+        f"Implementation {GARBAGE_STATUS}",
+        f"Result {UNKNOWN_STATUS.capitalize()}",
+    ]
+    assert [
+        row.normalized_text for row in unreadable[1].with_class(META_ITEM_CLASS)
+    ] == [
+        f"Hook {AFTER_HOOK_LABEL}",
+        f"Implementation {AFTER_HOOK_LOCATION} ({GARBAGE_STATUS})",
+        f"Result {UNKNOWN_STATUS.capitalize()}",
+    ]
+    assert badge_labels(unreadable[0]) == [UNKNOWN_STATUS.capitalize()]
+    assert badge_labels(unreadable[1]) == [UNKNOWN_STATUS.capitalize()]
+    assert status_token(GARBAGE_STATUS) == UNKNOWN_STATUS
+
+
+def test_a_hook_that_passed_is_not_reported_and_its_screenshot_still_is() -> None:
+    """The ordinary shape adds not one node, and the embedding is unaffected.
+
+    Every scenario of a healthy run carries a passed after-hook, and the sample
+    document's own failing scenario carries one with a screenshot on it, so a
+    block emitted for a hook that passed would appear on nearly every element
+    of every page.  The screenshot is asserted alongside, because the hook list
+    feeds both this block and the lightbox and the two must stay independent.
+    """
+    element = make_element(
+        "A scenario whose teardown passed",
+        [make_step("a step that failed", status="failed", error_message="boom")],
+        after=[
+            make_hook(
+                status="passed",
+                embeddings=[make_embedding(name="A scenario whose teardown passed")],
+            )
+        ],
+        status="failed",
+    )
+    document = parse_html(
+        render_html_report(
+            make_result_set(make_feature("Healthy hooks", [element])),
+            generated_at=FIXED_GENERATED_AT,
+        )
+    )
+    assert markup_faults(document) == []
+
+    assert hook_reports(document.root) == []
+    assert AFTER_HOOK_LABEL not in document.root.text
+    assert len(screenshot_images(document.root)) == 1
+
+
+def test_hook_reports_are_not_steps_and_carry_neither_duration_nor_filter_hook() -> None:
+    """The block is outside the step and filter vocabularies, and untimed.
+
+    Three properties in one case, because they are one decision: a hook is not
+    a step.  So the block holds no step container - nothing that counts or
+    walks steps can pick a hook up - it carries no filter hook, the element
+    being this page's filter unit and a nested one hiding a subtree of the
+    thing being hidden, and it prints no duration, the element duration this
+    report presents being the sum of its step durations alone.  The last is
+    asserted against the page rendered without the hook, so it is the hook's
+    duration that is absent rather than some number being absent.
+    """
+    steps = [make_step("a step that passed", status="passed")]
+    without_hook = make_element("Timed", steps, status="passed")
+    with_hook = make_element(
+        "Timed",
+        steps,
+        after=[make_hook(status="failed", error_message="teardown failed")],
+        status="failed",
+    )
+
+    plain = parse_html(
+        render_html_report(
+            make_result_set(make_feature("Durations", [without_hook])),
+            generated_at=FIXED_GENERATED_AT,
+        )
+    )
+    hooked = parse_html(
+        render_html_report(
+            make_result_set(make_feature("Durations", [with_hook])),
+            generated_at=FIXED_GENERATED_AT,
+        )
+    )
+
+    scenario = hooked.root.with_class(SCENARIO_CLASS)[0]
+    block = hook_reports(scenario)[0]
+    assert block.with_class(STEP_CLASS) == []
+    assert len(hooked.root.with_class(STEP_CLASS)) == len(
+        plain.root.with_class(STEP_CLASS)
+    )
+    assert [
+        element
+        for element in block.walk()
+        if FILTERABLE_ATTRIBUTE in element.attributes
+    ] == []
+    # The element is the filter unit, so the traceback beside the block is not
+    # a second one either.
+    assert [
+        error
+        for error in scenario.descendants(ERROR_ELEMENT)
+        if FILTERABLE_ATTRIBUTE in error.attributes
+    ] == []
+
+    # The hook duration is not on the page in any of the three forms the page
+    # could print it in: raw nanoseconds, or either of the two second-scale
+    # renderings the duration helpers produce.
+    page_text = hooked.root.normalized_text
+    for rendering in (
+        str(HOOK_DURATION),
+        f"{HOOK_DURATION / 1_000_000_000:.3f}",
+        f"{HOOK_DURATION / 1_000_000_000:.2f}",
+    ):
+        assert rendering not in page_text, rendering

@@ -1,10 +1,8 @@
 """WSGI entry point for the read-only artifact viewer.
 
-The server-loadable target is ``wsgi:app``.  Everything this module does is
-below: it imports the application factory, calls it once, and publishes the
-resulting callable.  There is no configuration to adjust here and nothing to
-extend - a module that grows past those three statements has taken on work
-that belongs to the factory or to one of the packages it wires together.
+This module publishes the application the factory builds, so that a server can
+load the target ``wsgi:app``.  It starts no server of its own; the development
+server lives in ``run.py``.
 
 Provenance
 ==========
@@ -79,6 +77,19 @@ reach the layers that produce artifacts, let alone start a run.  The
 read-only guarantee of the HTTP surface is upheld structurally here, by what
 this file cannot reach, rather than by convention.
 
+It also sets no accepted-hostname list, and a deployer should know what the
+callable it loads already carries: the factory installs a ``TRUSTED_HOSTS``
+allowlist of the three local names, so a request arriving under any other
+hostname is answered 400 before a view runs.  That default suits the model
+these routes were written for - a local, read-only viewer with no
+authentication behind it.  A real server reached by its own hostname must
+therefore supply its own ``TRUSTED_HOSTS`` through the factory's overrides,
+and doing so is a revised security model rather than a tweak: it publishes
+unauthenticated artifacts - the suite's credentials, failure screenshots and
+tracebacks - to whoever can resolve that name, so the access control the
+allowlist was standing in for has to come from somewhere else.  This module
+neither makes that decision nor hides it.
+
 Verified properties
 ===================
 Established by exercising the module rather than by inspection:
@@ -102,18 +113,8 @@ Established by exercising the module rather than by inspection:
 
 from app import create_app
 
-#: The published surface: one application object under two names, and no
-#: helper, flag or hook alongside them.
 __all__ = ["app", "application"]
 
-#: The WSGI callable a server loads as ``wsgi:app``.  Built by the factory at
-#: import time with no overrides, which is the default application: the
-#: factory's optional mapping exists for tests that need a value such as
-#: ``TESTING`` in place, and a served application wants none of them.  A
-#: server that needs different behaviour changes its own configuration, not
-#: this call.
 app = create_app()
 
-#: A plain alias of :data:`app`, for servers whose default callable name is
-#: ``application``.  Assignment only - never a second factory call.
 application = app

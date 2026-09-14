@@ -1,17 +1,23 @@
 """Orchestration tests for ``app/services/test_run_service.py``.
 
-This module is the gate for the two invariants AAP 0.6 says are the only ones
-that *can* hold for a sharded browser suite, and it is the only owned module
-that drives ``features/environment.py``'s scenario hooks:
+The gate for the two invariants AAP 0.6 says are the only ones that *can* hold
+for a sharded browser suite: *"every selected scenario is assigned to exactly
+one worker"*, and *"for a fixed set of shard inputs the merged structure -
+feature order, scenario order, background position, statuses - is identical
+whatever the worker count"*, compared with timestamps, durations and error text
+normalized because those vary by construction.  It is also the only owned
+module that drives ``features/environment.py``'s scenario hooks.
 
-1. **Exact-once assignment.** *"Every selected scenario is assigned to exactly
-   one worker"* (AAP 0.6) - for any worker count, with no duplicate and no lost
-   scenario.
-2. **Worker-count independence.** *"For a fixed set of shard inputs the merged
-   structure - feature order, scenario order, background position, statuses -
-   is identical whatever the worker count"* (AAP 0.6), with timestamps,
-   durations and error text normalized before comparison because those vary by
-   construction.
+``pom.xml:21-29``, the surefire configuration the service ports, fixes the
+rest: ``parallel=methods`` (``pom.xml:22``) makes sharding scenario-level, and
+``testFailureIgnore=true`` (``pom.xml:25``) with the six ``-1`` thresholds at
+``Jenkins:15`` keep a test outcome out of the exit status - whose table
+``app/cli.py`` owns, so this module asserts the
+:class:`~app.services.test_run_service.RunOutcome` fields it is computed from
+instead.  ``Jenkins:15``'s narrowed ``target/cucumber.json`` glob is why
+``target/.workers/`` must never survive a run, and
+``FailedTestRunner.java:9-12`` declares no tag filter, which the neutral tag
+expression reproduces.
 
 Everything else here follows the same source contract: ``pom.xml:22``'s
 ``parallel=methods`` is method- and therefore scenario-level sharding,
@@ -24,8 +30,7 @@ reproduce.
 
 How these tests avoid launching anything
 ----------------------------------------
-Three seams, all published by the production code, and no monkeypatching of
-:mod:`subprocess` anywhere:
+Three seams, all published by the production code, and nothing started:
 
 ``base=``
     Every path-taking call receives :fixture:`tmp_artifact_root`, so nothing is
@@ -41,12 +46,26 @@ Three seams, all published by the production code, and no monkeypatching of
     :class:`RecordingSpawn` stands in for the engine launch.  It records the
     argument list and working directory it was handed and writes a canned
     worker document, built through ``app/reporting/events.py``'s own document
-    builders, to the ``-o`` path it finds in that argument list.  No process is
+    builders, to the ``-o`` path it finds in that argument list.  No engine is
     started, no timeout is waited on and no test sleeps.
+
+    One group of tests is the deliberate exception, because its subject *is*
+    the launch: the live output relay, which only exists on the real
+    ``spawn``.  Those five tests run :data:`RELAY_CHILD_SCRIPT` - a
+    three-line ``-c`` script of this interpreter that writes what the test
+    tells it to and exits - through the module's own launch, so that the
+    rendering, redaction, severity floor and read bound a CI log depends on
+    are asserted where production applies them.  Still no engine, no browser,
+    no network and no artifact tree; see that group's own header.
 
 ``monkeypatch`` on the names the module under test binds
     Used only where a delegation is the thing being asserted - the rerun
     grammar's owner, the hooks' collaborators - never to replace the subject.
+    :class:`subprocess.Popen` is intercepted in exactly one test, by
+    :class:`PopenRecorder`, and for a structural reason: the ``spawn`` seam is
+    what stands in for the *default* launch, so that launch's own composition
+    of the child's environment cannot be observed through it.  That recorder
+    starts no process either.
 
 What this module deliberately does not assert
 ---------------------------------------------
@@ -59,7 +78,10 @@ What this module deliberately does not assert
 * **Not the transport of the launch.**  Whether the seam's default runs the
   engine through :func:`subprocess.run` or drains a :class:`subprocess.Popen`
   is that function's business; these tests assert the argument list and the
-  documents, which is the contract every caller downstream depends on.
+  documents, which is the contract every caller downstream depends on.  What
+  the live-relay group asserts is not the transport either but what the launch
+  *emits*: a child's line reaches the parent log rendered, at the right
+  severity and bounded, whatever the transport underneath.
 * **Not an exit status.**  ``app/cli.py`` owns the exit table; this module
   asserts the :class:`~app.services.test_run_service.RunOutcome` fields the
   table is computed from, and that nothing here terminates the interpreter.
@@ -69,17 +91,29 @@ from __future__ import annotations
 
 import ast
 import configparser
+import ctypes
 import itertools
+import json
 import logging
 import os
 import re
+import signal
+import stat
+import subprocess
 import sys
-from collections.abc import Iterator, Sequence
+import time
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
 import pytest
+
+# The engine's own configuration parser, deliberately rather than a reading of
+# the argument list: what a binding has to be judged on is the step directory
+# and the environment file behave *resolves*, which is the pair an ambient
+# stage would otherwise redirect.
+from behave.configuration import Configuration
 from cucumber_tag_expressions import TagExpressionError
 
 import features.environment as environment
@@ -225,6 +259,12 @@ CANNED_TIMESTAMP: Final[str] = "2024-01-01T00:00:00.000Z"
 #: A fixed generation timestamp for every canned shard document.
 CANNED_GENERATED_AT: Final[str] = "2024-01-01T00:00:01.000Z"
 
+#: The step definition every canned step resolves to.  A step whose
+#: ``matched`` is true carries a non-empty ``match.location`` by contract --
+#: the flag and the location state one fact and the artifacts read them
+#: separately -- so a canned shard names one rather than leaving it out.
+CANNED_STEP_LOCATION: Final[str] = "features.steps.canned_steps.a_precondition"
+
 #: What a canned shard writes, keyed by shard index in
 #: :class:`RecordingSpawn`.  Each value is one of the settled outcomes the
 #: service classifies (AAP 0.4.1's dead-worker row): a complete document, no
@@ -260,6 +300,90 @@ USERDATA_FLAG: Final[str] = "-D"
 #: Asks the engine not to execute steps.
 DRY_RUN_FLAG: Final[str] = "--dry-run"
 
+#: Pins the engine's glue roots: an empty stage, written as one argv element
+#: with its value attached, so the step directory stays ``features/steps`` and
+#: the environment file stays ``features/environment.py``.
+STAGE_FLAG: Final[str] = "--stage="
+
+#: The ``behave.ini`` key the flag above has a tracked counterpart in.
+STAGE_OPTION: Final[str] = "stage"
+
+#: The engine's own stage variable, and the sharp end of the child
+#: environment: behave reads it whenever nothing else sets a stage, prefixes
+#: both glue roots with its value, and **executes** the environment file it
+#: arrives at, so an absolute value names external Python that runs.
+STAGE_ENV_VAR: Final[str] = "BEHAVE_STAGE"
+
+#: A stage value that redirects both glue roots outside the checkout.  Chosen
+#: absolute because behave joins the stage to the discovery root with
+#: :func:`os.path.join`, where an absolute component wins outright.
+EXTERNAL_STAGE: Final[str] = "/external/path"
+
+#: The engine's default glue roots, which every binding below has to produce.
+DEFAULT_STEPS_DIR: Final[str] = "steps"
+DEFAULT_ENVIRONMENT_FILE: Final[str] = "environment.py"
+
+#: Names a worker must **never** inherit, each with the value this module
+#: plants in the parent's environment to prove it is dropped.  The value is
+#: the hostile one in every case, so a name that leaked would leak something
+#: that visibly matters:
+#:
+#: * the nine ``BEHAVE_*`` variables the engine reads, headed by the stage;
+#: * the ``PYTHON*`` variables that decide which modules the child imports
+#:   and whether its assertions run at all;
+#: * the ``WDM_*`` driver-manager controls over transport verification and
+#:   cache location, and the xdist worker marker;
+#: * ``SE_*``, which Selenium's service reads **in preference to** the
+#:   executable path it was handed; and
+#: * the TLS-trust and proxy variables, which decide where a driver download
+#:   comes from and who is trusted to have signed it.
+DENIED_WORKER_ENV: Final[dict[str, str]] = {
+    STAGE_ENV_VAR: EXTERNAL_STAGE,
+    "BEHAVE_COLOR": "on",
+    "BEHAVE_STORE_CAPTURED_ALWAYS": "true",
+    "BEHAVE_SHOW_CAPTURED_ALWAYS": "true",
+    "BEHAVE_HOOK_STORE_CAPTURED_ON_SUCCESS": "true",
+    "BEHAVE_HOOK_SHOW_CAPTURED_ON_SUCCESS": "true",
+    "BEHAVE_HOOK_STORE_CLEANUP_ON_SUCCESS": "true",
+    "BEHAVE_STRIP_STEPS_WITH_TRAILING_COLON": "false",
+    "BEHAVE_UNICODE_ERRORS": "ignore",
+    "BEHAVE_BROWSER": "netscape-navigator",
+    "PYTHONPATH": "/external/path",
+    "PYTHONHOME": "/external/path",
+    "PYTHONSTARTUP": "/external/path/startup.py",
+    "PYTHONOPTIMIZE": "2",
+    "PYTHONWARNINGS": "ignore",
+    "WDM_SSL_VERIFY": "0",
+    "WDM_LOCAL": "1",
+    "WDM_LOG": "0",
+    "PYTEST_XDIST_WORKER": "gw0",
+    "SE_CHROMEDRIVER": "/external/path/chromedriver",
+    "SE_GECKODRIVER": "/external/path/geckodriver",
+    "SSL_CERT_FILE": "/external/path/ca.pem",
+    "SSL_CERT_DIR": "/external/path/certs",
+    "REQUESTS_CA_BUNDLE": "/external/path/ca.pem",
+    "CURL_CA_BUNDLE": "/external/path/ca.pem",
+    "HTTP_PROXY": "http://127.0.0.1:1/",
+    "HTTPS_PROXY": "http://127.0.0.1:1/",
+    "ALL_PROXY": "http://127.0.0.1:1/",
+    "NO_PROXY": "",
+    "http_proxy": "http://127.0.0.1:1/",
+    "https_proxy": "http://127.0.0.1:1/",
+}
+
+#: The locale variables a worker keeps, named here because keeping them is
+#: **behaviour** and not tidiness: ``features/Login.feature:89`` asserts the
+#: browser's own required-field message in French, and that message follows
+#: the process locale, so a worker that lost these would change whether the
+#: outline carrying it passes.
+LOCALE_WORKER_ENV: Final[tuple[str, ...]] = (
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+)
+
 
 @pytest.fixture(autouse=True)
 def isolate_the_run_directory_registry() -> Iterator[None]:
@@ -287,13 +411,31 @@ def isolate_the_run_directory_registry() -> Iterator[None]:
     this module from handing the rest of the suite a registry full of paths
     that have been deleted underneath it.
 
+    **The lease that goes with each entry is released here too.**  A prepared
+    directory now also carries an open, locked lease descriptor, held in a
+    second registry beside this one and guarded by the same lock, because
+    liveness is answered by an operating-system lock rather than by the shape
+    of a directory name.  Clearing only the first registry would leave those
+    descriptors open for the remainder of the session - one per prepared
+    directory, in a suite that prepares many - and would leave the lease of a
+    deleted temporary directory registered under a path nothing can release
+    afterwards.  Every lease taken *during* a test is therefore dropped when it
+    ends, and a lease that was already held when the test began is left exactly
+    as it was found.
+
     :yields: ``None`` - the fixture is entirely about the surrounding state.
     """
     with service._active_run_dirs_lock:
         snapshot = set(service._active_run_dirs)
+        held_before = set(service._run_dir_leases)
     try:
         yield
     finally:
+        with service._active_run_dirs_lock:
+            taken = set(service._run_dir_leases) - held_before
+        # Outside the lock: _drop_lease takes it itself.
+        for directory in taken:
+            service._drop_lease(directory)
         with service._active_run_dirs_lock:
             service._active_run_dirs.clear()
             service._active_run_dirs.update(snapshot)
@@ -458,6 +600,11 @@ def worker_document(locations: Sequence[str]) -> dict[str, Any]:
                             line=BACKGROUND_LINE + 1,
                             name="a precondition",
                             matched=True,
+                            # ``matched`` and ``match.location`` state one
+                            # fact and the schema requires them to agree, so a
+                            # matched step names the definition it resolved
+                            # to, exactly as a real shard does.
+                            match={"location": CANNED_STEP_LOCATION},
                             result={"status": "passed", "duration": 1_000_000},
                         )
                     ],
@@ -477,6 +624,7 @@ def worker_document(locations: Sequence[str]) -> dict[str, Any]:
                             line=line + 1,
                             name="a precondition",
                             matched=True,
+                            match={"location": CANNED_STEP_LOCATION},
                             result=result,
                         )
                     ],
@@ -585,8 +733,8 @@ class RecordingSpawn:
     orchestration matrix runs in milliseconds.
 
     Attributes:
-        base: The run base, used to recover a shard index from its output path
-            through the public path accessor.
+        base: The run base, from which a shard index is recovered out of an
+            output path through the public path accessor.
         behaviour: Per-shard-index override drawn from :data:`COMPLETE`,
             :data:`NO_FILE`, :data:`EMPTY_FILE`, :data:`INVALID_JSON` and
             :data:`LAUNCH_RAISES`; an index not named behaves as
@@ -1636,6 +1784,382 @@ def test_the_untagged_features_are_reachable_only_by_a_negative_expression(
 
 
 # =========================================================================== #
+# Path safety of the selection (CWE-22, CWE-367)
+#
+# Selection decides what runs, and what runs is opened again by name - by
+# behave, in another process, because AAP deviation 1 pins the features/<name>
+# spelling into the JSON uri, the rerun manifest and the commands operators
+# type.  Two defects followed from that shape and both were reproduced on a
+# real filesystem before they were fixed: a listing that walked pathnames with
+# iterdir()/is_file() followed a link standing where the features directory
+# should be and selected scenarios from outside the suite, and a path that was
+# checked and then handed to a parser that opened it again could be a different
+# file by the time it was read.
+#
+# The subject now takes the contents *and* the object identity of every feature
+# from app/reporting/rerun_report.py's verified reader, and re-checks that
+# identity immediately before it builds a worker command.  Each case below is
+# an observable consequence: a link is refused, a swap is detected, and every
+# refusal is a tolerated problem that leaves the run at status 0 (AAP 0.4.1).
+#
+# Every link here is built with os.symlink/os.link in pytest's own temporary
+# directory, so the probe is the real filesystem condition rather than a
+# stubbed one, and the file a link points at lives outside the checkout root
+# entirely - a selection that reached it is visible as a location the temporary
+# tree cannot produce.
+#
+# Planting a link is a *capability*, not a given: AAP 0.8 puts Windows in the
+# support matrix, and there an unelevated account without the developer-mode
+# privilege cannot create a symbolic link at all (WinError 1314).  Every case
+# below therefore goes through `link_or_skip`, which skips rather than failing
+# when the platform refuses - a test that cannot plant the hostile condition
+# proves nothing about the refusal, and failing in its own setup would report
+# a production defect that is not there.
+# =========================================================================== #
+
+
+def link_or_skip(linker: Any, source: Path, destination: Path, **keywords: Any) -> None:
+    """Plant a link with ``linker``, or skip the test if the platform cannot.
+
+    :param linker: ``os.symlink`` or ``os.link``.
+    :param source: What the link points at.
+    :param destination: Where the link is created.
+    :param keywords: Passed through - ``target_is_directory`` for a directory
+        symlink on Windows.
+    """
+    try:
+        linker(source, destination, **keywords)
+    except (AttributeError, NotImplementedError, OSError) as error:
+        pytest.skip(f"this platform cannot create the link: {error!r}")
+
+#: The feature planted *outside* the suite.  Its single scenario sits on a line
+#: the temporary tree also uses, which is deliberate: a location alone would
+#: not distinguish it, so every assertion below keys on the feature path.
+OUTSIDE_FEATURE: Final[FeatureFile] = FeatureFile(
+    filename="Escaped.feature",
+    title="Outside feature",
+    text="""Feature: Outside feature
+
+  Scenario: outside one
+    Given a precondition
+""",
+)
+
+#: The outside feature's own scenario line.
+OUTSIDE_LOCATION_LINE: Final[int] = 3
+
+#: What replaces a feature file mid-run in the swap cases: a different length
+#: and a different scenario line, so the substitution is visible both in the
+#: object identity (size and timestamps) and in what a parse would yield.
+REPLACEMENT_TEXT: Final[str] = """Feature: Zulu alpha feature
+
+  Scenario: substituted alpha
+    Given a precondition
+"""
+
+#: The scenario line the replacement declares, which no assertion may ever see
+#: selected: seeing it would mean the run executed the file that arrived after
+#: the check instead of the one that passed it.
+REPLACEMENT_LINE: Final[int] = 3
+
+
+def write_outside_feature(outside_root: Path) -> Path:
+    """Write :data:`OUTSIDE_FEATURE` outside any checkout root.
+
+    Args:
+        outside_root: A directory that is **not** the temporary checkout root -
+            pytest's ``tmp_path``, whose child the checkout root is - so that
+            nothing under it is reachable from the features directory except
+            through a link.
+
+    Returns:
+        The feature file written.
+    """
+    directory = outside_root / "outside"
+    directory.mkdir(exist_ok=True)
+    path = directory / OUTSIDE_FEATURE.filename
+    path.write_text(OUTSIDE_FEATURE.text, encoding="utf-8")
+    return path
+
+
+def replace_feature(base: Path | str | None, filename: str, text: str) -> None:
+    """Unlink a feature file and write a different one in its place.
+
+    The swap a probe performs while a run is between its check and its use: the
+    replacement is a new object, so every field of the recorded identity that
+    can change does - the inode may or may not be recycled, and the size and
+    the change timestamp move regardless.
+
+    Args:
+        base: The checkout root the features directory hangs off, as the
+            subject passed it on.
+        filename: The feature file's own name.
+        text: The Gherkin source to write in its place.
+    """
+    path = paths.features_dir(base) / filename
+    path.unlink()
+    path.write_text(text, encoding="utf-8")
+
+
+def swap_on_read(
+    monkeypatch: pytest.MonkeyPatch,
+    feature_path: str,
+    filename: str,
+) -> list[str]:
+    """Replace one feature file the instant the subject finishes reading it.
+
+    The narrowest possible reproduction of the race the identity check exists
+    to catch, and it patches no part of the subject's decision: the real
+    verified reader still runs and still returns what it actually read, and the
+    re-check in ``run_suite`` still runs unpatched.  All that is inserted is the
+    hostile write, at the one moment a probe would have to win.
+
+    Args:
+        monkeypatch: pytest's patcher.
+        feature_path: The repository-relative path of the feature to swap.
+        filename: That feature's own file name.
+
+    Returns:
+        A list that records each swap performed, so a test can assert the race
+        was actually run rather than assuming it.
+    """
+    swapped: list[str] = []
+    verified_reader = service.read_verified_feature
+
+    def reading_then_swapping(
+        path: object, *, base: Path | str | None = None
+    ) -> Any:
+        """Read as the subject does, then replace the file that was read."""
+        verified = verified_reader(path, base=base)
+        if verified is not None and path == feature_path:
+            replace_feature(base, filename, REPLACEMENT_TEXT)
+            swapped.append(feature_path)
+        return verified
+
+    monkeypatch.setattr(service, "read_verified_feature", reading_then_swapping)
+    return swapped
+
+
+def test_a_symlinked_features_directory_selects_nothing_and_is_reported(
+    tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """A link standing where the features directory should be is refused.
+
+    The reproduction of the first defect: the listing followed the link and
+    four scenarios from outside the suite were selected and would have been
+    executed.  The anchor is now opened ``O_NOFOLLOW`` relative to its own
+    parent, so the redirected root yields **no** scenarios and one problem
+    naming the directory - the tolerated shape AAP 0.4.1 requires, identical to
+    the missing-directory row, and not an exception.
+    """
+    outside = write_outside_feature(tmp_path)
+    link_or_skip(
+        os.symlink,
+        outside.parent,
+        paths.features_dir(tmp_artifact_root),
+        target_is_directory=True,
+    )
+
+    selected, problems = service.select_scenarios(base=tmp_artifact_root)
+
+    assert selected == []
+    assert len(problems) == 1
+    assert str(paths.features_dir(tmp_artifact_root)) in problems[0]
+
+    # And the whole run agrees: nothing is launched, the empty result set is
+    # still produced so the publisher has a JSON to read, and the problem
+    # travels to the caller that owns the exit status.
+    spawn = RecordingSpawn(base=tmp_artifact_root)
+    outcome = service.run_suite(base=tmp_artifact_root, spawn=spawn)
+
+    assert spawn.calls == []
+    assert outcome.selected_count == 0
+    assert outcome.result_set is not None
+    assert outcome.merge_produced_nothing is False
+    assert len(outcome.parse_errors) == 1
+    assert str(paths.features_dir(tmp_artifact_root)) in outcome.parse_errors[0]
+
+
+def test_a_symlinked_feature_file_is_not_selected(
+    feature_tree: Path, tmp_path: Path
+) -> None:
+    """A link *inside* the features directory is refused entry by entry.
+
+    The directory can be the real one and a single entry still name a file
+    somewhere else, so the refusal is per entry as well as per directory.  The
+    rest of the tree is unaffected, which is the tolerated half: one planted
+    entry must not cost the suite its own scenarios.
+    """
+    outside = write_outside_feature(tmp_path)
+    link_or_skip(
+        os.symlink,
+        outside,
+        paths.features_dir(feature_tree) / OUTSIDE_FEATURE.filename,
+    )
+
+    selected, problems = service.select_scenarios(base=feature_tree)
+
+    assert OUTSIDE_FEATURE.feature_path not in {unit.feature_path for unit in selected}
+    assert [unit.location for unit in selected] == list(all_locations())
+    assert len(problems) == 1
+    assert OUTSIDE_FEATURE.filename in problems[0]
+
+
+def test_a_hard_linked_feature_file_is_not_selected(
+    feature_tree: Path, tmp_path: Path
+) -> None:
+    """A second hard link to an outside file is refused too.
+
+    A hard link is not a symbolic link and no ``is_symlink`` check sees it: the
+    entry *is* a regular file directly inside the features directory, and it is
+    also a file outside it, so whoever can write the outside name decides what
+    the suite executes.  The link count is what distinguishes it.
+    """
+    outside = write_outside_feature(tmp_path)
+    link_or_skip(
+        os.link,
+        outside,
+        paths.features_dir(feature_tree) / OUTSIDE_FEATURE.filename,
+    )
+
+    selected, problems = service.select_scenarios(base=feature_tree)
+
+    assert OUTSIDE_FEATURE.feature_path not in {unit.feature_path for unit in selected}
+    assert [unit.location for unit in selected] == list(all_locations())
+    assert len(problems) == 1
+    assert OUTSIDE_FEATURE.filename in problems[0]
+
+
+def test_a_feature_whose_contents_cannot_be_read_is_a_tolerated_problem(
+    feature_tree: Path,
+) -> None:
+    """An unreadable feature costs its own scenarios and nothing else.
+
+    A file that is a perfectly ordinary entry of the features directory and yet
+    cannot be *read* - here because its bytes are not UTF-8 - is refused by the
+    verified reader rather than by the listing, which is the other half of the
+    same tolerance: the condition reaches the caller on ``parse_errors``, the
+    remaining features are still selected, and nothing propagates (AAP 0.4.1).
+    """
+    undecodable = paths.features_dir(feature_tree) / "Undecodable.feature"
+    undecodable.write_bytes(b"Feature: \xff\xfe not utf-8\n")
+
+    selected, problems = service.select_scenarios(base=feature_tree)
+
+    assert [unit.location for unit in selected] == list(all_locations())
+    assert len(problems) == 1
+    assert problems[0].startswith(
+        f"{paths.NORMALIZED_FEATURES_PREFIX}{undecodable.name}"
+    )
+
+
+def test_selection_parses_the_contents_that_were_verified(
+    feature_tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The units come from the verified text, not from a second open of the path.
+
+    The property that closes the reopen half of the defect, asserted by making
+    the two disagree: the verified reader is made to return contents that are
+    **not** what the file on disk holds, and the selection follows the contents.
+    A subject that reopened the pathname - as ``behave.parser.parse_file`` does,
+    and as this module used to - would have returned the file's own two
+    scenarios and failed here.
+    """
+    substituted = rerun_report.VerifiedFeature(
+        path=BETA_FEATURE.feature_path,
+        location=paths.features_dir(feature_tree) / BETA_FEATURE.filename,
+        identity=(0, 0, 0, 0, 0),
+        text="Feature: substituted\n\n\n\n  Scenario: only one\n    Given a step\n",
+    )
+    substituted_line = 5
+    assert substituted_line not in BETA_LOCATION_LINES, (
+        "the substituted line has to be one the file on disk does not declare"
+    )
+    verified_reader = service.read_verified_feature
+
+    def substituting(path: object, *, base: Path | str | None = None) -> Any:
+        """Return the substituted feature for Beta, the real one otherwise."""
+        if path == BETA_FEATURE.feature_path:
+            return substituted
+        return verified_reader(path, base=base)
+
+    monkeypatch.setattr(service, "read_verified_feature", substituting)
+
+    selected, problems = service.select_scenarios(base=feature_tree)
+
+    assert problems == []
+    beta = [
+        unit for unit in selected if unit.feature_path == BETA_FEATURE.feature_path
+    ]
+    assert [unit.location for unit in beta] == [
+        f"{BETA_FEATURE.feature_path}{rerun_report.LINE_SEPARATOR}{substituted_line}"
+    ]
+    assert [unit.name for unit in beta] == ["only one"]
+    # The other feature was read normally, so the substitution is the only
+    # difference between this selection and the ordinary one.
+    assert [
+        unit.location
+        for unit in selected
+        if unit.feature_path == ALPHA_FEATURE.feature_path
+    ] == [
+        location
+        for location in all_locations()
+        if location.startswith(ALPHA_FEATURE.feature_path)
+    ]
+
+
+def test_a_feature_replaced_after_selection_is_dropped_and_the_run_still_exits_zero(
+    feature_tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A feature swapped between the check and the hand-off executes nothing.
+
+    The reproduction of the second defect, end to end: the file is replaced the
+    instant selection finishes reading it, which is exactly the window a
+    checked-then-reopened path leaves open.  The identity recorded at selection
+    no longer matches, so ``Alpha.feature``'s scenarios are dropped and named
+    while ``Beta.feature``'s still run - and the run stays on the status-``0``
+    row of AAP 0.4.1: a merged document is produced, no shard is dead and
+    nothing is raised.
+    """
+    swapped = swap_on_read(
+        monkeypatch, ALPHA_FEATURE.feature_path, ALPHA_FEATURE.filename
+    )
+    surviving = [
+        location
+        for location in all_locations()
+        if location.startswith(BETA_FEATURE.feature_path)
+    ]
+
+    spawn = RecordingSpawn(base=feature_tree)
+    outcome = service.run_suite(workers=2, base=feature_tree, spawn=spawn)
+
+    assert swapped == [ALPHA_FEATURE.feature_path], "the swap never happened"
+    launched = sorted(
+        itertools.chain.from_iterable(call.locations for call in spawn.calls)
+    )
+    assert launched == sorted(surviving)
+    assert outcome.selected_count == len(surviving)
+    assert outcome.dead_shards == ()
+    assert outcome.result_set is not None
+    assert outcome.merge_produced_nothing is False
+
+    dropped = [
+        message
+        for message in outcome.parse_errors
+        if message.startswith(ALPHA_FEATURE.feature_path)
+    ]
+    assert len(dropped) == 1, outcome.parse_errors
+
+    # The replacement's own scenario is never executed under the approved
+    # file's name, which is the disclosure the check exists to prevent.
+    replacement_location = (
+        f"{ALPHA_FEATURE.feature_path}"
+        f"{rerun_report.LINE_SEPARATOR}{REPLACEMENT_LINE}"
+    )
+    assert replacement_location not in launched
+
+
+# =========================================================================== #
 # The worker command line (AAP 0.4.1's engine/writer division)
 #
 # "behave.ini declares no formatter: test_run_service invokes the engine once
@@ -1813,6 +2337,57 @@ def test_dry_run_is_passed_only_when_asked(feature_tree: Path) -> None:
     assert service.build_worker_command(plan, dry_run=True).count(DRY_RUN_FLAG) == 1
 
 
+def test_an_empty_stage_is_passed_on_every_invocation(feature_tree: Path) -> None:
+    """Every worker command pins the glue roots, whatever else it carries.
+
+    behave prefixes the step directory and the environment file with the stage
+    name and takes that name from ``BEHAVE_STAGE`` when nothing else sets one,
+    joining it to the discovery root with :func:`os.path.join` - so an
+    absolute value redirects both roots outside the checkout, and the
+    environment file at the end of that redirection is *executed*.  An
+    explicit empty stage on the command line is what makes the variable
+    unreachable, so it belongs to every invocation rather than to some of
+    them, and it is one argv element with its value attached because an empty
+    value as a separate element would swallow the argument after it.
+    """
+    plan = only_plan(feature_tree)
+
+    for tags, browser, dry_run in itertools.product(
+        (None, "@Alpha"), (None, "chrome"), (False, True)
+    ):
+        command = service.build_worker_command(
+            plan, tags=tags, browser=browser, dry_run=dry_run
+        )
+        assert command.count(STAGE_FLAG) == 1
+        assert command[-len(plan.locations) :] == list(plan.locations)
+
+
+def test_the_empty_stage_leaves_the_engine_on_the_tracked_glue(
+    feature_tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The engine, given that command, resolves the tracked roots regardless.
+
+    The property is asserted through behave's own configuration parser rather
+    than through the shape of the argument list, because what matters is the
+    step directory and the environment file the engine ends up with - the
+    pair it would otherwise take from an ambient ``BEHAVE_STAGE``.
+    """
+    monkeypatch.setenv(STAGE_ENV_VAR, EXTERNAL_STAGE)
+    monkeypatch.chdir(feature_tree)
+
+    assert service._STAGE_FLAG == STAGE_FLAG
+
+    unbound = Configuration(["--no-color"])
+    assert unbound.steps_dir != DEFAULT_STEPS_DIR
+    assert unbound.environment_file != DEFAULT_ENVIRONMENT_FILE
+
+    bound = Configuration(["--no-color", service._STAGE_FLAG])
+    assert bound.stage == ""
+    assert bound.steps_dir == DEFAULT_STEPS_DIR
+    assert bound.environment_file == DEFAULT_ENVIRONMENT_FILE
+
+
 def test_the_shards_locations_come_last(feature_tree: Path) -> None:
     """The shard's locations are the command's trailing arguments, in its order.
 
@@ -1879,6 +2454,67 @@ def test_behave_ini_declares_no_formatter_and_no_output_file(
         assert paths.TARGET_DIR_NAME not in value
 
 
+def test_behave_ini_declares_an_empty_stage(repo_root: Path) -> None:
+    """The configuration file carries the stage key, and carries it empty.
+
+    Present and empty is the whole point: behave reads ``BEHAVE_STAGE`` only
+    when the stage is ``None``, so a key that exists with an empty value is
+    what puts the variable out of reach, while any *name* at all would send
+    both glue roots to ``<name>_steps`` and ``<name>_environment.py``, neither
+    of which exists in this repository.  The file is read with
+    :mod:`configparser`, which is how the engine reads it.
+    """
+    parser = configparser.ConfigParser()
+    read = parser.read(repo_root / BEHAVE_INI_NAME, encoding="utf-8")
+
+    assert read, f"{BEHAVE_INI_NAME} could not be read"
+    assert parser.has_option(BEHAVE_INI_SECTION, STAGE_OPTION)
+    assert parser[BEHAVE_INI_SECTION][STAGE_OPTION] == ""
+
+
+def test_behave_ini_pins_the_glue_roots_against_an_ambient_stage(
+    repo_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """This repository's own file leaves the engine on the tracked glue.
+
+    The security property itself, asserted end to end on the tracked file: the
+    engine is configured in a directory holding nothing but a copy of it, with
+    an absolute ``BEHAVE_STAGE`` in the environment, and it still resolves
+    ``features/steps`` and ``features/environment.py``.  Without the key it
+    would load step modules from ``/external/path_steps`` and **execute**
+    ``/external/path_environment.py``, which the first pair of assertions
+    below establishes by configuring the same engine in an empty directory.
+
+    A copy in :fixture:`tmp_path` rather than the repository root, because the
+    engine reads its configuration from the working directory and a test that
+    changed into the checkout would also pick up whatever else is discovered
+    there.
+    """
+    monkeypatch.setenv(STAGE_ENV_VAR, EXTERNAL_STAGE)
+
+    unbound_directory = tmp_path / "unbound"
+    unbound_directory.mkdir()
+    monkeypatch.chdir(unbound_directory)
+    unbound = Configuration(["--no-color"])
+    assert unbound.steps_dir == f"{EXTERNAL_STAGE}_{DEFAULT_STEPS_DIR}"
+    assert unbound.environment_file == (
+        f"{EXTERNAL_STAGE}_{DEFAULT_ENVIRONMENT_FILE}"
+    )
+
+    bound_directory = tmp_path / "bound"
+    bound_directory.mkdir()
+    (bound_directory / BEHAVE_INI_NAME).write_text(
+        (repo_root / BEHAVE_INI_NAME).read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    monkeypatch.chdir(bound_directory)
+    bound = Configuration(["--no-color"])
+    assert bound.stage == ""
+    assert bound.steps_dir == DEFAULT_STEPS_DIR
+    assert bound.environment_file == DEFAULT_ENVIRONMENT_FILE
+
+
 def test_the_launch_receives_the_built_command_in_the_run_base(
     feature_tree: Path,
 ) -> None:
@@ -1937,6 +2573,220 @@ def test_the_launch_receives_the_built_command_in_the_run_base(
         )
         assert call.cwd == feature_tree
         assert call.locations == plan.locations
+
+
+# =========================================================================== #
+# The worker's environment
+#
+# A worker is an engine process that reads environment variables to decide
+# which Python it imports and executes - the stage variables above all - and
+# what it trusts when it fetches a browser driver.  Its environment is
+# therefore composed from an allowlist rather than inherited, and these tests
+# assert the composition itself: which names survive, which are dropped, and
+# that the launch is handed precisely that mapping and no other.
+#
+# This is the one place in the module where :mod:`subprocess` is intercepted,
+# and the reason is structural: the ``spawn`` seam is what stands in for the
+# default launch, so the default launch's own environment composition is not
+# observable through it.  The recorder below starts no process.
+# =========================================================================== #
+
+
+@dataclass
+class FakeLaunchedProcess:
+    """What the default launch reads off a process it started itself.
+
+    Attributes:
+        pid: Identifies the worker in the service's live-worker registry.
+            Negative, so it cannot collide with a real process this test
+            session might also be holding.
+        returncode: What :meth:`wait` reports; ``0``, since these tests are
+            about the launch and not about an outcome.
+        stdout: ``None``, which is what puts the launch on its no-pipe path:
+            no reader thread is started and no stream is closed, so the test
+            asserts the environment without a thread in it.
+        stderr: ``None``, for the same reason.
+    """
+
+    pid: int = -1
+    returncode: int = 0
+    stdout: str | None = None
+    stderr: str | None = None
+
+    def wait(self) -> int:
+        """Report the status immediately.
+
+        Returns:
+            :attr:`returncode`.  Nothing is waited for: there is no process.
+        """
+        return self.returncode
+
+
+@dataclass
+class PopenRecorder:
+    """A stand-in for :class:`subprocess.Popen` that records and starts nothing.
+
+    Attributes:
+        commands: The argument list of each launch, in order.
+        environments: The ``env=`` mapping of each launch, copied at the call
+            so a later mutation of the original could not disguise itself.
+    """
+
+    commands: list[tuple[str, ...]] = field(default_factory=list)
+    environments: list[dict[str, str]] = field(default_factory=list)
+
+    def __call__(self, args: Sequence[str], **keywords: Any) -> FakeLaunchedProcess:
+        """Record one launch.
+
+        Args:
+            args: The argument list the service built.
+            **keywords: Everything else the service passes, ``env`` included.
+
+        Returns:
+            A :class:`FakeLaunchedProcess` that exits ``0`` at once.
+        """
+        self.commands.append(tuple(args))
+        self.environments.append(dict(keywords["env"]))
+        return FakeLaunchedProcess()
+
+
+def plant_denied_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Put every denied name into this process's environment.
+
+    Every value planted is the hostile one - an absolute stage, disabled
+    driver-transport verification, substituted driver executables, redirected
+    trust stores - so that a name surviving into a worker would be a name that
+    visibly matters.
+
+    Args:
+        monkeypatch: pytest's environment patcher, which restores every name
+            it set when the test ends.
+
+    Returns:
+        ``None``.
+    """
+    for name, value in DENIED_WORKER_ENV.items():
+        monkeypatch.setenv(name, value)
+
+
+def test_the_worker_environment_drops_every_ambient_control(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Not one denied name reaches a worker, asserted name by name.
+
+    ``BEHAVE_STAGE`` is the one that executes code - behave prefixes both glue
+    roots with the stage and runs the environment file it arrives at - but it
+    is not asserted alone: each of the others changes what the child imports,
+    what it captures, which driver executable it runs or whom it trusts to
+    have signed one, so the contract is the whole set rather than the worst
+    member of it.
+    """
+    plant_denied_environment(monkeypatch)
+
+    environment = service._worker_environment()
+
+    for name in DENIED_WORKER_ENV:
+        assert name not in environment, f"{name} reached the worker"
+
+
+def test_the_worker_environment_preserves_every_allowlisted_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An allowlisted name arrives with the value the parent had, untouched.
+
+    Dropping is the default, so the list of things a worker genuinely needs is
+    the part that has to be exercised: the program search path that locates
+    the browser and its driver, the session and display names a headed
+    browser cannot start without, and the locale group the asserted French
+    required-field message follows.
+    """
+    for name in sorted(service._WORKER_ENV_ALLOWLIST):
+        monkeypatch.setenv(name, f"value-for-{name}")
+
+    environment = service._worker_environment()
+
+    for name in sorted(service._WORKER_ENV_ALLOWLIST):
+        assert environment[name] == f"value-for-{name}"
+    assert "PATH" in service._WORKER_ENV_ALLOWLIST
+    for name in LOCALE_WORKER_ENV:
+        assert name in service._WORKER_ENV_ALLOWLIST
+        assert environment[name] == f"value-for-{name}"
+
+
+def test_the_worker_environment_always_stops_the_child_buffering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unbuffered setting is the run's own, and is set last.
+
+    The live relay is only live if its input is: a Python child whose stdout is
+    a pipe buffers in blocks otherwise.  The value is written after the
+    allowlisted names are copied, so an inherited setting of the same name
+    cannot displace it - which the second half asserts by planting the
+    opposite value in the parent.
+    """
+    monkeypatch.delenv(service._UNBUFFERED_ENV_VAR, raising=False)
+    assert service._worker_environment()[service._UNBUFFERED_ENV_VAR] == (
+        service._UNBUFFERED_ENV_VALUE
+    )
+
+    monkeypatch.setenv(service._UNBUFFERED_ENV_VAR, "0")
+    assert service._worker_environment()[service._UNBUFFERED_ENV_VAR] == (
+        service._UNBUFFERED_ENV_VALUE
+    )
+
+
+def test_the_worker_environment_carries_nothing_outside_the_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The key set is a subset of the allowlist plus the unbuffered setting.
+
+    Asserted as a subset rather than as a list of names, so a name added to
+    the composition in future is either in the allowlist - where it is
+    documented and reviewable - or it fails here.  The mapping is also its own
+    object: it never aliases :data:`os.environ`, and composing it leaves this
+    process's environment as it was, which matters because a run is supervised
+    from several threads that all read it.
+    """
+    plant_denied_environment(monkeypatch)
+    monkeypatch.delenv(service._UNBUFFERED_ENV_VAR, raising=False)
+    before = dict(os.environ)
+
+    environment = service._worker_environment()
+
+    permitted = set(service._WORKER_ENV_ALLOWLIST) | {service._UNBUFFERED_ENV_VAR}
+    assert set(environment) <= permitted
+    assert environment is not os.environ
+    assert dict(os.environ) == before
+
+
+def test_the_launch_is_handed_the_composed_environment_and_no_other(
+    feature_tree: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default launch passes exactly the composed mapping as ``env=``.
+
+    The composition would be worth nothing if the launch built its own
+    environment beside it, so the two are asserted to be the same mapping, in
+    a process whose own environment carries the hostile stage.  Nothing is
+    started: :class:`subprocess.Popen` is replaced for the duration by a
+    recorder, which is the only way to observe the default launch, since the
+    published ``spawn`` seam is what replaces that launch everywhere else in
+    this module.
+    """
+    plant_denied_environment(monkeypatch)
+    recorder = PopenRecorder()
+    monkeypatch.setattr(service.subprocess, "Popen", recorder)
+
+    command = service.build_worker_command(only_plan(feature_tree))
+    worker = service._spawn_worker(command, feature_tree)
+
+    assert worker.returncode == 0
+    assert recorder.commands == [tuple(command)]
+    assert recorder.environments == [service._worker_environment()]
+
+    passed = recorder.environments[0]
+    assert STAGE_ENV_VAR not in passed
+    assert passed[service._UNBUFFERED_ENV_VAR] == service._UNBUFFERED_ENV_VALUE
 
 
 # =========================================================================== #
@@ -2007,17 +2857,16 @@ def test_prepare_workers_dir_gives_every_run_a_directory_of_its_own(
 ) -> None:
     """Preparing twice yields two directories, and destroys nothing.
 
-    This replaces an idempotence the shared directory had and the per-run
-    contract deliberately does not: a second call is a second *run*, so it is
-    given somewhere else to write.  What idempotence is still required of is
-    the removal - :func:`~app.services.cleanup_workers_dir` is called from two
-    ``finally`` blocks - and
+    Preparation is deliberately not idempotent: a second call is a second
+    *run*, so it is given somewhere else to write.  Idempotence is required of
+    the removal instead - :func:`~app.services.cleanup_workers_dir` is called
+    from two ``finally`` blocks - and
     :func:`test_cleanup_workers_dir_is_a_silent_no_op_when_already_gone`
     asserts that.
 
-    Nothing already in the shared directory is touched, which is the property
-    the concurrency finding turns on: the marker below stands for a
-    concurrent run's work, and it survives.
+    Nothing already under the shared directory is touched, which is the
+    property that makes two runs safe side by side: the marker below stands
+    for a concurrent run's intermediates, and it survives.
     """
     first = service.prepare_workers_dir(base=tmp_artifact_root)
     marker = first / f"marker{JSON_SUFFIX}"
@@ -2239,6 +3088,2500 @@ def test_a_worker_directory_that_cannot_be_created_is_the_empty_merge_state(
     # Neither of the two status-0 channels carries it.
     assert outcome.parse_errors == ()
     assert outcome.dead_shards == ()
+
+
+# =========================================================================== #
+# Links, junctions and the path-based removal (the Windows fallback)
+#
+# Every removal in this service is either descriptor-relative - the POSIX path,
+# which holds each component of the path open with ``O_NOFOLLOW`` - or resolved
+# by pathname, which is the only thing Windows offers and which AAP 0.8 lists
+# as a supported platform.  The pathname fallback is where a *junction* matters:
+# ``os.lstat`` reports one with the directory bit set and the link bit clear and
+# with a device and an inode of its own, so a symbolic-link test alone passes it
+# and ``iterdir`` plus :func:`shutil.rmtree` then walk through it and recursively
+# delete the children of whatever it points at, anywhere on the machine
+# (CWE-22, and CWE-367 for a swap made mid-operation).
+#
+# **Two distinct defects live here, and the second is the harder one.**  A
+# junction that is *already* at the path is refused by the inspection every
+# removal begins with, and the first group of tests below is about that.  A
+# junction *substituted while the removal is in progress* cannot be refused by
+# any amount of re-inspecting the name, because the check and the recursive
+# deletion are two separate resolutions of one pathname: whatever the check
+# saw, ``rmtree`` resolves the name again and walks whatever stands there by
+# then.  The service closes that window by taking the name out of the race -
+# :func:`~app.services.delete_verified_entry` moves the entry to a private
+# random ``.removing-<hex>`` name inside the already-verified parent, which no
+# other process can address, and re-establishes the object's identity through
+# that private name (still a directory, still not a reparse point, and the same
+# device and inode a rename preserves) before anything recursive happens to it.
+# The second group of tests drives exactly that substitution, at both
+# boundaries the primitive is used at: one run directory, and the shared
+# intermediate directory's own reclaim loop.
+#
+# The junction is simulated rather than created, because no filesystem reachable
+# from this suite can hold one: the two Windows-only fields
+# :class:`os.stat_result` carries for a reparse point are supplied by
+# :class:`JunctionStat` through a patched :func:`os.lstat`, which is precisely
+# the shape the production code reads.  A substitution is produced two
+# independent ways, because one mechanism proving a refusal would leave the
+# other's branch unasserted: :func:`swap_the_private_name` lets the real rename
+# happen and then replaces the private name on disk, and
+# :func:`pretend_the_private_name_is_a_junction` leaves the rename's result
+# alone and makes the re-inspection report it as a reparse point.  The fallback
+# itself is reached by patching the capability flag the service dispatches on,
+# so the Windows branch is exercised on this host rather than left to a
+# platform no test runs on.
+#
+# Every test below asserts the same two things: a refusal that names what was
+# found, and a victim file that is still there afterwards, byte for byte.  A
+# refusal alone would be satisfied by a function that deleted the tree and then
+# complained.
+# =========================================================================== #
+
+#: ``IO_REPARSE_TAG_MOUNT_POINT``, the tag Windows reports for a directory
+#: junction.  Carried by :class:`JunctionStat` so the stand-in is a junction
+#: specifically rather than "some reparse point", and read by the production
+#: code through :func:`getattr` - which is how one code path serves both
+#: platforms.
+JUNCTION_REPARSE_TAG: Final[int] = 0xA0000003
+
+#: A run-shaped directory name this process never produced: process id ``1`` -
+#: init, which exists on every host - and a token of twelve hex zeroes, so
+#: :func:`~app.services.run_directory_owner` parses it.  It is the review's own
+#: reproduction of the liveness finding, where a name that merely *looks* like a
+#: run's kept another run's intermediates indefinitely, and it doubles here as
+#: the thing a junction must not be allowed to reach.
+FORGED_RUN_DIR_NAME: Final[str] = "1-000000000000"
+
+#: What the service calls the build output root in a refusal.  A refusal has to
+#: *name* the component it found the indirection at, because "something on the
+#: path is not a directory" is not a diagnostic an operator can act on.
+BUILD_OUTPUT_ROLE: Final[str] = "build output directory"
+
+#: What it calls the shared per-worker directory in the same refusals.
+INTERMEDIATE_ROLE: Final[str] = "intermediate directory"
+
+#: The two components of the path to a run directory that the pathname fallback
+#: verifies before it deletes anything through their names, each paired with the
+#: accessor that resolves it and the role its own refusal carries.  The
+#: accessors are the paths module's, so no test here spells a path out.
+VERIFIED_CHAIN_COMPONENTS: Final[
+    tuple[tuple[Callable[[Path], Path], str], ...]
+] = (
+    (paths.target_root, BUILD_OUTPUT_ROLE),
+    (paths.workers_dir, INTERMEDIATE_ROLE),
+)
+
+#: The role a run directory itself is given in a refusal, as against the two
+#: components of the path leading to it.
+RUN_DIRECTORY_ROLE: Final[str] = "run directory"
+
+#: The role ``app/cli.py``'s clean step gives an entry it is emptying the build
+#: output of.  Named here because that step and this service's reclaim share
+#: one destructive primitive and differ in exactly one argument - what a
+#: symbolic link at the entry means - so the difference is asserted at the call
+#: shape the other caller makes rather than described in a comment.
+BUILD_OUTPUT_ENTRY_ROLE: Final[str] = "entry of the build output"
+
+#: The two removal paths a symbolically linked shared directory has to be
+#: refused by, each with the fragment its own refusal carries: the POSIX path
+#: fails the ``O_NOFOLLOW`` walk, and the pathname fallback identifies the link
+#: itself.  Parametrized over both because the link case is *pre-existing*
+#: behaviour that the junction fix must not have cost either branch.
+SYMLINKED_ROOT_REFUSALS: Final[tuple[tuple[bool, str], ...]] = (
+    (True, "chain of real directories"),
+    (False, "symbolic link"),
+)
+
+#: A second run-shaped name, so the reclaim loop's tests have more than one
+#: entry to iterate over: a substitution defeated at the first entry proves
+#: nothing about the second, and a loop that gave up after one refusal would
+#: leave the rest of the shared directory unreclaimed and unreported.
+SECOND_FORGED_RUN_DIR_NAME: Final[str] = "2-000000000000"
+
+#: The contents of an external victim file, distinctive rather than ``{}`` so
+#: that "still there, byte for byte" is a real comparison and not a match
+#: against the empty document every other fixture in this module writes.
+EXTERNAL_VICTIM_TEXT: Final[str] = '{"outside": "this checkout"}'
+
+#: The refusal a *substitution* carries, as against the refusal an
+#: already-present junction carries.  It is the sentence that says the entry
+#: was moved out of the race before anything recursive happened to it, so it is
+#: asserted on every substitution test: a reason naming a reparse point alone
+#: would also be produced by code that walked the replacement first.
+SUBSTITUTION_REFUSAL: Final[str] = "was replaced while it was being removed"
+
+#: And the clause of that refusal that speaks for the victim tree.
+NOTHING_DELETED_THROUGH_IT: Final[str] = "nothing was deleted through it"
+
+
+class JunctionStat:
+    """An :func:`os.lstat` result shaped like a Windows directory junction's.
+
+    Everything the production code reads off a real junction and nothing else:
+    the mode, device and inode are the *real* ones, so every identity and
+    directory test passes exactly as it would for an ordinary directory, and
+    the two Windows-only fields are the only thing that gives it away.  That is
+    the whole point of the finding - a junction is indistinguishable from a
+    directory until those fields are consulted.
+
+    Attributes:
+        st_mode: The real mode, with the directory bit set and the link bit
+            clear, copied from the directory standing in for the junction.
+        st_dev: The real device number, so :func:`os.path.samestat`-style
+            comparisons cannot tell the difference either.
+        st_ino: The real inode number, for the same reason.
+        st_file_attributes: ``FILE_ATTRIBUTE_REPARSE_POINT``, the flag Windows
+            sets on any reparse point.
+        st_reparse_tag: :data:`JUNCTION_REPARSE_TAG`, which says *which* kind.
+    """
+
+    def __init__(self, real: os.stat_result) -> None:
+        """Copy a real directory's identity and add the reparse fields.
+
+        Args:
+            real: The :func:`os.lstat` result of the directory standing in for
+                the junction.
+        """
+        self.st_mode = real.st_mode
+        self.st_dev = real.st_dev
+        self.st_ino = real.st_ino
+        self.st_file_attributes = stat.FILE_ATTRIBUTE_REPARSE_POINT
+        self.st_reparse_tag = JUNCTION_REPARSE_TAG
+
+
+def pretend_a_junction(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
+    """Make :func:`os.lstat` report one path as a Windows junction.
+
+    Patched at :mod:`os` rather than on the service, because the service calls
+    :func:`os.lstat` through the module - which is also the only way a
+    :class:`~pathlib.Path` method under test would see it.  Every other path is
+    answered by the real call, so the patch is as narrow as the finding: one
+    directory entry lies about what it is, and the code either notices or
+    deletes through it.
+
+    Args:
+        monkeypatch: pytest's patching fixture, which restores :mod:`os` after
+            the test whatever the outcome.
+        path: The one path to report as a junction.  It must exist, because the
+            stand-in is built from its real ``lstat`` result.
+    """
+    real_lstat = os.lstat
+
+    def lstat(target: Any, *arguments: Any, **keywords: Any) -> Any:
+        """Answer for the faked path, and delegate everything else.
+
+        Args:
+            target: The path or descriptor being inspected.
+            *arguments: Positional arguments passed through untouched.
+            **keywords: Keyword arguments - ``dir_fd`` among them - passed
+                through untouched.
+
+        Returns:
+            A :class:`JunctionStat` for the faked path, and the real result for
+            every other path, descriptor or descriptor-relative name.
+        """
+        info = real_lstat(target, *arguments, **keywords)
+        if isinstance(target, (str, os.PathLike)) and Path(target) == path:
+            return JunctionStat(info)
+        return info
+
+    monkeypatch.setattr(os, "lstat", lstat)
+
+
+def stranded_run_directory(base: Path, name: str = FORGED_RUN_DIR_NAME) -> Path:
+    """Create a run-shaped directory holding one intermediate document.
+
+    The thing every refusal below has to leave intact, and the thing the
+    liveness tests have to be able to reclaim: a directory inside the shared
+    intermediate directory, named as a run's, carrying a per-worker result
+    document - the tracebacks, attachments and scenario data a stale directory
+    keeps in the workspace.
+
+    Args:
+        base: The temporary checkout root.
+        name: The directory's name, defaulting to :data:`FORGED_RUN_DIR_NAME`.
+
+    Returns:
+        The created directory.  Its parent is created through
+        :func:`app.utils.paths.ensure_dir`, the same accessor production uses,
+        so the tree is the one the service expects to find.
+    """
+    paths.ensure_dir(paths.workers_dir(base))
+    directory = paths.workers_dir(base) / name
+    directory.mkdir()
+    (directory / f"worker{JSON_SUFFIX}").write_text("{}", encoding="utf-8")
+    return directory
+
+
+def external_victim(base: Path, name: str) -> Path:
+    """Create a directory outside the build output, holding known bytes.
+
+    The tree a substitution is pointed at, and the only thing that can prove a
+    refusal was made *before* the recursive deletion rather than after it: on
+    Windows the deletion resolved through a junction would take this
+    directory's children with it, so its file surviving with identical
+    contents is the assertion the whole junction group turns on.
+
+    Args:
+        base: The temporary checkout root.  The victim is created beside the
+            build output rather than inside it, which is what makes it
+            external: nothing this service owns has any business reaching it.
+        name: The victim directory's own name, so one test can hold several.
+
+    Returns:
+        The created directory.  It contains one file,
+        ``victim<JSON_SUFFIX>``, carrying :data:`EXTERNAL_VICTIM_TEXT`.
+    """
+    directory = base / name
+    directory.mkdir()
+    (directory / f"victim{JSON_SUFFIX}").write_text(
+        EXTERNAL_VICTIM_TEXT, encoding="utf-8"
+    )
+    return directory
+
+
+def assert_victim_survived(victim: Path) -> None:
+    """Assert an external victim tree is exactly as it was created.
+
+    Args:
+        victim: A directory :func:`external_victim` created.  Both halves are
+            asserted, because they fail differently: the directory itself
+            surviving means the entry was not unlinked, and the file inside it
+            surviving with identical bytes means nothing recursed into it.
+    """
+    assert victim.is_dir()
+    assert (victim / f"victim{JSON_SUFFIX}").read_text(
+        encoding="utf-8"
+    ) == EXTERNAL_VICTIM_TEXT
+
+
+def swap_the_private_name(
+    monkeypatch: pytest.MonkeyPatch, substitute: Callable[[Path], None]
+) -> list[Path]:
+    """Let the service's rename happen, then substitute at the private name.
+
+    The first of the two mechanisms this module produces a mid-removal
+    substitution with, and the one that makes no assumption about how the
+    service inspects anything: the rename really happens, so the entry really
+    is at a private name it chose, and something else really is standing there
+    by the time it looks again.  It is the closest a POSIX host can come to a
+    junction appearing in that window - the attacker has to guess a name it
+    cannot see, which is the point of the design, so the test is handed the
+    name instead.
+
+    Patched at :mod:`os` rather than on the service, because
+    :func:`os.replace` is called through the module.  Only a destination whose
+    name carries the service's own private prefix is interfered with, so an
+    unrelated rename made anywhere under test is untouched.
+
+    Args:
+        monkeypatch: pytest's patching fixture, which restores :mod:`os`
+            afterwards whatever the outcome.
+        substitute: What to leave at the private name once the rename has
+            completed.  Called with that name; a substitution that moves the
+            real directory elsewhere first is how a test keeps the evidence it
+            needs to assert on afterwards.
+
+    Returns:
+        The list the patch appends each private name to, in the order they
+        were used - empty if the service never reached its rename at all,
+        which is itself worth asserting.
+    """
+    real_replace = os.replace
+    swapped: list[Path] = []
+
+    def replace(
+        source: Any, destination: Any, *arguments: Any, **keywords: Any
+    ) -> None:
+        """Perform the real rename, then substitute at a private name.
+
+        Args:
+            source: The entry being moved aside.
+            destination: The private name it is being moved to.
+            *arguments: Positional arguments passed through untouched.
+            **keywords: Keyword arguments passed through untouched.
+        """
+        real_replace(source, destination, *arguments, **keywords)
+        aside = Path(destination)
+        if aside.name.startswith(service._ASIDE_PREFIX):
+            swapped.append(aside)
+            substitute(aside)
+
+    monkeypatch.setattr(os, "replace", replace)
+    return swapped
+
+
+def pretend_the_private_name_is_a_junction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[Path]:
+    """Make the re-inspection of any private name report a junction.
+
+    The second mechanism, and the one that reaches the branch a POSIX
+    filesystem cannot otherwise present: the rename is left entirely alone, so
+    the object at the private name *is* the directory that was checked, and the
+    only thing that changes is what ``lstat`` says about it when the service
+    looks again.  That is precisely the Windows case - a mount-point reparse
+    point with the directory bit set - and the service either notices it or
+    recurses into whatever it redirects to.
+
+    The private name cannot be predicted by the caller, which is why
+    :func:`pretend_a_junction` cannot serve here: the answer is keyed on the
+    service's own prefix instead, and every other path is answered by the real
+    call.
+
+    Args:
+        monkeypatch: pytest's patching fixture, which restores :mod:`os`
+            afterwards whatever the outcome.
+
+    Returns:
+        The list the patch appends each private name it answered for to, so a
+        test can assert the re-inspection happened rather than inferring it
+        from a refusal.
+    """
+    real_lstat = os.lstat
+    answered: list[Path] = []
+
+    def lstat(target: Any, *arguments: Any, **keywords: Any) -> Any:
+        """Answer for a private name, and delegate everything else.
+
+        Args:
+            target: The path or descriptor being inspected.
+            *arguments: Positional arguments passed through untouched.
+            **keywords: Keyword arguments - ``dir_fd`` among them - passed
+                through untouched.
+
+        Returns:
+            A :class:`JunctionStat` for a ``.removing-<hex>`` path, and the
+            real result for every other path or descriptor.
+        """
+        info = real_lstat(target, *arguments, **keywords)
+        if isinstance(target, (str, os.PathLike)) and Path(
+            target
+        ).name.startswith(service._ASIDE_PREFIX):
+            answered.append(Path(target))
+            return JunctionStat(info)
+        return info
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    return answered
+
+
+def entries_left_in(root: Path) -> list[Path]:
+    """List a directory's entries without inspecting any of them.
+
+    Used by the tests that leave :func:`os.lstat` patched while they assert:
+    :func:`os.scandir` reports a name without ``lstat``-ing it, so a listing
+    made this way is unaffected by a patch that answers for private names -
+    and a listing is all these tests need, since what they assert about the
+    survivor is its *contents*.
+
+    Args:
+        root: The directory to list.
+
+    Returns:
+        Its entries, sorted, as paths.
+    """
+    return sorted(root.iterdir())
+
+
+def test_a_junction_shared_directory_is_refused_and_nothing_in_it_removed(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A junction where ``target/.workers`` belongs stops the clean dead.
+
+    The reclaim step is what ``--clean`` and every exit path call for that
+    directory, and it enumerates the directory's entries and removes each one.
+    Resolved through a junction, that enumeration is of somebody else's
+    directory and the removals are of somebody else's children, which is how a
+    recursive delete leaves the checkout altogether (CWE-22).
+
+    So the answer has to be a refusal *before* the enumeration: a reason naming
+    the reparse point, an empty ``retained`` - nothing was inspected, so nothing
+    can be claimed to have been deliberately kept - and every child still
+    present, contents included.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+    shared_root = paths.workers_dir(tmp_artifact_root)
+
+    monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", False)
+    pretend_a_junction(monkeypatch, shared_root)
+
+    reason, retained = service.reclaim_workers_root(base=tmp_artifact_root)
+
+    assert reason is not None
+    assert "reparse point" in reason
+    assert INTERMEDIATE_ROLE in reason
+    assert str(shared_root) in reason
+    assert retained == ()
+
+    # The junction's children - which on Windows would be another tree's - are
+    # exactly as they were.
+    assert stranded.is_dir()
+    assert (stranded / f"worker{JSON_SUFFIX}").read_text(encoding="utf-8") == "{}"
+
+
+def test_a_junction_run_directory_is_neither_walked_nor_removed(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The entry being removed is itself tested for every indirection.
+
+    ``rmtree`` on a junction deletes what the junction points at rather than
+    the junction, so the entry's own inspection is a link test *and* a reparse
+    test.  Driven directly at the pathname fallback, which is the only branch
+    that can reach a name this way.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+    victim = stranded / f"worker{JSON_SUFFIX}"
+
+    pretend_a_junction(monkeypatch, stranded)
+
+    reason = service._remove_by_path(stranded, tmp_artifact_root)
+
+    assert reason is not None
+    assert "reparse point" in reason
+    assert RUN_DIRECTORY_ROLE in reason
+    assert str(stranded) in reason
+    assert stranded.is_dir()
+    assert victim.is_file()
+
+
+def test_the_cleanup_entry_point_refuses_a_junction_run_directory(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal reaches the caller through the public function.
+
+    :func:`~app.services.cleanup_workers_dir` is what ``app/cli.py`` and
+    ``run_suite`` call, and it is the reason a refusal is not merely a silent
+    skip: the reason it returns becomes the run's
+    :attr:`~app.services.RunOutcome.infrastructure_error`, so a run whose
+    intermediates could not be removed cannot report success.  Asserted through
+    that function rather than through the private one, because the dispatch to
+    the pathname fallback is part of what has to hold.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+
+    monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", False)
+    pretend_a_junction(monkeypatch, stranded)
+
+    reason = service.cleanup_workers_dir(
+        base=tmp_artifact_root, directory=stranded
+    )
+
+    assert reason is not None
+    assert "reparse point" in reason
+    assert "could not be removed" in reason
+    assert stranded.is_dir()
+    assert (stranded / f"worker{JSON_SUFFIX}").is_file()
+
+
+@pytest.mark.parametrize(("component", "role"), VERIFIED_CHAIN_COMPONENTS)
+def test_a_junction_on_the_path_refuses_the_removal_below_it(
+    tmp_artifact_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: Callable[[Path], Path],
+    role: str,
+) -> None:
+    """A junction *above* the entry is as dangerous as one at it.
+
+    The entry itself can be a perfectly ordinary directory and the deletion
+    still escape, because every operation resolves the whole pathname: with
+    ``target`` or ``target/.workers`` redirected, ``<base>/target/.workers/<run>``
+    names a directory in another tree, and removing it recursively takes that
+    tree's children with it while every check made on the entry passes.
+
+    Which is why the fallback verifies the chain *first* and names the
+    component it refused - the parametrization here being the two components it
+    verifies.
+
+    Args:
+        tmp_artifact_root: The temporary checkout root.
+        monkeypatch: pytest's patching fixture.
+        component: The accessor for the component standing in as a junction.
+        role: What the service calls that component in its refusal.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+    victim = stranded / f"worker{JSON_SUFFIX}"
+
+    pretend_a_junction(monkeypatch, component(tmp_artifact_root))
+
+    reason = service._remove_by_path(stranded, tmp_artifact_root)
+
+    assert reason is not None
+    assert "reparse point" in reason
+    assert role in reason
+    assert str(component(tmp_artifact_root)) in reason
+    # The refusal happened before the removal rather than after it.
+    assert stranded.is_dir()
+    assert victim.is_file()
+
+
+def test_the_verified_chain_accepts_a_real_tree_and_tolerates_absence(
+    tmp_artifact_root: Path,
+) -> None:
+    """Nothing to complain about, and nothing there, are both ``None``.
+
+    Absence is deliberately not a problem: these functions exist to *remove*
+    things, and a component that is not there means there is nothing below it
+    to remove.  Treating it as a failure would make every second cleanup - the
+    idempotent one ``app/cli.py`` performs on its way out - report a refusal.
+    """
+    # Neither component exists yet.
+    assert service._verified_real_chain(tmp_artifact_root) is None
+
+    # The build output exists, the shared directory does not.
+    paths.ensure_dir(paths.target_root(tmp_artifact_root))
+    assert service._verified_real_chain(tmp_artifact_root) is None
+
+    # Both exist, both plain.
+    paths.ensure_dir(paths.workers_dir(tmp_artifact_root))
+    assert service._verified_real_chain(tmp_artifact_root) is None
+
+
+@pytest.mark.parametrize(("component", "role"), VERIFIED_CHAIN_COMPONENTS)
+def test_the_verified_chain_names_the_role_of_a_junction(
+    tmp_artifact_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    component: Callable[[Path], Path],
+    role: str,
+) -> None:
+    """Each component is checked, and the reason says which one failed.
+
+    Args:
+        tmp_artifact_root: The temporary checkout root.
+        monkeypatch: pytest's patching fixture.
+        component: The accessor for the component standing in as a junction.
+        role: What the service calls it.
+    """
+    paths.ensure_dir(paths.workers_dir(tmp_artifact_root))
+
+    pretend_a_junction(monkeypatch, component(tmp_artifact_root))
+
+    reason = service._verified_real_chain(tmp_artifact_root)
+
+    assert reason is not None
+    assert "reparse point" in reason
+    assert role in reason
+
+
+@pytest.mark.parametrize(("component", "role"), VERIFIED_CHAIN_COMPONENTS)
+def test_the_verified_chain_refuses_a_file_where_a_directory_belongs(
+    tmp_artifact_root: Path, component: Callable[[Path], Path], role: str
+) -> None:
+    """A plain file standing in for a directory is refused by role too.
+
+    The other way the chain can be untrustworthy, and the one a ``--no-clean``
+    run or a clean that failed part-way can leave behind: whatever is at the
+    name, it is not the directory this service owns, so nothing is resolved
+    through it.
+
+    Args:
+        tmp_artifact_root: The temporary checkout root.
+        component: The accessor for the component to replace with a file.
+        role: What the service calls that component.
+    """
+    occupied = component(tmp_artifact_root)
+    occupied.parent.mkdir(parents=True, exist_ok=True)
+    occupied.write_text("not a directory", encoding="utf-8")
+
+    reason = service._verified_real_chain(tmp_artifact_root)
+
+    assert reason is not None
+    assert "is not a directory" in reason
+    assert role in reason
+    assert str(occupied) in reason
+    assert occupied.read_text(encoding="utf-8") == "not a directory"
+
+
+def test_the_reparse_test_tells_a_directory_from_a_link_and_a_junction(
+    tmp_artifact_root: Path,
+) -> None:
+    """The three answers the single indirection test has to give.
+
+    Asserted as a unit, on the function every caller shares, because the
+    finding was precisely that two of these three cases had one answer: a
+    symbolic link was refused and a junction - reported by ``lstat`` as a
+    directory with the link bit clear - was walked.
+    """
+    plain = tmp_artifact_root / "plain"
+    plain.mkdir()
+    link = tmp_artifact_root / "link"
+    link.symlink_to(plain, target_is_directory=True)
+
+    assert service._reparse_problem(
+        plain, os.lstat(plain), RUN_DIRECTORY_ROLE
+    ) is None
+
+    link_problem = service._reparse_problem(
+        link, os.lstat(link), RUN_DIRECTORY_ROLE
+    )
+    assert link_problem is not None
+    assert "symbolic link" in link_problem
+    assert RUN_DIRECTORY_ROLE in link_problem
+    assert "neither followed nor removed" in link_problem
+
+    junction_problem = service._reparse_problem(
+        plain, JunctionStat(os.lstat(plain)), RUN_DIRECTORY_ROLE
+    )
+    assert junction_problem is not None
+    assert "reparse point" in junction_problem
+    assert RUN_DIRECTORY_ROLE in junction_problem
+    assert "nothing was removed" in junction_problem
+
+
+def test_the_directory_test_reads_the_same_three_answers_off_the_disk(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """:func:`_real_directory_problem` is that test plus the two disk cases.
+
+    It inspects the path itself, so it answers for one case the indirection
+    test cannot see - something that is not a directory at all - and for one
+    that must never be an error, a path that is simply not there.
+    """
+    plain = tmp_artifact_root / "plain"
+    plain.mkdir()
+    link = tmp_artifact_root / "link"
+    link.symlink_to(plain, target_is_directory=True)
+    ordinary_file = tmp_artifact_root / f"file{JSON_SUFFIX}"
+    ordinary_file.write_text("{}", encoding="utf-8")
+
+    assert service._real_directory_problem(plain, INTERMEDIATE_ROLE) is None
+    assert (
+        service._real_directory_problem(
+            tmp_artifact_root / "absent", INTERMEDIATE_ROLE
+        )
+        is None
+    )
+
+    link_problem = service._real_directory_problem(link, INTERMEDIATE_ROLE)
+    assert link_problem is not None
+    assert "symbolic link" in link_problem
+
+    file_problem = service._real_directory_problem(
+        ordinary_file, INTERMEDIATE_ROLE
+    )
+    assert file_problem is not None
+    assert "is not a directory" in file_problem
+    assert INTERMEDIATE_ROLE in file_problem
+
+    pretend_a_junction(monkeypatch, plain)
+    junction_problem = service._real_directory_problem(plain, INTERMEDIATE_ROLE)
+    assert junction_problem is not None
+    assert "reparse point" in junction_problem
+    assert INTERMEDIATE_ROLE in junction_problem
+
+
+@pytest.mark.parametrize(("confined", "fragment"), SYMLINKED_ROOT_REFUSALS)
+def test_a_symlinked_shared_directory_is_refused_on_both_paths(
+    tmp_artifact_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    confined: bool,
+    fragment: str,
+) -> None:
+    """The link case both removal branches already handled still holds.
+
+    The junction test was added *beside* the link test, not in place of it, so
+    the pre-existing behaviour is asserted here at both branches: the
+    descriptor-relative walk fails its ``O_NOFOLLOW`` open and the pathname
+    fallback identifies the link itself.  Either way the linked-to tree is
+    untouched, which is the property that matters to whoever owns it.
+
+    Args:
+        tmp_artifact_root: The temporary checkout root.
+        monkeypatch: pytest's patching fixture.
+        confined: Whether to exercise the descriptor-relative path or the
+            pathname fallback.
+        fragment: The text that branch's refusal carries.
+    """
+    elsewhere = tmp_artifact_root / "elsewhere"
+    elsewhere.mkdir()
+    victim = elsewhere / f"victim{JSON_SUFFIX}"
+    victim.write_text("{}", encoding="utf-8")
+
+    paths.ensure_dir(paths.target_root(tmp_artifact_root))
+    shared_root = paths.workers_dir(tmp_artifact_root)
+    shared_root.symlink_to(elsewhere, target_is_directory=True)
+
+    monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", confined)
+
+    reason, retained = service.reclaim_workers_root(base=tmp_artifact_root)
+
+    assert reason is not None
+    assert fragment in reason
+    assert str(shared_root) in reason
+    assert retained == ()
+    assert victim.read_text(encoding="utf-8") == "{}"
+    assert shared_root.is_symlink()
+
+
+def test_a_run_directory_outside_the_shared_one_is_refused_lexically(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup deletes this run's intermediates and nothing else.
+
+    The cheapest of the checks and the first one made: a directory whose parent
+    is not the shared intermediate directory is not a run directory, whatever
+    its name, and the removal never begins.  It is a *lexical* test, so it is
+    not the junction defence - that is the chain verification above - but it is
+    what keeps a caller's own mistake, or a path assembled from a manifest,
+    from reaching the removal at all.
+    """
+    outsider = tmp_artifact_root / "outside-the-build-output"
+    outsider.mkdir()
+    victim = outsider / f"victim{JSON_SUFFIX}"
+    victim.write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", False)
+
+    reason = service._remove_run_directory(outsider, tmp_artifact_root)
+
+    assert reason is not None
+    assert "is not inside" in reason
+    assert str(paths.workers_dir(tmp_artifact_root)) in reason
+    assert outsider.is_dir()
+    assert victim.read_text(encoding="utf-8") == "{}"
+
+
+def test_a_run_directory_replaced_mid_removal_is_set_aside_and_refused(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The substitution race at the run-directory boundary, shape one.
+
+    The finding the object-bound primitive exists for (the review's ``F25``,
+    CWE-367 over CWE-22): the entry is a plain directory when it is inspected
+    and an indirection by the time a pathname deletion would recurse into it.
+    Re-checking the name cannot close that - the check and the deletion are two
+    resolutions of one name - so the service moves the entry to a private
+    random name first and re-establishes its identity *through that name*.
+
+    Driven here by letting the real rename happen and then replacing the
+    private name with a link to a tree outside the build output, which is what
+    a junction installed in that window would be on Windows.  Three things are
+    asserted, and the refusal alone is the weakest of them: the reason says the
+    entry was replaced rather than merely that something is a link, the victim
+    tree is untouched byte for byte, and the replacement is still sitting at
+    the private name - nothing was deleted through it, in either direction.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+    victim = external_victim(tmp_artifact_root, "elsewhere")
+    holder = tmp_artifact_root / "moved-out-of-the-way"
+    holder.mkdir()
+    rescued = holder / "rescued"
+
+    def substitute(aside: Path) -> None:
+        """Move the real directory away and link the private name elsewhere.
+
+        Args:
+            aside: The private name the service renamed the entry to.
+        """
+        os.rename(aside, rescued)
+        aside.symlink_to(victim, target_is_directory=True)
+
+    monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", False)
+    swapped = swap_the_private_name(monkeypatch, substitute)
+
+    reason = service._remove_run_directory(stranded, tmp_artifact_root)
+
+    assert reason is not None
+    assert len(swapped) == 1
+    assert SUBSTITUTION_REFUSAL in reason
+    assert NOTHING_DELETED_THROUGH_IT in reason
+    assert "symbolic link" in reason
+    assert RUN_DIRECTORY_ROLE in reason
+    assert str(stranded) in reason
+    assert str(swapped[0]) in reason
+
+    # The replacement was left exactly where it was put, and what it points at
+    # is whole: a deletion resolved through it would have emptied the victim.
+    assert swapped[0].is_symlink()
+    assert_victim_survived(victim)
+    # And the real directory the service had already moved aside still holds
+    # the intermediate document, so nothing was deleted at all.
+    assert (rescued / f"worker{JSON_SUFFIX}").read_text(
+        encoding="utf-8"
+    ) == "{}"
+
+
+def test_a_run_directory_reported_as_a_junction_when_re_checked_is_refused(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same race, shape two: the rename stands and ``lstat`` changes.
+
+    The branch a POSIX filesystem cannot otherwise present, and the one that
+    matters on the platform the fallback exists for.  Nothing is moved and
+    nothing is replaced on disk: the object at the private name is the very
+    directory that was inspected, and the only thing that differs is that the
+    re-inspection reports it with the two Windows-only fields a mount-point
+    reparse point carries.  A service that trusted its own rename would
+    ``rmtree`` straight through it.
+
+    Asserted through :func:`~app.services.cleanup_workers_dir`, the entry point
+    ``app/cli.py`` and ``run_suite`` call, so the refusal is shown reaching a
+    caller as the reason that denies the run its success rather than only
+    existing inside the private function.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+    victim = external_victim(tmp_artifact_root, "elsewhere")
+    shared_root = paths.workers_dir(tmp_artifact_root)
+
+    monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", False)
+    answered = pretend_the_private_name_is_a_junction(monkeypatch)
+
+    reason = service.cleanup_workers_dir(
+        base=tmp_artifact_root, directory=stranded
+    )
+
+    assert reason is not None
+    assert len(answered) == 1
+    assert "could not be removed" in reason
+    assert SUBSTITUTION_REFUSAL in reason
+    assert NOTHING_DELETED_THROUGH_IT in reason
+    assert "reparse point" in reason
+    assert RUN_DIRECTORY_ROLE in reason
+
+    # The entry is still there under the private name, contents included:
+    # listed rather than inspected, because ``lstat`` is still answering
+    # "junction" for that name and the assertion is about its contents.
+    survivors = entries_left_in(shared_root)
+    assert len(survivors) == 1
+    assert survivors[0].name.startswith(service._ASIDE_PREFIX)
+    assert (survivors[0] / f"worker{JSON_SUFFIX}").read_text(
+        encoding="utf-8"
+    ) == "{}"
+    assert_victim_survived(victim)
+
+
+def test_a_swap_during_the_reclaim_cannot_redirect_the_loop(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The substitution race at the shared directory's own boundary.
+
+    The reclaim is a *loop*, which is the second half of the same finding: a
+    single verified parent is walked and every entry in it is removed by name,
+    so a substitution made while the loop is running has as many chances as
+    there are entries.  Each removal therefore goes through the same
+    object-bound primitive, and each refusal is collected rather than aborting
+    the walk - a loop that stopped at the first one would leave the rest of the
+    shared directory unreclaimed and its survivors unreported.
+
+    Two entries, two external victims, one swap each: every victim is whole,
+    every refusal is in the reason, and nothing is claimed to have been
+    deliberately retained, because nothing here is in use.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+    second = stranded_run_directory(
+        tmp_artifact_root, SECOND_FORGED_RUN_DIR_NAME
+    )
+    victims = [
+        external_victim(tmp_artifact_root, "elsewhere-one"),
+        external_victim(tmp_artifact_root, "elsewhere-two"),
+    ]
+    holder = tmp_artifact_root / "moved-out-of-the-way"
+    holder.mkdir()
+    rescued: list[Path] = []
+
+    def substitute(aside: Path) -> None:
+        """Move each real directory away and link its private name out.
+
+        Args:
+            aside: The private name the service renamed this entry to.
+        """
+        kept = holder / f"rescued-{len(rescued)}"
+        os.rename(aside, kept)
+        aside.symlink_to(victims[len(rescued)], target_is_directory=True)
+        rescued.append(kept)
+
+    monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", False)
+    swapped = swap_the_private_name(monkeypatch, substitute)
+
+    reason, retained = service.reclaim_workers_root(base=tmp_artifact_root)
+
+    assert reason is not None
+    assert retained == ()
+    assert len(swapped) == 2
+    # One refusal per entry, so the walk continued past the first.
+    assert reason.count(SUBSTITUTION_REFUSAL) == 2
+    assert reason.count(NOTHING_DELETED_THROUGH_IT) == 2
+    assert str(stranded) in reason
+    assert str(second) in reason
+    assert "could not be removed" in reason
+
+    for victim in victims:
+        assert_victim_survived(victim)
+    for aside in swapped:
+        assert aside.is_symlink()
+    for kept in rescued:
+        assert (kept / f"worker{JSON_SUFFIX}").read_text(
+            encoding="utf-8"
+        ) == "{}"
+
+
+def test_a_junction_reported_during_the_reclaim_refuses_entry_by_entry(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The loop's other shape: every private name re-checks as a junction.
+
+    The reclaim's counterpart of
+    :func:`test_a_run_directory_reported_as_a_junction_when_re_checked_is_refused`,
+    and the shape that proves the re-inspection is made per entry rather than
+    once for the walk: both entries are refused, both are still there under
+    their private names with their intermediate documents intact, and the
+    external tree that a deletion resolved through either would have reached
+    is untouched.
+    """
+    stranded_run_directory(tmp_artifact_root)
+    stranded_run_directory(tmp_artifact_root, SECOND_FORGED_RUN_DIR_NAME)
+    victim = external_victim(tmp_artifact_root, "elsewhere")
+    shared_root = paths.workers_dir(tmp_artifact_root)
+
+    monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", False)
+    answered = pretend_the_private_name_is_a_junction(monkeypatch)
+
+    reason, retained = service.reclaim_workers_root(base=tmp_artifact_root)
+
+    assert reason is not None
+    assert retained == ()
+    assert len(answered) == 2
+    assert reason.count(SUBSTITUTION_REFUSAL) == 2
+    assert reason.count("reparse point") == 2
+
+    survivors = entries_left_in(shared_root)
+    assert len(survivors) == 2
+    for survivor in survivors:
+        assert survivor.name.startswith(service._ASIDE_PREFIX)
+        assert (survivor / f"worker{JSON_SUFFIX}").read_text(
+            encoding="utf-8"
+        ) == "{}"
+    assert_victim_survived(victim)
+
+
+def test_a_private_name_holding_a_different_object_is_refused(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Identity, not shape: the object must be the one that was inspected.
+
+    The first of the three re-establishment branches, asserted on its own
+    because each is a different refusal and a test that only ever produced one
+    of them would leave the other two unexercised.  Here the private name holds
+    a perfectly ordinary directory that is not a link, not a reparse point and
+    not the entry that was checked - which is what a swap performed with a
+    rename rather than with a junction looks like - so the only thing that
+    catches it is the device and inode a rename is guaranteed to preserve.
+
+    The stand-in for the substituted object is the external victim tree itself,
+    so the assertion is the direct one: a service that deleted through the
+    private name would have deleted that tree's contents.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+    shared_root = paths.workers_dir(tmp_artifact_root)
+    victim = external_victim(tmp_artifact_root, "elsewhere")
+    holder = tmp_artifact_root / "moved-out-of-the-way"
+    holder.mkdir()
+    rescued = holder / "rescued"
+
+    def substitute(aside: Path) -> None:
+        """Put a different real directory at the private name.
+
+        Args:
+            aside: The private name the service renamed the entry to.
+        """
+        os.rename(aside, rescued)
+        os.rename(victim, aside)
+
+    swapped = swap_the_private_name(monkeypatch, substitute)
+
+    reason = service.delete_verified_entry(
+        shared_root, stranded.name, role=RUN_DIRECTORY_ROLE
+    )
+
+    assert reason is not None
+    assert len(swapped) == 1
+    assert SUBSTITUTION_REFUSAL in reason
+    assert NOTHING_DELETED_THROUGH_IT in reason
+    assert "is a different object from the one that was checked" in reason
+    assert "device and inode" in reason
+
+    # The substituted tree is intact where the substitution left it.
+    assert (swapped[0] / f"victim{JSON_SUFFIX}").read_text(
+        encoding="utf-8"
+    ) == EXTERNAL_VICTIM_TEXT
+    assert (rescued / f"worker{JSON_SUFFIX}").read_text(
+        encoding="utf-8"
+    ) == "{}"
+
+
+def test_a_private_name_that_is_no_longer_a_directory_is_refused(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second branch: whatever is there now, it is not a directory.
+
+    A file at the private name passes every indirection test - it is neither a
+    link nor a reparse point - so it is caught by the one remaining question
+    the re-establishment asks, and it is left exactly where it was found: this
+    primitive deletes an object it has identified and nothing else.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+    shared_root = paths.workers_dir(tmp_artifact_root)
+    holder = tmp_artifact_root / "moved-out-of-the-way"
+    holder.mkdir()
+    rescued = holder / "rescued"
+
+    def substitute(aside: Path) -> None:
+        """Put a plain file at the private name.
+
+        Args:
+            aside: The private name the service renamed the entry to.
+        """
+        os.rename(aside, rescued)
+        aside.write_text("not a directory", encoding="utf-8")
+
+    swapped = swap_the_private_name(monkeypatch, substitute)
+
+    reason = service.delete_verified_entry(
+        shared_root, stranded.name, role=RUN_DIRECTORY_ROLE
+    )
+
+    assert reason is not None
+    assert len(swapped) == 1
+    assert SUBSTITUTION_REFUSAL in reason
+    assert NOTHING_DELETED_THROUGH_IT in reason
+    assert "is no longer a directory" in reason
+
+    assert swapped[0].read_text(encoding="utf-8") == "not a directory"
+    assert (rescued / f"worker{JSON_SUFFIX}").read_text(
+        encoding="utf-8"
+    ) == "{}"
+
+
+def test_a_private_name_that_cannot_be_re_checked_is_refused(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third branch, and a refusal in its own words.
+
+    An unanswerable re-inspection is not a substitution the service can
+    describe, so it does not claim one: the reason says the entry was set aside
+    and could not be re-checked, and that nothing was removed.  Reached here by
+    taking the private name away between the rename and the re-inspection,
+    which is the one thing a process that *could* guess the name would be able
+    to do to it.
+
+    What the branch has to establish is the same as the other two: no recursive
+    deletion is made through a name whose object has not been identified.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+    shared_root = paths.workers_dir(tmp_artifact_root)
+    holder = tmp_artifact_root / "moved-out-of-the-way"
+    holder.mkdir()
+    rescued = holder / "rescued"
+
+    def substitute(aside: Path) -> None:
+        """Take the private name away entirely.
+
+        Args:
+            aside: The private name the service renamed the entry to.
+        """
+        os.rename(aside, rescued)
+
+    swapped = swap_the_private_name(monkeypatch, substitute)
+
+    reason = service.delete_verified_entry(
+        shared_root, stranded.name, role=RUN_DIRECTORY_ROLE
+    )
+
+    assert reason is not None
+    assert len(swapped) == 1
+    assert "was set aside as" in reason
+    assert "could not be re-checked" in reason
+    assert "so it was not removed" in reason
+    assert str(swapped[0]) in reason
+
+    assert not swapped[0].exists()
+    assert (rescued / f"worker{JSON_SUFFIX}").read_text(
+        encoding="utf-8"
+    ) == "{}"
+
+
+def test_a_linked_run_directory_is_refused_and_its_target_left_alone(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A link where a run directory belongs is not a run directory.
+
+    The default of the one policy the primitive's two callers do not share.
+    For the reclaim, a link standing where a run's working space belongs is not
+    something to interpret: the run service will not guess what an operator
+    meant by it, so it is refused, the link is left alone and what it points at
+    is never reached.  ``--clean``'s opposite choice is asserted next.
+    """
+    victim = external_victim(tmp_artifact_root, "elsewhere")
+    shared_root = paths.ensure_dir(paths.workers_dir(tmp_artifact_root))
+    link = shared_root / FORGED_RUN_DIR_NAME
+    link.symlink_to(victim, target_is_directory=True)
+
+    monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", False)
+
+    reason = service._remove_run_directory(link, tmp_artifact_root)
+
+    assert reason is not None
+    assert "symbolic link" in reason
+    assert RUN_DIRECTORY_ROLE in reason
+    assert "neither followed nor removed" in reason
+    assert str(link) in reason
+
+    assert link.is_symlink()
+    assert_victim_survived(victim)
+
+
+def test_the_clean_steps_policy_unlinks_a_link_and_leaves_its_target(
+    tmp_artifact_root: Path,
+) -> None:
+    """``unlink_links=True`` removes the link itself and nothing else.
+
+    The other side of that policy, and the reason it is a parameter rather than
+    a rule: to ``app/cli.py``'s clean step a link is simply an entry of a
+    directory being emptied, and unlinking it is the only way to empty the
+    directory - while it cannot touch what the link points at, because one
+    :func:`os.unlink` of the link removes the named entry and can never
+    recurse.  The role the clean step passes is used here too, so the asymmetry
+    is asserted at the same call shape the caller makes.
+
+    A **reparse point** is refused whichever way this flag is set, which the
+    junction tests above already establish; this is about links alone.
+    """
+    victim = external_victim(tmp_artifact_root, "elsewhere")
+    build_output = paths.ensure_dir(paths.target_root(tmp_artifact_root))
+    link = build_output / "an-entry-of-the-build-output"
+    link.symlink_to(victim, target_is_directory=True)
+
+    reason = service.delete_verified_entry(
+        build_output,
+        link.name,
+        role=BUILD_OUTPUT_ENTRY_ROLE,
+        unlink_links=True,
+    )
+
+    assert reason is None
+    assert not link.exists()
+    assert not link.is_symlink()
+    assert_victim_survived(victim)
+
+
+def test_a_non_directory_entry_is_removed_by_a_single_unlink(
+    tmp_artifact_root: Path,
+) -> None:
+    """Anything that is not a directory has nothing to recurse into.
+
+    The primitive's second clause, and the case the shared intermediate
+    directory really does hold: a stray file left in it by an interrupted run
+    is removed with one :func:`os.unlink`, which addresses the named entry
+    itself, so there is no window for a substitution to redirect and no
+    recursion for one to redirect *into*.
+
+    Absence is asserted as a success in the same test, because that is what
+    makes the cleanup paths idempotent - ``run_suite`` removes its own
+    directory and ``app/cli.py`` asks again on the way out.
+    """
+    shared_root = paths.ensure_dir(paths.workers_dir(tmp_artifact_root))
+    stray = shared_root / f"stray{JSON_SUFFIX}"
+    stray.write_text("{}", encoding="utf-8")
+
+    assert (
+        service.delete_verified_entry(
+            shared_root, stray.name, role=RUN_DIRECTORY_ROLE
+        )
+        is None
+    )
+    assert not stray.exists()
+
+    # Gone already, and still not a problem.
+    assert (
+        service.delete_verified_entry(
+            shared_root, stray.name, role=RUN_DIRECTORY_ROLE
+        )
+        is None
+    )
+
+
+# =========================================================================== #
+# Liveness is a lease, not a process-id-shaped name
+#
+# A run directory is only ever reclaimed by another invocation's clean when the
+# run that owns it is over, so "is that run still going?" decides whether one
+# invocation may delete another's tracebacks, screenshot attachments and
+# scenario data.  Answering it from the process id in the directory's *name*
+# gets it wrong in the one direction that costs something: process ids are
+# recycled and a name can be written by hand, so a directory named after an id
+# some unrelated process happens to hold reads as live for as long as that
+# process lives.  ``1-000000000000`` is the review's own case - process 1 exists
+# on every host, so that directory was immortal and whatever it held stayed in
+# the workspace forever (CWE-367, CWE-400).
+#
+# What answers the question now is a lease: a file inside the run directory,
+# opened and locked for as long as the run lives.  An operating-system lock
+# cannot outlive the process holding it, so a crashed, killed or long-gone run
+# releases automatically, and a directory nobody ever leased has nothing to
+# offer at all.  The name is still read, but only as *identity* - to recognise a
+# run directory in the first place.
+#
+# Three answers are possible and all three are asserted: held (live), free or
+# absent (reclaimable), and unanswerable - a platform without locking, or a
+# probe that failed - which falls back to the weaker process-id test rather than
+# being read as either answer.
+#
+# Every test here that takes a lease gives it back, because the lease is an open
+# descriptor held in a module-level registry that the autouse registry fixture
+# does not reach.
+# =========================================================================== #
+
+#: Names :func:`~app.services.run_directory_owner` must refuse, each for its own
+#: reason: no separator, no process id, a non-numeric one, a token of the wrong
+#: length, a token that is not hexadecimal, and the service's own two working
+#: file names - neither of which may ever be mistaken for a run's directory.
+UNPARSEABLE_RUN_DIR_NAMES: Final[tuple[str, ...]] = (
+    "",
+    "1234",
+    "-000000000000",
+    "pid-000000000000",
+    "1234-0000",
+    "1234-0000000000000000",
+    "1234-zzzzzzzzzzzz",
+    service.RUN_LOCK_NAME,
+    service._RUN_LEASE_NAME,
+)
+
+
+def test_a_process_id_shaped_name_without_a_lease_is_reclaimable(
+    tmp_artifact_root: Path,
+) -> None:
+    """The review's own reproduction, pinned: ``1-000000000000`` is not alive.
+
+    Everything the discredited reading needed is true here - the name parses,
+    and the process it names really is running - and the directory is still
+    reclaimed, because it holds no lease.  Both halves are asserted explicitly:
+    without them the test would pass on a service that had simply stopped
+    recognising the name.
+
+    What it carries is what made this worth fixing: an intermediate per-worker
+    document, in a workspace whose publisher glob (``Jenkins:15``) is narrowed
+    to one file precisely because nothing intermediate may be readable.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+    shared_root = paths.workers_dir(tmp_artifact_root)
+    document = stranded / f"worker{JSON_SUFFIX}"
+
+    # The two facts the old reading rested on.
+    assert service.run_directory_owner(stranded.name) == 1
+    assert service._process_is_alive(1) is True
+    # And the one that settles it: nothing ever leased this directory.
+    assert not service._lease_path(stranded).exists()
+
+    assert service.run_directory_is_active(stranded) is False
+
+    reason, retained = service.reclaim_workers_root(base=tmp_artifact_root)
+
+    assert reason is None
+    assert retained == ()
+    assert not document.exists()
+    assert not stranded.exists()
+    # Nothing was left in it, so the shared directory went too.
+    assert not shared_root.exists()
+
+
+def test_prepare_workers_dir_leases_the_directory_it_creates(
+    tmp_artifact_root: Path,
+) -> None:
+    """A run's own directory is leased from the moment it exists.
+
+    The lease is taken inside :func:`~app.services.prepare_workers_dir` rather
+    than by the caller, so there is no window in which a live run's directory
+    is indistinguishable from an abandoned one - which is the window a
+    concurrent ``--clean`` would delete the run's results in.
+    """
+    directory = service.prepare_workers_dir(base=tmp_artifact_root)
+    try:
+        assert service._lease_path(directory).is_file()
+        assert service._lease_is_held(directory) is True
+        assert service.run_directory_is_active(directory) is True
+    finally:
+        service.cleanup_workers_dir(
+            base=tmp_artifact_root, directory=directory
+        )
+
+    assert not directory.exists()
+
+
+def test_liveness_outlives_the_registry_and_ends_with_the_lease(
+    tmp_artifact_root: Path,
+) -> None:
+    """The lease answers for a run whose own process cannot be asked.
+
+    Two readings are available to an invocation: the in-process registry of
+    directories *this* process created, and the lease.  Only the second can
+    answer for another process's run, so the registry is discarded here and the
+    liveness is asserted again - which is the reading a concurrent invocation
+    actually performs.
+
+    Then the lease is dropped, which is what the end of a run does, and the
+    same directory becomes reclaimable.  Held, it is *retained* by the clean;
+    released, it is removed.
+    """
+    directory = service.prepare_workers_dir(base=tmp_artifact_root)
+    try:
+        with service._active_run_dirs_lock:
+            service._active_run_dirs.discard(directory)
+
+        # Only the lease can answer now, and it does.
+        assert service.run_directory_is_active(directory) is True
+
+        reason, retained = service.reclaim_workers_root(base=tmp_artifact_root)
+        assert reason is None
+        assert retained == (directory,)
+        assert directory.is_dir()
+    finally:
+        service._drop_lease(directory)
+
+    assert service.run_directory_is_active(directory) is False
+
+    reason, retained = service.reclaim_workers_root(base=tmp_artifact_root)
+    assert reason is None
+    assert retained == ()
+    assert not directory.exists()
+
+
+def test_the_lease_probe_answers_absent_held_and_free(
+    tmp_artifact_root: Path,
+) -> None:
+    """The probe's three states, and the difference between two of them.
+
+    A directory with **no** lease and a directory whose lease is **free** are
+    distinct situations that carry the same consequence, and both are asserted
+    because they are reached differently: the first is anything that was not
+    created by a run of this port, the second is a run that has finished or
+    died.  The lease file outliving the lock is what makes the second case
+    observable at all - so it is asserted too, rather than left to the
+    removal to hide.
+
+    The probe itself holds nothing: it locks and unlocks, so probing a
+    directory can never be what keeps it alive.
+    """
+    unleased = stranded_run_directory(tmp_artifact_root)
+    assert service._lease_is_held(unleased) is False
+
+    directory = service.prepare_workers_dir(base=tmp_artifact_root)
+    try:
+        assert service._lease_is_held(directory) is True
+    finally:
+        service._drop_lease(directory)
+
+    assert service._lease_path(directory).is_file()
+    assert service._lease_is_held(directory) is False
+
+    # And the probe held nothing of its own: it locks to find out and unlocks
+    # immediately, so asking twice cannot be what keeps a directory alive.
+    # Asserted on the free lease, which is the only case where a kept lock
+    # would change the second answer.
+    assert service._lease_is_held(directory) is False
+
+    service.cleanup_workers_dir(base=tmp_artifact_root, directory=directory)
+    assert not directory.exists()
+
+
+@pytest.mark.parametrize("name", UNPARSEABLE_RUN_DIR_NAMES)
+def test_run_directory_owner_refuses_a_name_it_did_not_produce(
+    name: str,
+) -> None:
+    """Anything not of the service's own making is not a run directory.
+
+    Unchanged by the liveness fix and asserted so it stays that way: the
+    function is now identity *only*, and identity is still what tells a run's
+    working space apart from anything else found in the shared directory - the
+    run lock and a run's lease file included.
+
+    Args:
+        name: A single path component the function must refuse.
+    """
+    assert service.run_directory_owner(name) is None
+
+
+def test_a_run_shaped_name_alone_no_longer_implies_liveness(
+    tmp_artifact_root: Path,
+) -> None:
+    """Identity and liveness are two questions with two answers.
+
+    The fix in one assertion pair: the name still yields its process id, and
+    the directory is still not alive.  A reading that returned the first as
+    the second is the finding.
+    """
+    directory = service.prepare_workers_dir(base=tmp_artifact_root)
+    try:
+        assert service.run_directory_owner(directory.name) == os.getpid()
+        assert service.run_directory_is_active(directory) is True
+    finally:
+        service.cleanup_workers_dir(
+            base=tmp_artifact_root, directory=directory
+        )
+
+    stranded = stranded_run_directory(tmp_artifact_root)
+    assert service.run_directory_owner(stranded.name) == 1
+    assert service.run_directory_is_active(stranded) is False
+
+
+@pytest.mark.parametrize("alive", [True, False])
+def test_an_unanswerable_lease_probe_falls_back_to_the_process_id(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch, alive: bool
+) -> None:
+    """A probe that cannot answer defers to the weaker test, both ways.
+
+    ``None`` is not an answer and must not be read as one: a platform with no
+    locking primitive, or a probe that failed on its own terms, leaves the
+    question to the process-id test - which is weaker but fails in the same
+    safe direction, since believing a dead run alive costs a stale directory
+    while believing a live run dead costs its results.
+
+    Both directions are asserted, and the process id the fallback is given is
+    asserted too: the one the directory's name carries, not this process's.
+
+    Args:
+        tmp_artifact_root: The temporary checkout root.
+        monkeypatch: pytest's patching fixture.
+        alive: What the process-id probe is made to report.
+    """
+    stranded = stranded_run_directory(tmp_artifact_root)
+    probed: list[int] = []
+
+    def unanswerable(directory: Path) -> bool | None:
+        """Report that the lease cannot be consulted.
+
+        Args:
+            directory: The run directory being probed.
+
+        Returns:
+            ``None``, always.
+        """
+        return None
+
+    def process_is_alive(pid: int) -> bool:
+        """Record the process id asked about and answer as parametrized.
+
+        Args:
+            pid: The process id the service chose to probe.
+
+        Returns:
+            The parametrized answer.
+        """
+        probed.append(pid)
+        return alive
+
+    monkeypatch.setattr(service, "_lease_is_held", unanswerable)
+    monkeypatch.setattr(service, "_process_is_alive", process_is_alive)
+
+    assert service.run_directory_is_active(stranded) is alive
+    assert probed == [1]
+
+
+def test_prepare_workers_dir_propagates_a_lease_failure_and_claims_nothing(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory that cannot be leased is not a directory this run keeps.
+
+    Deliberately fatal rather than downgraded to a warning: an unleased
+    directory reads as abandoned to every other invocation in the checkout, so
+    a run that carried on would have its live results deleted from under it by
+    a concurrent clean.  ``run_suite`` catches the ``OSError`` this raises on
+    the same branch that catches a directory it could not create, and reports
+    both as :attr:`~app.services.RunOutcome.infrastructure_error` - the
+    artifact-infrastructure class of AAP 0.4.1, whose caller-side shape is
+    asserted for the creation cause in
+    :func:`test_a_worker_directory_that_cannot_be_created_is_the_empty_merge_state`.
+
+    What is asserted here is the state it leaves behind: nothing registered as
+    this process's, and therefore nothing this process's own cleanup would
+    later refuse to find - and the directory it had already created carries no
+    lease, so the next clean reclaims it instead of preserving it forever.
+    """
+
+    def refuse(directory: Path) -> None:
+        """Fail to take the lease.
+
+        Args:
+            directory: The run directory the service just created.
+
+        Raises:
+            OSError: Always, standing in for a lease that cannot be created or
+                locked.
+        """
+        raise OSError("canned lease failure")
+
+    monkeypatch.setattr(service, "_take_lease", refuse)
+    with service._active_run_dirs_lock:
+        before = set(service._active_run_dirs)
+
+    with pytest.raises(OSError, match="canned lease failure"):
+        service.prepare_workers_dir(base=tmp_artifact_root)
+
+    with service._active_run_dirs_lock:
+        assert set(service._active_run_dirs) == before
+
+    reason, retained = service.reclaim_workers_root(base=tmp_artifact_root)
+    assert reason is None
+    assert retained == ()
+    assert not paths.workers_dir(tmp_artifact_root).exists()
+
+
+# =========================================================================== #
+# The run lock (one run at a time per checkout)
+#
+# A per-run intermediate directory keeps two runs from reading or deleting each
+# other's worker files, and that is as far as it reaches.  Three phases of a run
+# operate on state the whole checkout shares: ``--clean`` empties the build
+# output, the run writes into the shared intermediate directory, and the fan-out
+# publishes four artifacts at fixed paths.  Interleaved, two runs leave a
+# workspace holding a mixture - one run's JSON beside the other's HTML, each
+# naming scenarios, substituted step arguments and screenshots from a different
+# execution, with nothing in either artifact to say so (CWE-362, CWE-367).
+#
+# One lock held from before the clean until after the publication is what makes
+# the interleaving impossible, and contention is **refused** rather than queued:
+# a run driving a browser suite holds the lock for minutes, and a CI stage that
+# waits that out is a hang, while a run that is merely finishing its cleanup
+# releases within the grace period.
+#
+# Four properties are asserted below, and only the first is what a plain "does
+# locking work" test would cover.
+#
+# **Exclusion.**  A second acquire in the same checkout is refused, and one in
+# another checkout is not.
+#
+# **Identity, while the lock is held.**  The claim is only worth something
+# while the lock file's *name* still resolves to the object the descriptor
+# holds, because a departing holder unlinks its file while still holding the
+# lock, and a holder that kept believing in a name somebody else had replaced
+# would leave two runs each convinced it had the build output to itself.
+#
+# **Identity, at the release.**  The same window read the other way round, and
+# the worse half of it: a release that unlinked its path unconditionally would
+# delete the file a *second* run is holding at that moment, so a third run
+# could then acquire a different object while the second was still executing.
+# The unlink is therefore made only while the name still resolves to this
+# claim's own object, and otherwise the name is left strictly alone and the
+# reason says so.  What the release leaves behind is reported for the same
+# reason: AAP 0.4.1 requires ``target/.workers/`` to be gone by the time the
+# command returns, so this run's own lock file or an empty shared directory
+# outliving it is a reportable failure - while another run's live directory in
+# there is not, and is deliberately silent.
+#
+# **Retention by probe, not by name.**  The clean step meets the lock in one
+# directory and has to keep a held one and reclaim an unheld one: keeping every
+# file called ``.run.lock`` would leave the shared directory in the workspace
+# for the life of the checkout, and deleting a held one would dissolve the
+# exclusion.  So the question goes to the operating system, ``None`` - an
+# unanswerable probe - is resolved towards keeping, and both reclaim branches
+# are asserted, because the rule is implemented twice.  The same probe is what
+# lets a lock file this process created but could not lock be discarded rather
+# than left, and what makes a departing run's prune a *retryable* absence for
+# the waiter whose turn it now is rather than a refusal.
+#
+# Every test here releases what it takes, in a ``finally``: the lock is an open
+# descriptor and a file in a temporary tree, and a leaked one would make the
+# next test in this module - or in ``tests/test_cli.py`` - contend with a lock
+# nobody holds any more.
+# =========================================================================== #
+
+#: The mode :func:`~app.services.acquire_run_lock` creates its lock file with:
+#: owner read and write, nothing for anybody else.  The file carries no data,
+#: but a world-writable lock is a lock anybody can steal.
+OWNER_ONLY_MODE: Final[int] = 0o600
+
+#: The grace period the one wait-path test substitutes for the module's own
+#: thirty seconds.  Long enough that the poll loop runs - the announcement is
+#: made on the first pass that does not immediately give up - and short enough
+#: that the test costs a fraction of a second.
+CONTENDED_WAIT_SECONDS: Final[float] = 0.25
+
+#: The ceiling that wait is held to, so a regression that ignored the grace
+#: period and waited out the module's default would fail rather than hang.
+CONTENDED_WAIT_CEILING: Final[float] = 5.0
+
+#: The two removal branches the run lock has to survive, named as the
+#: capability flag the service dispatches on: the descriptor-relative path and
+#: the pathname fallback.  The lock is not a run's working file but the
+#: rendezvous point every run in the checkout contends for, so *neither* branch
+#: may remove it while it is held - deleting a held lock would hand two runs
+#: two different lock objects - and *both* must reclaim one that is not, or the
+#: shared directory outlives every command that ever ran in the checkout.
+RECLAIM_BRANCHES: Final[tuple[bool, ...]] = (True, False)
+
+#: What the service prefixes a release it could not complete with.  A release
+#: reports its failure to the caller *and* records it, because the caller turns
+#: the reason into an exit status while the record is what an operator reading
+#: a CI log has.
+RELEASE_FAILURE_PREFIX: Final[str] = "Run lock release failed"
+
+#: A removal that reports success and leaves the file behind, which is what a
+#: Windows deferred deletion or a scanner holding the file looks like from
+#: inside the call.
+UNLINK_LEAVES_THE_FILE: Final[str] = "leaves-the-file"
+
+#: And a removal that refuses outright.
+UNLINK_REFUSES: Final[str] = "refuses"
+
+#: The two ways this run's own lock file can outlive the release that should
+#: have removed it, each with the reason the release has to report.  Both are
+#: reportable and neither may be silent: a lock file left in the shared
+#: directory keeps that directory in the workspace, which is the one state AAP
+#: 0.4.1 forbids after the command returns, whichever of the two produced it.
+SURVIVING_LOCK_CASES: Final[tuple[tuple[str, str], ...]] = (
+    (UNLINK_LEAVES_THE_FILE, "still exists after the run released it"),
+    (UNLINK_REFUSES, "could not be removed"),
+)
+
+#: The poll interval substituted where a test drives the acquire loop round for
+#: a reason other than timing it - a first attempt that has to fail and a
+#: second that has to succeed.  Nothing in those cases depends on how long the
+#: loop sleeps between the two, and the module's own tenth of a second would be
+#: spent for nothing.
+IMMEDIATE_POLL_SECONDS: Final[float] = 0.0
+
+
+def release_failures(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Every release-failure record the service emitted.
+
+    Args:
+        caplog: pytest's log-capture fixture, with the service's logger
+            enabled at ``ERROR`` by the caller.
+
+    Returns:
+        The message of each record, so a test can assert both that a reported
+        failure was recorded and - the harder half - that a release which
+        reported nothing recorded nothing either.
+    """
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == service.__name__
+        and record.levelno >= logging.ERROR
+        and RELEASE_FAILURE_PREFIX in record.getMessage()
+    ]
+
+
+def test_the_run_lock_is_one_owner_only_file_in_the_shared_directory(
+    tmp_artifact_root: Path,
+) -> None:
+    """The lock is taken on a known path, with a known mode.
+
+    Where it lives is a decision rather than a detail: inside the shared
+    intermediate directory, which is the one entry of the build output the
+    clean step empties rather than deletes, so the lock survives the clean it
+    is held across.  It is also the reason the directory can still be gone by
+    the time the command returns (AAP 0.4.1) - whoever releases the lock
+    removes the file and prunes the directory.
+    """
+    lock, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    try:
+        assert refusal is None
+        assert lock is not None
+        assert lock.path == (
+            paths.workers_dir(tmp_artifact_root) / service.RUN_LOCK_NAME
+        )
+        assert lock.path.is_file()
+        assert stat.S_IMODE(lock.path.stat().st_mode) == OWNER_ONLY_MODE
+        assert lock.is_held() is True
+    finally:
+        if lock is not None:
+            lock.release()
+
+
+def test_a_second_run_in_the_same_checkout_is_refused(
+    tmp_artifact_root: Path,
+) -> None:
+    """Contention is a refusal that names the checkout, not a wait.
+
+    ``wait_seconds=0`` makes the attempt once, which is the shape a test can
+    assert without spending the grace period; the wait itself is asserted by
+    :func:`test_a_contended_acquire_announces_the_wait_once_and_then_refuses`.
+
+    The refusal names the build output and the lock file, because that is what
+    an operator reading a CI log needs in order to know *which* workspace is
+    busy - and the first claim is untouched by the refusal, which is the whole
+    point of refusing.
+    """
+    first, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert first is not None
+    try:
+        second, reason = service.acquire_run_lock(
+            base=tmp_artifact_root, wait_seconds=0
+        )
+
+        assert second is None
+        assert reason is not None
+        assert str(paths.target_root(tmp_artifact_root)) in reason
+        assert service.RUN_LOCK_NAME in reason
+        assert "was not started" in reason
+
+        assert first.is_held() is True
+        assert first.path.is_file()
+    finally:
+        first.release()
+
+
+def test_releasing_the_lock_removes_the_file_and_prunes_the_directory(
+    tmp_artifact_root: Path,
+) -> None:
+    """A released lock leaves nothing of itself behind, twice over.
+
+    AAP 0.4.1 requires ``target/.workers/`` to be gone before the command
+    returns, so the lock file cannot simply be left in it: the holder removes
+    the file and then prunes the shared directory, which prunes only when it is
+    empty and is therefore a no-op while a concurrent run still holds a
+    directory there.
+
+    Idempotence is asserted too, because ``app/cli.py`` releases in a
+    ``finally`` around the whole run and a success path may have released
+    already.
+    """
+    lock, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert lock is not None
+
+    lock.release()
+
+    assert lock.is_held() is False
+    assert not lock.path.exists()
+    assert not paths.workers_dir(tmp_artifact_root).exists()
+    # The build output itself is not the lock's to remove.
+    assert paths.target_root(tmp_artifact_root).is_dir()
+
+    # Second release: nothing to do, and nothing raised.
+    lock.release()
+    assert lock.is_held() is False
+
+
+def test_the_lock_is_available_again_once_it_is_released(
+    tmp_artifact_root: Path,
+) -> None:
+    """The refusal is about a live holder, never about a leftover file.
+
+    A lock implemented as "does a file exist" would fail here the moment a run
+    was killed between creating the file and removing it; this one is an
+    operating-system lock on an open descriptor, so it cannot outlive its
+    holder.
+    """
+    first, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert first is not None
+    first.release()
+
+    second, refusal = service.acquire_run_lock(
+        base=tmp_artifact_root, wait_seconds=0
+    )
+    try:
+        assert refusal is None
+        assert second is not None
+        assert second.is_held() is True
+        assert second.path == first.path
+    finally:
+        if second is not None:
+            second.release()
+
+
+def test_two_checkouts_never_contend_for_one_another(
+    tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """The lock's scope is exactly the state two runs would corrupt.
+
+    Two runs in separate checkouts share no build output, no intermediate
+    directory and no artifact path, so serialising them would buy nothing and
+    cost a CI agent its parallelism - which is also what lets this suite run
+    beside others in one container.
+
+    Args:
+        tmp_artifact_root: One temporary checkout root.
+        tmp_path: pytest's per-test directory, used to make a second root
+            beside the first.
+    """
+    other_root = tmp_path / "second-workspace"
+    other_root.mkdir()
+
+    first, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert first is not None
+    try:
+        second, refusal = service.acquire_run_lock(
+            base=other_root, wait_seconds=0
+        )
+        try:
+            assert refusal is None
+            assert second is not None
+            assert second.path != first.path
+            assert first.is_held() is True
+            assert second.is_held() is True
+        finally:
+            if second is not None:
+                second.release()
+    finally:
+        first.release()
+
+
+def test_the_claim_is_lost_when_the_lock_file_is_unlinked(
+    tmp_artifact_root: Path,
+) -> None:
+    """A holder whose file has gone stops claiming to hold anything.
+
+    The identity half of the contract.  An unlinked lock file leaves the
+    descriptor locked and the object alive, so the lock "works" in every sense
+    an ``flock`` can report - while the *name* is now free for another run to
+    create and lock a different object at.  Both runs would then believe they
+    had the build output to themselves, which is the interleaving this lock
+    exists to prevent, so the answer here has to be ``False``.
+    """
+    lock, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert lock is not None
+    try:
+        assert lock.is_held() is True
+
+        lock.path.unlink()
+
+        assert lock.is_held() is False
+    finally:
+        lock.release()
+    assert lock.is_held() is False
+
+
+def test_the_claim_is_lost_when_the_lock_file_is_replaced(
+    tmp_artifact_root: Path,
+) -> None:
+    """A fresh file at the same name is not the object that was locked.
+
+    The case an unlink test alone would miss: the name resolves, it resolves to
+    a regular file, and it is a different object - which is exactly the state a
+    second run's ``acquire_run_lock`` creates for itself after a holder has
+    unlinked its own file.  Identity is compared by device and inode, so the
+    substitution is detected rather than believed.
+    """
+    lock, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert lock is not None
+    try:
+        original = lock.path.stat().st_ino
+
+        lock.path.unlink()
+        lock.path.write_text("", encoding="utf-8")
+        assert lock.path.stat().st_ino != original
+
+        assert lock.is_held() is False
+    finally:
+        # The claim is given back either way; what it stops doing is speaking
+        # for whatever object now stands at that name.
+        lock.release()
+    assert lock.descriptor is None
+    assert lock.is_held() is False
+
+
+def test_the_context_manager_releases_on_the_way_out(
+    tmp_artifact_root: Path,
+) -> None:
+    """``with`` is the same release, and yields the lock it was given.
+
+    The form the boundary is expressed in where a caller holds the lock for a
+    block rather than across a whole command: entering returns the claim that
+    was already taken - there is no second acquire hidden in ``__enter__`` - and
+    leaving performs the one release, file removal included.
+    """
+    lock, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert lock is not None
+
+    with lock as held:
+        assert held is lock
+        assert held.is_held() is True
+
+    assert lock.is_held() is False
+    assert not lock.path.exists()
+
+
+def test_the_context_manager_releases_when_the_block_raises(
+    tmp_artifact_root: Path,
+) -> None:
+    """An exception inside the block gives the lock back and travels on.
+
+    The property the whole design rests on: a run that dies with the lock held
+    must not leave the checkout unusable.  Asserted with a defect-shaped
+    exception rather than a return path, and followed by a fresh acquire - the
+    proof that the lock is genuinely free rather than merely reported free.
+    """
+    lock, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert lock is not None
+
+    with pytest.raises(RuntimeError, match="canned failure inside the lock"):
+        with lock:
+            raise RuntimeError("canned failure inside the lock")
+
+    assert lock.is_held() is False
+    assert not lock.path.exists()
+
+    again, refusal = service.acquire_run_lock(
+        base=tmp_artifact_root, wait_seconds=0
+    )
+    try:
+        assert refusal is None
+        assert again is not None
+    finally:
+        if again is not None:
+            again.release()
+
+
+@pytest.mark.parametrize("confined", RECLAIM_BRANCHES)
+def test_the_clean_retains_the_run_lock_and_reclaims_the_rest(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch, confined: bool
+) -> None:
+    """``--clean`` empties the shared directory around the lock, not through it.
+
+    The clean and the lock meet in one directory, and the ordering is what
+    makes the lock usable at all: the run takes the lock *before* it cleans, so
+    the clean it performs is one that must leave the lock alone.  Removing the
+    file would leave the holder holding an object nobody will ever consult
+    again and the next run creating a second one at the same name.
+
+    It is reported on ``retained`` rather than silently skipped, so a caller
+    checking "did the clean empty the directory" can tell a deliberate survivor
+    from a failed removal, and the shared directory legitimately outlives the
+    clean while the lock is in it.
+
+    Args:
+        tmp_artifact_root: The temporary checkout root.
+        monkeypatch: pytest's patching fixture.
+        confined: Whether the descriptor-relative branch or the pathname
+            fallback performs the reclaim.
+    """
+    lock, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert lock is not None
+    shared_root = paths.workers_dir(tmp_artifact_root)
+    try:
+        stranded = stranded_run_directory(tmp_artifact_root)
+        monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", confined)
+
+        reason, retained = service.reclaim_workers_root(base=tmp_artifact_root)
+
+        assert reason is None
+        assert retained == (lock.path,)
+        assert lock.path.is_file()
+        assert lock.is_held() is True
+        # Everything that was not the lock is gone, and the directory stayed
+        # because the lock is still in it.
+        assert not stranded.exists()
+        assert shared_root.is_dir()
+        assert sorted(shared_root.iterdir()) == [lock.path]
+    finally:
+        lock.release()
+
+    # And the release is what finally leaves the workspace clean.
+    assert not shared_root.exists()
+
+
+def test_a_contended_acquire_announces_the_wait_once_and_then_refuses(
+    tmp_artifact_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The grace period is announced once, waited out, and then given up on.
+
+    The default is thirty seconds and is resolved from the module constant at
+    call time, which is what lets this test substitute a quarter of a second
+    for it rather than sleep through a CI grace period.  Three things are
+    asserted about the wait: it says so **once** - a per-poll record would fill
+    a CI log with one line per hundred milliseconds - it ends in the same
+    refusal a zero wait produces, and it ends at all.
+    """
+    first, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert first is not None
+    monkeypatch.setattr(
+        service, "_RUN_LOCK_WAIT_SECONDS", CONTENDED_WAIT_SECONDS
+    )
+    try:
+        with caplog.at_level(logging.INFO, logger=service.__name__):
+            started = time.monotonic()
+            second, reason = service.acquire_run_lock(base=tmp_artifact_root)
+            waited = time.monotonic() - started
+
+        assert second is None
+        assert reason is not None
+        assert str(paths.target_root(tmp_artifact_root)) in reason
+
+        announcements = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == service.__name__
+            and "waiting up to" in record.getMessage()
+        ]
+        assert len(announcements) == 1, announcements
+        assert str(first.path) in announcements[0]
+
+        # It really waited, and it really stopped.
+        assert waited >= CONTENDED_WAIT_SECONDS
+        assert waited < CONTENDED_WAIT_CEILING
+        assert first.is_held() is True
+    finally:
+        first.release()
+
+
+def test_a_release_never_removes_a_lock_file_that_is_no_longer_its_own(
+    tmp_artifact_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A departing holder must not delete a second run's live lock.
+
+    The release half of the identity contract, and the finding in one test: a
+    release that unlinked its path unconditionally would, in exactly the state
+    the two identity tests above set up, remove the file **another run is
+    holding right now**.  A third run's acquire would then create a different
+    object at the same name and lock that, and two runs would be executing in
+    one checkout each convinced it had the build output to itself - the
+    exclusion dissolved by its own teardown (CWE-362, CWE-367).
+
+    So the unlink is made only while the name still resolves to this claim's
+    own object.  Here it does not, and everything the release is entitled to
+    give back it gives back: the reason names the replacement, the descriptor
+    is closed, the claim stops answering, and the file is left strictly alone.
+    """
+    first, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert first is not None
+    descriptor = first.descriptor
+    assert descriptor is not None
+
+    # The window: this holder's file goes, and a second run creates and locks
+    # its own file at the same name - which is precisely what a departing
+    # holder's own unlink leaves behind for the next acquire to do.
+    first.path.unlink()
+    second, refusal = service.acquire_run_lock(
+        base=tmp_artifact_root, wait_seconds=0
+    )
+    assert refusal is None
+    assert second is not None
+    try:
+        with caplog.at_level(logging.ERROR, logger=service.__name__):
+            reason = first.release()
+
+        # Asserted before anything else here can open a file and be handed
+        # the same number: the descriptor really was closed.
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+        assert reason is not None
+        assert "was replaced or removed while the run held it" in reason
+        assert "left untouched" in reason
+        assert str(first.path) in reason
+        assert len(release_failures(caplog)) == 1, caplog.records
+
+        # The whole of the finding: the second run's lock file is still there,
+        # and the second run still holds it.
+        assert second.path == first.path
+        assert second.path.is_file()
+        assert second.is_held() is True
+
+        # And the departing claim stops speaking for anything.
+        assert first.descriptor is None
+        assert first.is_held() is False
+
+        # Idempotent, and silent: ``app/cli.py`` releases before it publishes
+        # a status and again in its ``finally``.
+        caplog.clear()
+        assert first.release() is None
+        assert release_failures(caplog) == []
+    finally:
+        second.release()
+
+
+@pytest.mark.parametrize(("behaviour", "fragment"), SURVIVING_LOCK_CASES)
+def test_a_release_reports_a_lock_file_that_outlived_it(
+    tmp_artifact_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    behaviour: str,
+    fragment: str,
+) -> None:
+    """A lock file that survives its own release is reported, not forgotten.
+
+    The postcondition of a release is established rather than assumed, because
+    the file the release removes is what keeps the shared intermediate
+    directory alive and AAP 0.4.1 requires that directory to be gone before the
+    command returns.  Two ways for it to survive are asserted, since they reach
+    the reason by different routes: a removal that *reports* success and leaves
+    the file behind is caught by the survivor check afterwards, and one that
+    refuses is reported by the failure itself.
+
+    Either way the claim is still given back - the descriptor is closed and the
+    lock stops being held - because a release that left the lock held on the
+    strength of an unremovable file would make the checkout unusable until the
+    process exited.
+
+    Args:
+        tmp_artifact_root: The temporary checkout root.
+        monkeypatch: pytest's patching fixture.
+        behaviour: How the stand-in removal misbehaves.
+        fragment: The text the reason has to carry for that behaviour.
+    """
+    lock, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert lock is not None
+    real_unlink = os.unlink
+
+    def unlink(target: Any, *arguments: Any, **keywords: Any) -> None:
+        """Refuse to remove this run's lock file, and pass everything else on.
+
+        Args:
+            target: The path being removed.
+            *arguments: Positional arguments passed through untouched.
+            **keywords: Keyword arguments passed through untouched.
+
+        Raises:
+            PermissionError: For the lock file, in the refusing case.
+        """
+        named = isinstance(target, (str, os.PathLike))
+        if named and Path(target) == lock.path:
+            if behaviour == UNLINK_REFUSES:
+                raise PermissionError("canned removal failure")
+            # Reported as done, and not done: the other way a file outlives
+            # the call that removed it.
+            return
+        real_unlink(target, *arguments, **keywords)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+
+    with caplog.at_level(logging.ERROR, logger=service.__name__):
+        reason = lock.release()
+
+    assert reason is not None
+    assert "this run's lock file" in reason
+    assert fragment in reason
+    assert str(lock.path) in reason
+    assert len(release_failures(caplog)) == 1, caplog.records
+
+    # The file is still there - which is what was reported - and the claim is
+    # still given back.
+    assert lock.path.is_file()
+    assert lock.descriptor is None
+    assert lock.is_held() is False
+
+
+def test_a_release_reports_a_shared_directory_that_could_not_be_pruned(
+    tmp_artifact_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An empty shared directory left behind is the same reportable state.
+
+    The second half of the release's postcondition, and the one a test that
+    only watched the lock file would miss: the file can be gone and the
+    directory that held it still be in the workspace, which is exactly what AAP
+    0.4.1 forbids - ``Jenkins:15`` narrows the publisher to one artifact
+    because nothing intermediate may be readable, and a surviving
+    ``target/.workers`` is that directory reappearing after every command.
+
+    The prune is neutralised rather than the directory made unremovable,
+    because what is being asserted is the *report*: a release that pruned
+    nothing and said nothing would leave the caller unable to tell.
+    """
+    lock, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert lock is not None
+    shared_root = paths.workers_dir(tmp_artifact_root)
+
+    def do_not_prune(base: Path | str | None) -> None:
+        """Leave the shared directory exactly where it is.
+
+        Args:
+            base: The directory it hangs off, ignored.
+        """
+
+    monkeypatch.setattr(service, "_prune_workers_root", do_not_prune)
+
+    with caplog.at_level(logging.ERROR, logger=service.__name__):
+        reason = lock.release()
+
+    assert reason is not None
+    assert "is empty but could not be removed" in reason
+    assert str(shared_root) in reason
+    assert len(release_failures(caplog)) == 1, caplog.records
+
+    # Its own file did go, so what is being reported is the directory alone.
+    assert not lock.path.exists()
+    assert entries_left_in(shared_root) == []
+    assert lock.is_held() is False
+
+
+def test_a_release_is_silent_about_another_runs_live_directory(
+    tmp_artifact_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A shared directory another run is using is not this release's failure.
+
+    The distinction that keeps the reporting usable, and the reason the
+    survivor check reads the directory's *contents* rather than its existence:
+    a concurrent run's live working directory both prevents the prune and is
+    the legitimate reason for it, so a release that reported it would turn
+    every second concurrent run into a failed one.
+
+    Asserted on both channels, because a reason suppressed and a record emitted
+    anyway would still put a false failure in the operator's log.
+    """
+    lock, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert lock is not None
+    shared_root = paths.workers_dir(tmp_artifact_root)
+    other = service.prepare_workers_dir(base=tmp_artifact_root)
+    try:
+        with caplog.at_level(logging.ERROR, logger=service.__name__):
+            reason = lock.release()
+
+        assert reason is None
+        assert release_failures(caplog) == []
+
+        # This release's own file is gone; what remains is the other run's,
+        # untouched and still live.
+        assert not lock.path.exists()
+        assert lock.is_held() is False
+        assert other.is_dir()
+        assert service.run_directory_is_active(other) is True
+        assert shared_root.is_dir()
+    finally:
+        service.cleanup_workers_dir(base=tmp_artifact_root, directory=other)
+
+    # And once that run has finished too, nothing is left of either.
+    assert not shared_root.exists()
+
+
+@pytest.mark.parametrize("confined", RECLAIM_BRANCHES)
+def test_a_stale_unheld_lock_file_is_reclaimed_and_the_directory_pruned(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch, confined: bool
+) -> None:
+    """Retention is what the operating system answers, never the name.
+
+    The other direction of the retention rule, and the one a "keep anything
+    called ``.run.lock``" reading gets wrong: a lock file left behind by a run
+    that was killed between creating it and removing it is *residue*, and
+    keeping it on the strength of its name would leave the shared intermediate
+    directory in the workspace after every command in the checkout's life -
+    which AAP 0.4.1 forbids, and which ``Jenkins:15``'s narrowed publisher glob
+    exists because of.
+
+    Both halves are asserted, because a test that only checked the outcome
+    would pass on a service that had simply stopped recognising the name: the
+    probe says the file is free, and the reclaim then removes it, takes the
+    stranded directory beside it, and prunes the directory both were in.
+
+    Asserted on both branches, because the rule is implemented twice - once
+    descriptor-relative and once by pathname - and the held case is asserted
+    on both by
+    :func:`test_the_clean_retains_the_run_lock_and_reclaims_the_rest`.
+
+    Args:
+        tmp_artifact_root: The temporary checkout root.
+        monkeypatch: pytest's patching fixture.
+        confined: Whether the descriptor-relative branch or the pathname
+            fallback performs the reclaim.
+    """
+    shared_root = paths.ensure_dir(paths.workers_dir(tmp_artifact_root))
+    stale = shared_root / service.RUN_LOCK_NAME
+    stale.write_text("", encoding="utf-8")
+    stranded = stranded_run_directory(tmp_artifact_root)
+
+    # Nobody holds it, and that is asked rather than assumed.
+    assert service._file_lock_is_held(stale) is False
+    assert service._run_lock_is_in_use(stale) is False
+
+    monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", confined)
+
+    reason, retained = service.reclaim_workers_root(base=tmp_artifact_root)
+
+    assert reason is None
+    assert retained == ()
+    assert not stale.exists()
+    assert not stranded.exists()
+    assert not shared_root.exists()
+
+
+@pytest.mark.parametrize("confined", RECLAIM_BRANCHES)
+def test_a_lock_whose_holder_cannot_be_established_is_retained(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch, confined: bool
+) -> None:
+    """An unanswerable probe is not an answer, and fails safe towards keeping.
+
+    The third state the probe can be in, and the only one where the two costs
+    are not symmetrical: a lock wrongly kept costs a leftover file that the
+    next run's reclaim removes, while a lock wrongly deleted costs the mutual
+    exclusion two concurrent runs depend on.  So ``None`` is resolved towards
+    retention, and the retention is *reported* so the caller can tell a
+    deliberate survivor from a failed removal.
+
+    The probe is made unanswerable for the lock file alone, which is what makes
+    the assertion precise: the stranded run directory beside it is judged by
+    its own lease, answered honestly, and is still reclaimed in the same call.
+
+    Args:
+        tmp_artifact_root: The temporary checkout root.
+        monkeypatch: pytest's patching fixture.
+        confined: Whether the descriptor-relative branch or the pathname
+            fallback performs the reclaim.
+    """
+    lock, refusal = service.acquire_run_lock(base=tmp_artifact_root)
+    assert refusal is None
+    assert lock is not None
+    try:
+        stranded = stranded_run_directory(tmp_artifact_root)
+        real_probe = service._file_lock_is_held
+
+        def unanswerable(path: Path) -> bool | None:
+            """Refuse to answer for the lock file, and delegate the rest.
+
+            Args:
+                path: The lock or lease file being probed.
+
+            Returns:
+                ``None`` for the run lock - a platform with no locking
+                primitive, or a probe that failed on its own terms - and the
+                real answer for every lease.
+            """
+            if path.name == service.RUN_LOCK_NAME:
+                return None
+            return real_probe(path)
+
+        monkeypatch.setattr(service, "_file_lock_is_held", unanswerable)
+        monkeypatch.setattr(service, "_SUPPORTS_CONFINED_REMOVAL", confined)
+
+        reason, retained = service.reclaim_workers_root(base=tmp_artifact_root)
+
+        assert reason is None
+        assert retained == (lock.path,)
+        assert lock.path.is_file()
+        # The fail-safe applies to the lock alone: what could be judged was
+        # judged, and reclaimed.
+        assert not stranded.exists()
+        assert paths.workers_dir(tmp_artifact_root).is_dir()
+    finally:
+        lock.release()
+
+
+def test_a_lock_that_cannot_be_locked_is_discarded_rather_than_left(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rendezvous point with no lock behind it is not left in the workspace.
+
+    The one path on which this process creates the lock file and then cannot
+    lock it - a filesystem without locking support, which is the platform
+    refusal AAP 0.1.3's three non-zero classes absorb as an
+    artifact-infrastructure failure.  The file it created is therefore removed
+    and the shared directory pruned: a refused run has to leave the workspace
+    as it found it, and a lock file nobody can ever hold would otherwise be
+    residue that only the next run's reclaim clears.
+
+    The build output root is deliberately *not* removed - the refusal created
+    it on the way in, and emptying or deleting it is the clean step's decision
+    rather than this one's.
+    """
+    lock_path = paths.workers_dir(tmp_artifact_root) / service.RUN_LOCK_NAME
+
+    def cannot_lock(descriptor: int) -> bool:
+        """Fail to lock, as a filesystem without the primitive would.
+
+        Args:
+            descriptor: The open descriptor the service would lock.
+
+        Raises:
+            OSError: Always.
+        """
+        raise OSError("canned locking failure")
+
+    monkeypatch.setattr(service, "_lock_exclusive", cannot_lock)
+
+    lock, reason = service.acquire_run_lock(base=tmp_artifact_root)
+
+    assert lock is None
+    assert reason is not None
+    assert "cannot be taken on this platform" in reason
+    assert "nothing was executed" in reason
+    assert str(lock_path) in reason
+
+    assert not lock_path.exists()
+    assert not paths.workers_dir(tmp_artifact_root).exists()
+    assert paths.target_root(tmp_artifact_root).is_dir()
+
+
+def test_a_lock_file_taken_by_a_departing_run_is_recreated_not_refused(
+    tmp_artifact_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The run that waited politely for its turn must not be the one refused.
+
+    The consequence of the release removing its own file *and* pruning the
+    directory it sat in: a waiter's next attempt can find the directory gone
+    from underneath it, and the open fails with "no such file" even though the
+    flags say create - because what is missing is the directory, not the file.
+    Read as a failure that would refuse precisely the run whose turn it now
+    is, so it is retryable: the directory is recreated and the attempt made
+    again.
+
+    The announcement is asserted to be **absent**, which is the second half of
+    the case: "another run holds this, waiting" is for genuine contention, and
+    a departure that left nothing behind is not contention.  A per-attempt
+    announcement would also put a line in the CI log for a wait nobody made.
+    """
+    shared_root = paths.workers_dir(tmp_artifact_root)
+    real_open = os.open
+    attempts: list[Path] = []
+
+    def opener(path: Any, *arguments: Any, **keywords: Any) -> int:
+        """Take the directory away once, then open for real.
+
+        Args:
+            path: The path being opened.
+            *arguments: Positional arguments passed through untouched.
+            **keywords: Keyword arguments passed through untouched.
+
+        Returns:
+            A descriptor, for every call but the first on the lock file.
+
+        Raises:
+            FileNotFoundError: On that first call, as the departing holder's
+                prune makes the real one raise.
+        """
+        named = isinstance(path, (str, os.PathLike))
+        if named and Path(path).name == service.RUN_LOCK_NAME and not attempts:
+            attempts.append(Path(path))
+            shared_root.rmdir()
+            raise FileNotFoundError("canned departure")
+        return real_open(path, *arguments, **keywords)
+
+    monkeypatch.setattr(os, "open", opener)
+    monkeypatch.setattr(
+        service, "_RUN_LOCK_POLL_SECONDS", IMMEDIATE_POLL_SECONDS
+    )
+
+    with caplog.at_level(logging.INFO, logger=service.__name__):
+        lock, reason = service.acquire_run_lock(base=tmp_artifact_root)
+    try:
+        assert reason is None
+        assert lock is not None
+        assert attempts == [shared_root / service.RUN_LOCK_NAME]
+        assert lock.is_held() is True
+        assert lock.path.is_file()
+        assert shared_root.is_dir()
+
+        announcements = [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == service.__name__
+            and "waiting up to" in record.getMessage()
+        ]
+        assert announcements == [], announcements
+    finally:
+        if lock is not None:
+            lock.release()
 
 
 # =========================================================================== #
@@ -2597,6 +5940,377 @@ def test_no_relayed_line_is_trusted_as_log_text(
     assert "username" in messages[3]
 
 
+# =========================================================================== #
+# The *live* relay, driven against a real child process
+#
+# Everything above drives the after-the-fact path, because that is the one a
+# stubbed ``spawn`` takes.  Production takes the other one:
+# ``_spawn_worker`` starts a reader thread per pipe and hands back a worker
+# marked ``output_relayed``, so ``_relay_output`` returns at its guard and
+# every guarantee a reader of a CI log depends on - rendering, redaction, the
+# severity floor, the size bound - has to hold in ``_relay_stream`` instead.
+# Asserting it on the stub alone is what let the two implementations drift
+# apart (review finding ``RUN-F01`` / ``SEC2-F01`` / ``SEC2-F05``), so the
+# five tests below drive the real function against a real child.
+#
+# This is the *only* group in this module that starts a process.  It is a
+# short ``-c`` script of this interpreter, it writes what the test tells it to
+# and exits, and it touches nothing outside its own two pipes: no engine, no
+# browser, no network, no artifact, and a temporary working directory.  The
+# module's other seams stay stubbed for the reason its docstring gives.
+# =========================================================================== #
+
+#: A child that writes exactly what a test hands it, to whichever stream.
+#:
+#: Instructions arrive as one JSON argument of ``(stream, text, repeat)``
+#: triples.  JSON rather than raw argv entries because the payloads are
+#: deliberately hostile - a bell, an ESC, a lone ``CR`` - and ``repeat``
+#: rather than pre-expanded text because one case needs a few hundred
+#: kilobytes on one line, which belongs in the child's memory rather than in
+#: an argument list.  Each write is flushed, so the parent sees it while the
+#: child is still running, which is the property the relay is being tested
+#: for.
+RELAY_CHILD_SCRIPT: Final[str] = (
+    "import json, sys\n"
+    "for name, text, repeat in json.loads(sys.argv[1]):\n"
+    "    stream = sys.stdout if name == 'out' else sys.stderr\n"
+    "    stream.write(text * repeat)\n"
+    "    stream.flush()\n"
+)
+
+#: The shard label the live tests publish, so the records they assert on are
+#: found by the same :func:`relayed_records` helper the stubbed tests use.
+LIVE_RELAY_SHARD: Final[int] = 0
+
+
+def spawn_relay_child(
+    writes: Sequence[tuple[str, str, int]], cwd: Path
+) -> service.WorkerProcess:
+    """Run :data:`RELAY_CHILD_SCRIPT` through the module's real launch.
+
+    The launch is reached by its own name rather than through
+    :func:`~app.services.test_run_service.run_suite`, which keeps the child a
+    three-line script instead of a behave invocation: what is under test is
+    the relay, and a real engine would add a browser, a suite and an artifact
+    tree to a test about whether a line is sanitized.
+
+    Args:
+        writes: ``(stream, text, repeat)`` triples for the child, where
+            ``stream`` is ``"out"`` or ``"err"``.
+        cwd: Working directory for the child, always a temporary one.
+
+    Returns:
+        The finished worker, carrying its status and the bounded, *rendered*
+        tail of each stream.
+    """
+    command = [
+        sys.executable,
+        "-c",
+        RELAY_CHILD_SCRIPT,
+        json.dumps([list(write) for write in writes]),
+    ]
+    # The shard label travels out of band, through the context variable the
+    # launch reads in the calling thread - the ``spawn`` seam takes the
+    # command and the directory and nothing else.  Reset afterwards, so a
+    # label cannot leak into another test through this thread's context.
+    token = service._shard_output_label.set(f"shard {LIVE_RELAY_SHARD}")
+    try:
+        return service._spawn_worker(command, cwd)
+    finally:
+        service._shard_output_label.reset(token)
+
+
+def test_the_live_relay_renders_every_line_a_real_child_writes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A real worker's hostile output reaches the log rendered, not raw.
+
+    The live path, asserted end to end: a child writes control characters, a
+    forged line break, a credential-shaped step phrase and two level tokens,
+    and every one of them is subject to
+    :func:`~app.logging_config.render_worker_line` before it becomes a record
+    or enters the retained tail.
+
+    * **Redacted.**  ``User enters "<username>" username`` is this suite's own
+      step phrasing [Login.feature:15], so a child diagnostic quoting a
+      substituted step is exactly how an account would reach a CI console.
+      The line survives and the value does not.  Redaction is log-only - AAP
+      0.8 requires the artifacts to carry that fixture data verbatim.
+    * **Control-safe.**  No record carries ``CR``, ``LF``, ``ESC`` or a bell:
+      a bell is spelled printably inside the record it belongs to, an ANSI
+      sequence is removed with the text it coloured kept, and the lone ``CR``
+      the child wrote becomes two records that *both* carry ``[shard N]``
+      rather than one tagged record and one forged untagged one (CWE-117).
+    * **Severity survives the process boundary.**  The child's
+      ``LOG_ERROR:`` line is emitted at ``ERROR`` even though it arrived on
+      ``stdout``, whose floor is ``INFO``; its ``LOG_DEBUG:`` line on
+      ``stderr`` stays at the ``WARNING`` floor, so a child cannot mute its
+      own diagnostics by printing a low token.
+    * **The tail matches the log.**  What the worker hands back is the
+      rendered text, not the raw text, so an after-the-fact reader of
+      :attr:`~app.services.test_run_service.WorkerProcess.stderr` cannot
+      recover what the log refused to print.
+
+    Blank lines are dropped on this path too, which is why the child's empty
+    line produces no record.
+    """
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        worker = spawn_relay_child(
+            (
+                (
+                    "out",
+                    "LOG_ERROR:app.reporting.screenshots:"
+                    " the capture was suppressed\n",
+                    1,
+                ),
+                ("out", "bell\x07and \x1b[31mcolour\x1b[0m\n", 1),
+                ("out", "\n", 1),
+                ("out", "carriage\rreturn\n", 1),
+                ("err", 'User enters "a-real-account" username\n', 1),
+                ("err", "LOG_DEBUG:behave: selecting features\n", 1),
+            ),
+            tmp_path,
+        )
+
+    assert worker.returncode == 0
+    records = relayed_records(caplog, LIVE_RELAY_SHARD)
+    messages = [record.getMessage() for record in records]
+
+    # Six writes, one of them the blank line that is dropped, and the lone CR
+    # is a break the parent's universal-newline translation recognises and
+    # therefore tags on both sides: six records.
+    assert len(messages) == 6, messages
+    assert all(message.startswith("[shard 0] ") for message in messages)
+    for message in messages:
+        for forbidden in ("\r", "\n", "\x1b", "\x07"):
+            assert forbidden not in message, message
+
+    # Asserted per stream, because the two reader threads are concurrent and
+    # only the order *within* a stream is a property of the relay.  The bell
+    # is spelled printably, the ANSI sequence is gone with the text it
+    # coloured kept, and the forged break is two attributable records.
+    from_stdout = [
+        message
+        for message in messages
+        if "User enters" not in message and "LOG_DEBUG:behave:" not in message
+    ]
+    assert from_stdout == [
+        "[shard 0] LOG_ERROR:app.reporting.screenshots:"
+        " the capture was suppressed",
+        "[shard 0] bell\\aand colour",
+        "[shard 0] carriage",
+        "[shard 0] return",
+    ]
+    from_stderr = [message for message in messages if message not in from_stdout]
+    assert from_stderr == [
+        "[shard 0] User enters [redacted] username",
+        "[shard 0] LOG_DEBUG:behave: selecting features",
+    ]
+
+    levels = {
+        record.levelno
+        for record in records
+        if "LOG_ERROR:app.reporting.screenshots:" in record.getMessage()
+    }
+    assert levels == {logging.ERROR}
+    floored = [
+        record for record in records if "LOG_DEBUG:behave:" in record.getMessage()
+    ]
+    assert [record.levelno for record in floored] == [logging.WARNING]
+
+    # The credential is gone from the record *and* from the tail the worker
+    # hands back, and the line that carried it is still there.
+    assert "a-real-account" not in "\n".join(messages)
+    assert any("username" in message for message in messages)
+    assert worker.stderr is not None
+    assert "a-real-account" not in worker.stderr
+    assert "User enters [redacted] username" in worker.stderr
+    assert worker.stdout is not None
+    assert "\x07" not in worker.stdout
+    assert "\x1b" not in worker.stdout
+    assert "bell\\aand colour" in worker.stdout
+
+
+def test_the_live_relay_bounds_one_very_long_line(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A single enormous line becomes one bounded record, and says so.
+
+    A child can legitimately write a line far longer than a console log can
+    carry - a dumped DOM, a driver's full capability payload - and forwarding
+    it whole would bury the diagnostics the run is being judged on.  The line
+    here is within the relay's read bound, so it is read whole in one call
+    exactly as it always was, and the *renderer* bounds it: one record, the
+    text cut to :data:`~app.logging_config.RELAYED_LINE_LIMIT` characters and
+    a suffix naming exactly how many were dropped, so a reader can tell
+    truncation from a line that merely ended.  Nothing is summarised and the
+    line is not dropped.
+    """
+    unit = "step detail "
+    repeat = 300
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        worker = spawn_relay_child(
+            (("out", unit, repeat), ("out", "\n", 1)), tmp_path
+        )
+
+    records = relayed_records(caplog, LIVE_RELAY_SHARD)
+    assert len(records) == 1, [record.getMessage() for record in records]
+
+    message = records[0].getMessage()
+    assert records[0].levelno == logging.INFO
+    assert message.startswith("[shard 0] " + unit)
+    assert "char(s) truncated]" in message
+    # Shorter than what the child wrote, and shorter than the read bound - the
+    # record is bounded by the renderer, not merely by the reader.
+    assert len(message) < len(unit) * repeat
+    assert len(message) < service._RELAY_READ_LIMIT
+
+    # The tail carries the same bounded text, so no reader of it recovers the
+    # payload the log declined to print.
+    assert worker.stdout is not None
+    assert worker.stdout.splitlines() == [message.removeprefix("[shard 0] ")]
+
+
+def test_the_live_relay_drains_a_line_larger_than_its_read_bound(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A child that writes no newline cannot make the parent allocate it all.
+
+    ``iter(stream.readline, "")`` let the *child* decide how much memory this
+    process allocated: one unterminated line of any size was read whole into
+    the parent and a copy of it retained in the tail (CWE-400).  Each read is
+    now bounded at :data:`~app.services.test_run_service._RELAY_READ_LIMIT`
+    characters, and the three properties that follow from it are asserted
+    here against a child that writes a few hundred kilobytes before its
+    first newline:
+
+    * the head of the line is relayed like any other line - rendered, bounded
+      and tagged - so the diagnostic is not lost;
+    * the remainder is discarded rather than relayed or retained, and exactly
+      **one** further record accounts for it: a character count and never the
+      text, which is both the honest report and the only bounded one, since
+      relaying every instalment would turn one pathological line into an
+      unbounded number of parent records;
+    * the relay resynchronises on the next newline and keeps going, which is
+      what stops one hostile line from costing the rest of the shard's
+      output.
+
+    The discarded count is exact - everything the child wrote on that line
+    beyond the first read - which is what pins the bound to the reader rather
+    than to the renderer, and the record's own size is what proves the count
+    was accumulated rather than the text.
+    """
+    unit = "overlong "
+    repeat = 40_000
+    written = len(unit) * repeat
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        worker = spawn_relay_child(
+            (
+                ("out", unit, repeat),
+                ("out", "\n", 1),
+                ("out", "the relay resynchronised\n", 1),
+            ),
+            tmp_path,
+        )
+
+    records = relayed_records(caplog, LIVE_RELAY_SHARD)
+    messages = [record.getMessage() for record in records]
+    assert len(messages) == 3, messages
+
+    head, notice, resynchronised = records
+    assert head.levelno == logging.INFO
+    assert head.getMessage().startswith("[shard 0] " + unit)
+    assert "char(s) truncated]" in head.getMessage()
+
+    # One record for the remainder, carrying a count and no payload.  It is a
+    # diagnostic rather than progress: output being dropped is an anomaly of
+    # the child, so it is emitted above the stdout floor.
+    assert notice.levelno == logging.WARNING
+    assert notice.getMessage().startswith("[shard 0] ")
+    assert "discarded" in notice.getMessage()
+    # The tag is stripped before the count is read, so the shard number in it
+    # cannot be mistaken for the figure under test.
+    reported = notice.getMessage().removeprefix("[shard 0] ")
+    assert re.findall(r"\d+", reported) == [
+        str(written - service._RELAY_READ_LIMIT)
+    ], reported
+    assert unit not in reported
+
+    assert resynchronised.getMessage() == "[shard 0] the relay resynchronised"
+
+    # Nothing anywhere near the payload's size reached a record or the tail,
+    # and the parent's own notice is not passed off as something the child
+    # wrote.
+    for message in messages:
+        assert len(message) < service._RELAY_READ_LIMIT, len(message)
+    assert worker.stdout is not None
+    assert len(worker.stdout.splitlines()) == 2
+    assert "discarded" not in worker.stdout
+    assert worker.stdout.endswith("the relay resynchronised")
+    assert len(worker.stdout) < service._RELAY_READ_LIMIT
+
+
+def test_the_live_relay_reports_nothing_for_a_line_exactly_at_its_bound(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A line that fills the read bound exactly loses nothing and says nothing.
+
+    The boundary between the two branches, and the one a reader would be
+    misled by if it were wrong: the child's line is exactly
+    :data:`~app.services.test_run_service._RELAY_READ_LIMIT` characters long,
+    so the first read returns it whole *without* its terminator and the drain
+    that follows finds the newline immediately.  Nothing was lost, so nothing
+    is reported - a discarded-characters record naming zero would claim an
+    anomaly that did not happen - and the line itself is relayed exactly once.
+    """
+    unit = "bound "
+    repeat = 1365
+    filler = "xy"
+    assert len(unit) * repeat + len(filler) == service._RELAY_READ_LIMIT
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        worker = spawn_relay_child(
+            (("out", unit, repeat), ("out", f"{filler}\n", 1)), tmp_path
+        )
+
+    records = relayed_records(caplog, LIVE_RELAY_SHARD)
+    assert len(records) == 1, [record.getMessage() for record in records]
+    assert records[0].levelno == logging.INFO
+    assert records[0].getMessage().startswith("[shard 0] " + unit)
+    assert "char(s) truncated]" in records[0].getMessage()
+    assert "discarded" not in records[0].getMessage()
+    assert worker.stdout is not None
+    assert len(worker.stdout.splitlines()) == 1
+
+
+def test_the_live_relay_keeps_an_unterminated_last_line(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A child that exits mid-line loses neither the line nor the run.
+
+    The other way a read can return without a terminator, and the common one:
+    the child's last line was never newline-terminated, and EOF is what ends
+    it.  That is not an over-long line, so it is relayed once and no
+    discarded-characters record is emitted - a count of zero would be a record
+    about nothing - and the reader thread then returns at EOF as it always
+    did, which is what lets the launch join it and report the exit status.
+    """
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        worker = spawn_relay_child(
+            (("err", "unterminated diagnostic, no newline", 1),), tmp_path
+        )
+
+    records = relayed_records(caplog, LIVE_RELAY_SHARD)
+    assert [record.getMessage() for record in records] == [
+        "[shard 0] unterminated diagnostic, no newline"
+    ]
+    assert [record.levelno for record in records] == [logging.WARNING]
+    assert worker.returncode == 0
+    assert worker.stderr == "unterminated diagnostic, no newline"
+
+
 def test_what_the_outcome_carries_this_module_does_not_also_log(
     feature_tree: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -2669,6 +6383,75 @@ def test_every_shard_dead_yields_no_result_set_at_all(feature_tree: Path) -> Non
     assert len(outcome.dead_shards) == 3
     assert outcome.selected_count == len(all_locations())
     assert outcome.worker_count == 3
+
+
+def test_an_all_dead_run_attributes_every_shard_and_logs_none_of_them(
+    feature_tree: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The producer half of the dead-shard diagnostics, on the worst path.
+
+    An all-workers-dead run is the case where two signals coincide: every
+    shard is dead **and** the merge produced nothing, so ``app/cli.py`` settles
+    on its artifact-infrastructure class rather than its dead-worker one.  The
+    shard identities are the only thing that says *which* workers died and
+    where, and they exist nowhere but on this outcome - so what this module has
+    to guarantee is that each one is fully attributed before it is handed over,
+    and that handing it over is all this module does with it.
+
+    Fully attributed means the shard's index and its scenario count, which is
+    AAP 0.4.1's "the incomplete shard is named on stderr" - a property of the
+    message rather than of the emitter - and the order is shard order, not
+    completion order, so the emitted account is deterministic.
+
+    **Logged by nobody here**: ``app/cli.py`` emits one record per reason
+    before whichever exit class it returns, and a second emitter would put one
+    incident in the CI console twice under two logger names.  Absence alone
+    would be satisfied by a service that lost the reasons altogether, so the
+    presence on the outcome is asserted in the same test.
+    """
+    spawn = RecordingSpawn(
+        base=feature_tree, behaviour={0: NO_FILE, 1: EMPTY_FILE, 2: INVALID_JSON}
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        outcome = service.run_suite(workers=3, base=feature_tree, spawn=spawn)
+
+    assert outcome.result_set is None
+    assert outcome.merge_produced_nothing is True
+    assert outcome.worker_count == 3
+
+    # One attributed reason per shard, in shard order.
+    by_index = {result.plan.index: result for result in outcome.shard_results}
+    assert sorted(by_index) == [0, 1, 2]
+    for index in sorted(by_index):
+        result = by_index[index]
+        assert result.dead is True
+        assert result.reason is not None
+        assert f"shard {index}" in result.reason
+        assert f"{len(result.plan.locations)} scenario(s)" in result.reason
+        # The locations are in the reason too, which is what makes a dead
+        # shard's scenarios findable without tracing the run.
+        assert result.plan.locations[0] in result.reason
+    assert outcome.dead_shards == tuple(
+        by_index[index].reason for index in sorted(by_index)
+    )
+
+    # Three distinct deaths, so the reasons are not one message repeated.
+    assert len(set(outcome.dead_shards)) == 3
+
+    emitted = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.name == service.__name__
+    )
+    for reason in outcome.dead_shards:
+        assert reason not in emitted
+    service_errors = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == service.__name__ and record.levelno >= logging.ERROR
+    ]
+    assert service_errors == [], service_errors
 
 
 def test_zero_selected_scenarios_yields_an_empty_document_not_none(
@@ -3115,8 +6898,9 @@ def test_a_manifest_naming_an_absent_feature_file_is_reported(
     with caplog.at_level(logging.WARNING, logger=RERUN_REPORT_LOGGER_NAME):
         selected, problems = service.select_rerun_scenarios(base=feature_tree)
 
-    # The absent feature is not executed, and it is named where an operator
-    # reads it.
+    # The absent feature is not executed, and the drop is reported where an
+    # operator reads it - by the entry's position rather than by echoing the
+    # manifest's text, which is untrusted input bound for a console record.
     assert missing_path not in {unit.feature_path for unit in selected}
     reported = [
         record.getMessage()
@@ -3124,7 +6908,8 @@ def test_a_manifest_naming_an_absent_feature_file_is_reported(
         if record.name == RERUN_REPORT_LOGGER_NAME
         and record.levelno >= logging.WARNING
     ]
-    assert any("Vanished.feature" in message for message in reported), reported
+    assert any("Dropping entry 1" in message for message in reported), reported
+    assert not any("Vanished.feature" in message for message in reported), reported
 
     # The rest of the manifest survived it.
     assert [unit.location for unit in selected] == [
@@ -3264,6 +7049,193 @@ def test_a_rerun_still_reports_a_dead_worker(feature_tree: Path) -> None:
     assert "shard 0" in outcome.dead_shards[0]
     assert outcome.result_set is None
     assert outcome.merge_produced_nothing is False
+
+
+# --------------------------------------------------------------------------- #
+# Path safety of the rerun selection (CWE-22, CWE-367)
+#
+# A rerun takes its scenarios from a file in the CI workspace, so its entries
+# are machine input from outside the suite and every one of them names a file
+# the engine will open by name.  The selection therefore has to be decided on
+# a verified object exactly as the ordinary one is - and with one rule the
+# ordinary path does not have: a recorded failure is never silently discarded,
+# so an entry whose file cannot be read this instant is reported and kept
+# rather than dropped.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("linker", [os.symlink, os.link])
+def test_a_manifest_entry_that_is_a_link_is_not_selected(
+    feature_tree: Path,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    linker: Any,
+) -> None:
+    """A linked or hard-linked entry is refused, and the manifest survives it.
+
+    Either link makes the entry a file outside the features directory, so
+    whoever can write the outside name chooses what a rerun executes.  The
+    refusal belongs to the manifest's own owner - it is the confinement tier
+    of ``app/reporting/rerun_report.py``, which drops the entry and warns from
+    there - so what is asserted here is the property this service is
+    responsible for: the outside feature reaches no location, the drop is
+    reported where an operator reads it, and the real failures named by the
+    same manifest are still selected.
+    """
+    outside = write_outside_feature(tmp_path)
+    link_or_skip(
+        linker, outside, paths.features_dir(feature_tree) / OUTSIDE_FEATURE.filename
+    )
+    survivor_line = min(ALPHA_LOCATION_LINES)
+    write_manifest(
+        feature_tree,
+        manifest_line(OUTSIDE_FEATURE.feature_path, OUTSIDE_LOCATION_LINE)
+        + manifest_line(ALPHA_FEATURE.feature_path, survivor_line),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=RERUN_REPORT_LOGGER_NAME):
+        selected, problems = service.select_rerun_scenarios(base=feature_tree)
+
+    assert OUTSIDE_FEATURE.feature_path not in {unit.feature_path for unit in selected}
+    assert [unit.location for unit in selected] == [
+        f"{ALPHA_FEATURE.feature_path}{rerun_report.LINE_SEPARATOR}{survivor_line}"
+    ]
+    assert problems == []
+    reported = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == RERUN_REPORT_LOGGER_NAME
+        and record.levelno >= logging.WARNING
+    ]
+    # The drop is reported, and reported *without* the manifest's own text:
+    # an entry a manifest supplied is untrusted input bound for stderr and a
+    # CI console record, so the owner names the entry's position and the
+    # features directory instead of echoing the path (CWE-532, CWE-117).
+    assert any("Dropping entry 1" in message for message in reported), reported
+    assert not any(OUTSIDE_FEATURE.filename in message for message in reported), (
+        reported
+    )
+
+
+def test_a_manifest_entry_whose_feature_cannot_be_read_is_dropped(
+    feature_tree: Path,
+) -> None:
+    """An unverifiable feature contributes no location, and says so.
+
+    The one case in which a rerun does drop a recorded failure, and the reason
+    it has to.  "A location is kept rather than dropped" is the rule for a
+    *different* condition - the feature verified and simply no longer declares
+    a scenario at that line, which the test below covers - and it cannot be
+    stretched to this one.  Here the port has already refused the entry: its
+    contents could not be read from a verified descriptor.  Retaining the
+    location would hand the engine the pathname that was refused, and the
+    engine opens a pathname by name, so the refusal made here would be undone
+    there and whatever now stands at that path would execute under the refused
+    entry's spelling (CWE-22).
+
+    What the report loses is the *identity* of the failure, which is why the
+    problem names the manifest and the entry's position: an operator can see
+    that entry 1 was refused, and the reason is on stderr.  What it does not
+    lose is any other feature's failures.
+    """
+    undecodable = paths.features_dir(feature_tree) / "Undecodable.feature"
+    undecodable.write_bytes(b"Feature: \xff\xfe not utf-8\n")
+    feature_path = f"{paths.NORMALIZED_FEATURES_PREFIX}{undecodable.name}"
+    write_manifest(feature_tree, manifest_line(feature_path, OUTSIDE_LOCATION_LINE))
+
+    selected, problems = service.select_rerun_scenarios(base=feature_tree)
+
+    assert selected == []
+    assert len(problems) == 1
+    assert "entry 1" in problems[0]
+    assert str(paths.rerun_txt_path(feature_tree)) in problems[0]
+    # The manifest's own path text is not echoed back: the position locates
+    # the entry and carries nothing from the file.
+    assert undecodable.name not in problems[0]
+
+
+def test_a_rerun_feature_replaced_after_selection_is_dropped_and_still_exits_zero(
+    feature_tree: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rerun gets the same hand-off check, and the same tolerated outcome.
+
+    The rerun path reads its features through the same verified reader and
+    records the same identities, so a file swapped the instant it was read is
+    detected here too: the swapped feature's locations are dropped and named,
+    the manifest's other failures are still re-run, and the run keeps every
+    property of its own row of AAP 0.4.1 - no artifact is published, the
+    ``None`` document is not the empty-merge condition, and no shard is dead.
+    """
+    swapped = swap_on_read(
+        monkeypatch, ALPHA_FEATURE.feature_path, ALPHA_FEATURE.filename
+    )
+    surviving_line = BETA_LOCATION_LINES[0]
+    write_manifest(
+        feature_tree,
+        manifest_line(ALPHA_FEATURE.feature_path, *ALPHA_LOCATION_LINES[:2])
+        + manifest_line(BETA_FEATURE.feature_path, surviving_line),
+    )
+
+    spawn = RecordingSpawn(base=feature_tree)
+    outcome = service.run_suite(rerun=True, workers=2, base=feature_tree, spawn=spawn)
+
+    assert swapped == [ALPHA_FEATURE.feature_path], "the swap never happened"
+    launched = sorted(
+        itertools.chain.from_iterable(call.locations for call in spawn.calls)
+    )
+    assert launched == [
+        f"{BETA_FEATURE.feature_path}{rerun_report.LINE_SEPARATOR}{surviving_line}"
+    ]
+    assert outcome.selected_count == 1
+    assert outcome.dead_shards == ()
+    assert outcome.result_set is None
+    assert outcome.merge_produced_nothing is False
+    assert [
+        message
+        for message in outcome.parse_errors
+        if message.startswith(ALPHA_FEATURE.feature_path)
+    ] != []
+
+
+def test_a_rerun_entry_that_cannot_be_verified_reaches_no_worker(
+    feature_tree: Path,
+) -> None:
+    """The refusal holds at the hand-off, not only in the selection.
+
+    The half of the confinement a selection assertion alone does not settle.
+    An entry refused by the verified reader must not appear in a worker's
+    argv, because the engine opens a location **by name** in another process:
+    a location retained after the port refused its file would have the port
+    refusing an entry on one side and executing whatever stands at that path
+    on the other, which is the fail-open this drop removes (CWE-22).
+
+    The other feature named by the same manifest is still re-run, so the drop
+    costs exactly the refused entry, and the run keeps its own row of the AAP
+    0.4.1 exit table: status 0, no artifact, no dead shard.
+    """
+    undecodable = paths.features_dir(feature_tree) / "Undecodable.feature"
+    undecodable.write_bytes(b"Feature: \xff\xfe not utf-8\n")
+    refused_path = f"{paths.NORMALIZED_FEATURES_PREFIX}{undecodable.name}"
+    surviving_line = BETA_LOCATION_LINES[0]
+    write_manifest(
+        feature_tree,
+        manifest_line(refused_path, 3)
+        + manifest_line(BETA_FEATURE.feature_path, surviving_line),
+    )
+
+    spawn = RecordingSpawn(base=feature_tree)
+    outcome = service.run_suite(rerun=True, workers=2, base=feature_tree, spawn=spawn)
+
+    launched = sorted(
+        itertools.chain.from_iterable(call.locations for call in spawn.calls)
+    )
+    assert launched == [
+        f"{BETA_FEATURE.feature_path}{rerun_report.LINE_SEPARATOR}{surviving_line}"
+    ]
+    assert refused_path not in " ".join(launched)
+    assert outcome.selected_count == 1
+    assert outcome.dead_shards == ()
+    assert [message for message in outcome.parse_errors if "entry 1" in message] != []
 
 
 # =========================================================================== #
@@ -3574,7 +7546,7 @@ HOOK_COLLABORATORS: Final[tuple[str, ...]] = (
     "set_userdata",
 )
 
-#: The recorder labels used to assert the *order* of the teardown steps from a
+#: The recorder labels that carry the *order* of the teardown steps in a
 #: single shared log, which is the only way to assert that capture precedes the
 #: quit rather than merely that both happened.
 CAPTURE_STEP: Final[str] = "capture"
@@ -3982,8 +7954,8 @@ def test_after_scenario_names_the_scenario_whose_evidence_was_sought(
     restricting the identity keeps one out of the log by construction.
 
     A scenario exposing none of the three - which a unit-test object
-    legitimately is - yields ``None`` rather than a placeholder, leaving the
-    suppression record reading exactly as it did before identities existed.
+    legitimately is - yields ``None`` rather than a placeholder, so the
+    suppression record reads exactly as one carrying no identity at all.
     """
     recorder = HookRecorder(png=None)
     recorder.install(monkeypatch)
@@ -4225,3 +8197,1966 @@ def test_the_lifecycle_never_writes_a_scenarios_status(
         assert scenario.status.failed is failed
         assert scenario.status.queries == 1
         assert fake_context.driver is None
+
+
+# --------------------------------------------------------------------------- #
+# OS-level containment of a worker's process tree
+#
+# A worker is the engine, the driver executable it starts, and the browser that
+# executable starts -- and the browser holds the system under test's
+# authenticated session.  Stopping the engine stops the engine, so cancellation
+# has to reach the tree, and "we signalled it" has to become "we confirmed it
+# stopped".
+#
+# The POSIX tests below start real process trees of their own; the Windows
+# tests drive the same code through a fake ``kernel32``, which is the only way
+# that platform's branches are reachable from this host.  Neither needs a
+# browser, a driver binary or the engine.
+#
+# The topology the live trees reproduce is the production one, and the shape is
+# the whole point:
+#
+#   supervisor  -- this process
+#     worker    -- start_new_session=True, so it *leads* a session: its pid,
+#                  its process-group id and its session id are one number
+#       driver  -- process_group=0, so it leads a process group of its **own**
+#                  inside that session, exactly as a Selenium driver does
+#
+# A test whose child merely inherits its parent's group cannot fail when the
+# reclamation only signals the worker's group, so every live-tree assertion
+# here states the pgids it measured and the session they share.
+#
+# Platform guarding is a requirement rather than a convenience: AAP 0.8 makes
+# pytest a gate inside ``scripts/run_tests.ps1``, so this module is collected
+# and run on Windows, where process groups, sessions, ``/proc`` and ``ps`` do
+# not exist. Every test that touches one of those carries
+# :data:`REQUIRES_PROCESS_TREES`; the faked-``kernel32`` tests carry no guard
+# at all, because they are what gives the Windows branches their coverage on
+# every platform.
+# --------------------------------------------------------------------------- #
+
+
+#: The process listing the live-tree tests measure a group's membership with,
+#: read rather than inferred so a surviving child is counted after its leader
+#: has gone.  An absolute program, so nothing on ``PATH`` can stand in for it.
+PS_PROGRAM: Final[Path] = Path("/bin/ps")
+
+#: Whether this platform offers everything the live-tree tests need: process
+#: groups, sessions, group signalling and the listing above.
+HAS_PROCESS_TREES: Final[bool] = all(
+    hasattr(os, name) for name in ("getpgid", "getsid", "killpg", "setsid")
+) and PS_PROGRAM.is_file()
+
+#: Guard for every test that starts or inspects a live process tree, or that
+#: replaces one of the POSIX calls above.
+REQUIRES_PROCESS_TREES: Final[Any] = pytest.mark.skipif(
+    not HAS_PROCESS_TREES,
+    reason="process groups, sessions and /bin/ps are POSIX facilities, and "
+    "this suite is also the Windows gate (AAP 0.8)",
+)
+
+#: Guard for a test asserting what a *non*-Windows host does with the Win32
+#: seam, which on Windows would load the real library and answer differently.
+REQUIRES_POSIX_PLATFORM: Final[Any] = pytest.mark.skipif(
+    os.name == "nt", reason="asserts the POSIX side of the Win32 platform guard"
+)
+
+#: How long a spawned tree gets to appear before a test inspects it.
+TREE_SETTLE_SECONDS: Final[float] = 1.0
+
+#: How long a test waits after a release before re-reading the group, covering
+#: the moment between the module's last poll and the kernel reaping the last
+#: member.
+TREE_REAP_SECONDS: Final[float] = 0.3
+
+#: Grace the containment tests allow, in place of the module's default.  Short
+#: because two of them deliberately exercise a tree that will not go quietly.
+TEST_GRACE_SECONDS: Final[float] = 1.0
+
+#: An opaque value standing in for a Win32 job handle.
+FAKE_JOB_HANDLE: Final[int] = 0x3C
+
+#: ``WAIT_TIMEOUT`` -- a zero-timeout wait that expired, which for a process
+#: handle means the process is still running.  Spelled here as the tests'
+#: own value so an assertion cannot be satisfied by whatever the module
+#: happens to define.
+WAIT_TIMEOUT: Final[int] = 0x00000102
+
+#: ``WAIT_OBJECT_0`` -- the handle signalled, which for a process means it
+#: exited.
+WAIT_OBJECT_0: Final[int] = 0x00000000
+
+#: ``WAIT_FAILED`` -- the wait itself failed and observed nothing.
+WAIT_FAILED: Final[int] = 0xFFFFFFFF
+
+#: ``ERROR_INVALID_PARAMETER`` -- the one ``OpenProcess`` failure meaning the
+#: process id does not exist.
+ERROR_INVALID_PARAMETER: Final[int] = 87
+
+#: ``ERROR_ACCESS_DENIED`` -- a process that exists and is somebody else's.
+ERROR_ACCESS_DENIED: Final[int] = 5
+
+#: ``SYNCHRONIZE`` -- the only access right the liveness probe may ask for.
+SYNCHRONIZE_ACCESS: Final[int] = 0x00100000
+
+def _raiser(error: type[BaseException]) -> Any:
+    """Build a stand-in whose every call raises ``error``.
+
+    Used where the contract is how the module *interprets* a failure of an
+    operating-system call, which cannot be provoked reliably on a live process.
+
+    :param error: The exception class to raise.
+    :returns: A callable accepting any arguments and raising that class.
+    """
+
+    def raise_it(*args: Any, **kwargs: Any) -> None:
+        raise error("refused")
+
+    return raise_it
+
+
+def process_table() -> tuple[tuple[int, int, int], ...]:
+    """Return every live process as ``(pid, process group, session)``.
+
+    Measured with the process listing rather than with the subject's own
+    ``/proc`` reader: a test that measured through the code under test could
+    not distinguish a reclamation from a reader that answers "empty" for the
+    wrong reason.
+
+    The whole table is read and filtered here rather than asking ``ps`` to
+    select, because ``ps -g`` selects by **session** on this platform, which
+    is the one distinction these tests exist to make.
+
+    :returns: One triple per live process, in the listing's order.
+    """
+    listing = subprocess.run(
+        [str(PS_PROGRAM), "-e", "-o", "pid=,pgid=,sess="],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    rows: list[tuple[int, int, int]] = []
+
+    for line in listing.stdout.splitlines():
+        fields = line.split()
+
+        if len(fields) == 3 and all(field.isdigit() for field in fields):
+            rows.append((int(fields[0]), int(fields[1]), int(fields[2])))
+
+    return tuple(rows)
+
+
+def group_members(group: int) -> tuple[int, ...]:
+    """Return the live process ids of one process group.
+
+    :param group: The group id to list.
+    :returns: The pids still in the group, ascending; empty once it has gone.
+    """
+    return tuple(sorted(pid for pid, pgid, _ in process_table() if pgid == group))
+
+
+def session_members(session: int) -> tuple[int, ...]:
+    """Return the live process ids of one session.
+
+    :param session: The session id to list.
+    :returns: The pids still in the session, ascending; empty once it has gone.
+    """
+    return tuple(sorted(pid for pid, _, sid in process_table() if sid == session))
+
+
+def process_is_alive(pid: int) -> bool:
+    """Return whether one process id still resolves to a live process.
+
+    :param pid: The process id to probe.
+    :returns: ``True`` while the process exists, signal ``0`` being the probe
+        that performs the existence check and delivers nothing.
+    """
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+#: A child that ignores ``SIGTERM``, so the escalation path is real rather than
+#: simulated.  Its parent sleeps alongside it.
+STUBBORN_CHILD_SOURCE: Final[str] = (
+    "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(300)"
+)
+
+#: A child that exits on ``SIGTERM`` like anything ordinary.
+ORDINARY_CHILD_SOURCE: Final[str] = "import time\ntime.sleep(300)"
+
+
+class WorkerTree:
+    """A real worker-shaped process tree, launched the way a worker is.
+
+    The leader is started through :func:`test_run_service._process_group_keywords`
+    -- the module's own isolation request, not a copy of it -- and forks one
+    child. That shape is the point: a ``terminate()`` of the leader alone
+    leaves the child running, which is the failure containment exists for.
+
+    :param child_source: The program the child runs, which decides whether the
+        tree goes quietly.
+    """
+
+    __slots__ = ("process",)
+
+    def __init__(self, child_source: str = ORDINARY_CHILD_SOURCE) -> None:
+        launcher = (
+            "import subprocess, sys, time\n"
+            f"subprocess.Popen([sys.executable, '-c', {child_source!r}])\n"
+            "time.sleep(300)\n"
+        )
+        self.process = subprocess.Popen(
+            [sys.executable, "-c", launcher],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **service._process_group_keywords(),
+        )
+        time.sleep(TREE_SETTLE_SECONDS)
+
+    @property
+    def process_group(self) -> int:
+        """The group every process of the tree belongs to.
+
+        :returns: The group id, read live while the leader is alive.
+        """
+        return os.getpgid(self.process.pid)
+
+    @property
+    def session(self) -> int:
+        """The session the whole tree belongs to.
+
+        :returns: The session id, read live while the leader is alive, which
+            for a session leader is also its pid and its group id.
+        """
+        return os.getsid(self.process.pid)
+
+    def member_count(self, group: int) -> int:
+        """How many processes are still in one group.
+
+        Read from the group rather than from the leader, so a surviving child
+        is counted after the leader has gone.  This tree's child inherits the
+        leader's group, so the count covers the whole of it.
+
+        :param group: The group id to count.
+        :returns: The number of live members.
+        """
+        return len(group_members(group))
+
+    def destroy(self, group: int) -> None:
+        """Ensure nothing of the tree outlives the test.
+
+        :param group: The group id captured while the leader was alive.
+        :returns: ``None``.
+        """
+        # Best effort by design: the tree may already be gone - the test under
+        # way is often the thing that removed it - and a cleanup that raised
+        # would replace the test's own result with a teardown error.
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except OSError:
+            pass
+
+        try:
+            self.process.wait(timeout=TREE_SETTLE_SECONDS)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            pass
+
+        service._forget_worker(self.process)
+
+
+#: A grandchild that ignores ``SIGTERM``, standing in for a browser that does
+#: not close when its driver is asked politely.
+STUBBORN_GRANDCHILD_SOURCE: Final[str] = (
+    "import signal, time\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "time.sleep(300)\n"
+)
+
+#: An ordinary grandchild, which outlives its parent but not a signal.
+ORDINARY_GRANDCHILD_SOURCE: Final[str] = "import time\ntime.sleep(300)\n"
+
+
+class NestedGroupTree:
+    """A worker whose child leads a process group of its own in its session.
+
+    The production topology, reproduced with no browser in it. The leader is
+    started through :func:`test_run_service._process_group_keywords` -- the
+    module's own isolation request -- so it leads a session; it then starts a
+    grandchild with ``process_group=0``, which is what a driver launch does,
+    so that grandchild is in a group of its **own** while staying in the
+    worker's session.
+
+    That distinction is the one a test has to make. Signalling the worker's
+    group reaches the worker and nothing nested inside its session, so a tree
+    whose child merely inherited the worker's group cannot tell a reclamation
+    that reaches the session from one that does not.
+
+    The leader exits on request rather than on a timer
+    (:meth:`stop_leader`), so a test can register the worker while it is
+    certainly alive - which is the production contract for capturing the
+    session - and only then reproduce the state where the leader has gone and
+    the nested group has not.
+
+    :param grandchild_source: The program the grandchild runs.
+    """
+
+    __slots__ = ("grandchild", "process")
+
+    def __init__(self, grandchild_source: str = ORDINARY_GRANDCHILD_SOURCE) -> None:
+        launcher = (
+            "import subprocess, sys\n"
+            "child = subprocess.Popen(\n"
+            f"    [sys.executable, '-c', {grandchild_source!r}], process_group=0\n"
+            ")\n"
+            "print(child.pid, flush=True)\n"
+            # Blocks until the test asks for the exit, or until a signal
+            # arrives, or until this process goes away and the pipe closes.
+            "sys.stdin.readline()\n"
+        )
+        self.process = subprocess.Popen(
+            [sys.executable, "-c", launcher],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            **service._process_group_keywords(),
+        )
+
+        assert self.process.stdout is not None
+
+        #: The pid of the process in its own group inside the session.
+        self.grandchild = int(self.process.stdout.readline().strip())
+
+        time.sleep(TREE_SETTLE_SECONDS)
+
+    def stop_leader(self) -> None:
+        """Let the leader exit, leaving the nested group running.
+
+        :returns: ``None``.  Returns once the leader has exited and been
+            waited for, which is also what makes its group id unresolvable.
+        """
+        assert self.process.stdin is not None
+
+        self.process.stdin.write("\n")
+        self.process.stdin.flush()
+        self.process.stdin.close()
+        self.process.wait(timeout=TREE_SETTLE_SECONDS)
+
+    @property
+    def process_group(self) -> int:
+        """The worker's own process group.
+
+        :returns: The group id, which for a session leader is also its pid.
+        """
+        return os.getpgid(self.process.pid)
+
+    @property
+    def session(self) -> int:
+        """The session the whole tree shares.
+
+        :returns: The session id, read while the leader is alive.
+        """
+        return os.getsid(self.process.pid)
+
+    @property
+    def grandchild_group(self) -> int:
+        """The group the nested process leads.
+
+        :returns: Its group id, which is its own pid.
+        """
+        return os.getpgid(self.grandchild)
+
+    @property
+    def grandchild_session(self) -> int:
+        """The session the nested process belongs to.
+
+        :returns: Its session id, which must be the worker's.
+        """
+        return os.getsid(self.grandchild)
+
+    def destroy(self, groups: Sequence[int]) -> None:
+        """Ensure nothing of the tree outlives the test.
+
+        :param groups: The group ids captured while the tree was alive.
+        :returns: ``None``.
+        """
+        for group in groups:
+            # Best effort by design: the test under way is normally what
+            # removed the group, and a teardown that raised would replace the
+            # test's own result.
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except OSError:
+                pass
+
+        for stream in (self.process.stdin, self.process.stdout):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
+        try:
+            self.process.wait(timeout=TREE_SETTLE_SECONDS)
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            pass
+
+        service._forget_worker(self.process)
+
+
+class FakeKernel32:
+    """A recording stand-in for the Win32 ``kernel32`` binding.
+
+    Only the five entry points the module calls are implemented, each
+    returning a value the module has to interpret, so a test asserts the call
+    *sequence* rather than only the outcome.
+
+    :param create: What ``CreateJobObjectW`` returns; ``0`` is failure.
+    :param limit: What ``SetInformationJobObject`` returns; ``0`` is failure.
+    :param open_process: What ``OpenProcess`` returns; ``0`` is failure.
+    :param assign: What ``AssignProcessToJobObject`` returns; ``0`` is failure.
+    :param wait: What ``WaitForSingleObject`` returns; ``WAIT_TIMEOUT`` means
+        the process is still running.
+    """
+
+    __slots__ = ("_assign", "_create", "_limit", "_open", "_wait", "calls")
+
+    def __init__(
+        self,
+        *,
+        create: int = FAKE_JOB_HANDLE,
+        limit: int = 1,
+        open_process: int = 0x77,
+        assign: int = 1,
+        wait: int = WAIT_TIMEOUT,
+    ) -> None:
+        self._create = create
+        self._limit = limit
+        self._open = open_process
+        self._assign = assign
+        self._wait = wait
+
+        #: Event names in call order, with what each acted on.
+        self.calls: list[tuple[str, Any]] = []
+
+    def CreateJobObjectW(self, attributes: Any, name: Any) -> int:
+        """Record the creation and return the programmed handle."""
+        self.calls.append(("CreateJobObjectW", name))
+        return self._create
+
+    def SetInformationJobObject(
+        self, job: int, info_class: int, info: Any, length: int
+    ) -> int:
+        """Record the limit call and return the programmed result."""
+        self.calls.append(("SetInformationJobObject", (job, info_class)))
+        return self._limit
+
+    def OpenProcess(self, access: int, inherit: bool, pid: int) -> int:
+        """Record the open and return the programmed handle."""
+        self.calls.append(("OpenProcess", (access, pid)))
+        return self._open
+
+    def AssignProcessToJobObject(self, job: int, process: int) -> int:
+        """Record the assignment and return the programmed result."""
+        self.calls.append(("AssignProcessToJobObject", (job, process)))
+        return self._assign
+
+    def WaitForSingleObject(self, handle: int, milliseconds: int) -> int:
+        """Record the wait and return the programmed result."""
+        self.calls.append(("WaitForSingleObject", (handle, milliseconds)))
+        return self._wait
+
+    def CloseHandle(self, handle: int) -> int:
+        """Record the close and report success."""
+        self.calls.append(("CloseHandle", handle))
+        return 1
+
+    def targets(self) -> tuple[str, ...]:
+        """The recorded call names, in order.
+
+        :returns: The sequence of entry points called.
+        """
+        return tuple(name for name, _ in self.calls)
+
+
+class WorkerProcessDouble:
+    """A worker process exposing only what containment reads from one.
+
+    :param pid: The process id to report.
+    :param outcome: What ``wait`` does - an exception class to raise, or
+        ``None`` to return cleanly.
+    """
+
+    __slots__ = ("_outcome", "pid", "waits")
+
+    def __init__(self, pid: int = 8765, outcome: type[BaseException] | None = None) -> None:
+        self.pid = pid
+        self._outcome = outcome
+
+        #: Every timeout ``wait`` was called with, in order.
+        self.waits: list[float | None] = []
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Record the wait and produce the programmed outcome.
+
+        :param timeout: The bound the caller allowed.
+        :returns: ``0`` for a clean return.
+        :raises BaseException: The programmed outcome, when one was given.
+        """
+        self.waits.append(timeout)
+
+        if self._outcome is subprocess.TimeoutExpired:
+            raise subprocess.TimeoutExpired(cmd="worker", timeout=timeout or 0)
+
+        if self._outcome is not None:
+            raise self._outcome("wait failed")
+
+        return 0
+
+
+@pytest.fixture
+def worker_tree() -> Iterator[WorkerTree]:
+    """Start a real worker-shaped tree and guarantee its removal.
+
+    :yields: The tree, settled and registered nowhere yet.
+    """
+    tree = WorkerTree()
+    group = tree.process_group
+
+    try:
+        yield tree
+    finally:
+        tree.destroy(group)
+
+
+@pytest.fixture
+def stubborn_worker_tree() -> Iterator[WorkerTree]:
+    """Start a tree whose child ignores ``SIGTERM``.
+
+    :yields: The tree, settled.
+    """
+    tree = WorkerTree(STUBBORN_CHILD_SOURCE)
+    group = tree.process_group
+
+    try:
+        yield tree
+    finally:
+        tree.destroy(group)
+
+
+@pytest.fixture
+def nested_group_tree() -> Iterator[NestedGroupTree]:
+    """Start a tree shaped like a worker with a driver, and remove it.
+
+    :yields: The tree, settled, with its nested group alive and registered
+        nowhere yet.
+    """
+    tree = NestedGroupTree()
+    groups = (tree.process_group, tree.grandchild_group)
+
+    try:
+        yield tree
+    finally:
+        tree.destroy(groups)
+
+
+@pytest.fixture
+def stubborn_nested_group_tree() -> Iterator[NestedGroupTree]:
+    """Start the same tree with a grandchild that ignores ``SIGTERM``.
+
+    :yields: The tree, settled.
+    """
+    tree = NestedGroupTree(STUBBORN_GRANDCHILD_SOURCE)
+    groups = (tree.process_group, tree.grandchild_group)
+
+    try:
+        yield tree
+    finally:
+        tree.destroy(groups)
+
+
+@pytest.fixture
+def windows_worker_platform(monkeypatch: pytest.MonkeyPatch) -> FakeKernel32:
+    """Present the module with a Windows platform and a fake ``kernel32``.
+
+    Both halves are needed and neither is sufficient: the mechanism is chosen
+    from ``_HAS_PROCESS_GROUPS`` and Win32 is reached only through
+    ``_kernel32``.
+
+    :param monkeypatch: pytest's patcher.
+    :returns: The fake library the Windows branches will call.
+    """
+    library = FakeKernel32()
+
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", False)
+    monkeypatch.setattr(service, "_kernel32", lambda: library)
+
+    return library
+
+
+@REQUIRES_PROCESS_TREES
+def test_registering_a_worker_captures_its_process_group(
+    worker_tree: WorkerTree,
+) -> None:
+    """Pin capture as happening at launch, while the leader is alive.
+
+    That is the only safe moment: once a worker has exited and been waited
+    for, neither its group nor its session can be looked up any more, and a
+    later lookup would either fail or resolve a recycled id. Cancellation
+    therefore depends on this record existing from the moment the worker does.
+
+    Both ids are captured, because each reaches something the other cannot:
+    the group is how the worker itself is signalled, and the session is how a
+    driver in a process group of its own is found at all. For a worker started
+    as a session leader the two are the same number, and that is asserted
+    rather than assumed - it is what makes the session id usable as the
+    worker's own group id everywhere else.
+    """
+    group = worker_tree.process_group
+    session = worker_tree.session
+
+    service._register_worker(worker_tree.process)
+
+    containment = service._worker_containment[worker_tree.process.pid]
+
+    assert containment.pid == worker_tree.process.pid
+    assert containment.process_group == group
+    assert containment.session == session
+    assert containment.session == worker_tree.process.pid
+    assert containment.job_handle is None
+
+
+@REQUIRES_PROCESS_TREES
+def test_a_live_worker_tree_is_not_reported_as_empty(worker_tree: WorkerTree) -> None:
+    """Pin the sense of the emptiness check, which is easy to invert.
+
+    ``killpg(pgid, 0)`` performs the existence check and delivers nothing, so
+    it **succeeding** means at least one process is still in the group. Read
+    the other way round, every live tree would be reported as already stopped.
+    """
+    containment = service._capture_containment(worker_tree.process)
+
+    assert worker_tree.member_count(worker_tree.process_group) == 2
+    assert service._worker_tree_is_empty(containment) is False
+
+
+@REQUIRES_PROCESS_TREES
+def test_an_unanswerable_worker_tree_is_reported_as_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the three answers of the group probe apart: gone, there, unknown.
+
+    An unknown is not a clean result. A record with no group at all cannot
+    answer, and an error that is neither "no such group" nor "not permitted"
+    is an unknown too - both are reported as unverified rather than passed
+    over, because the alternative is claiming a release nobody observed.
+    """
+    assert service._process_group_is_empty(None) is None
+
+    monkeypatch.setattr(service.os, "killpg", _raiser(ProcessLookupError))
+
+    assert service._process_group_is_empty(4242) is True
+
+    monkeypatch.setattr(service.os, "killpg", _raiser(PermissionError))
+
+    assert service._process_group_is_empty(4242) is False
+
+    monkeypatch.setattr(service.os, "killpg", _raiser(OSError))
+
+    assert service._process_group_is_empty(4242) is None
+
+    # And a record carrying no dimension at all answers the same way, which is
+    # what keeps "nothing was captured" out of the clean column.
+    assert service._worker_tree_is_empty(service._WorkerContainment(4242, None, None)) is None
+
+
+@REQUIRES_PROCESS_TREES
+def test_cancelling_a_worker_stops_its_whole_tree_and_confirms_it(
+    worker_tree: WorkerTree,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin cancellation against a real tree, which is the finding's own case.
+
+    The leader and its child are both alive. Signalling the *group* reaches
+    both, where ``terminate()`` on the leader would leave the child running,
+    and the verification that follows is what turns the signal into a
+    confirmed result. Nothing is reported at ``ERROR``, because nothing
+    survived.
+    """
+    group = worker_tree.process_group
+    service._register_worker(worker_tree.process)
+
+    assert worker_tree.member_count(group) == 2
+
+    with caplog.at_level(logging.WARNING, logger=service.__name__):
+        stopped = service._terminate_worker(
+            worker_tree.process, grace_seconds=TEST_GRACE_SECONDS
+        )
+
+    time.sleep(TREE_REAP_SECONDS)
+
+    assert stopped is True
+    assert worker_tree.member_count(group) == 0
+    assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
+
+
+@REQUIRES_PROCESS_TREES
+def test_a_descendant_that_ignores_the_request_is_escalated_and_reported(
+    stubborn_worker_tree: WorkerTree,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the escalation, and the gap that made it necessary.
+
+    The worker exits on ``SIGTERM`` but its child ignores it - the exact shape
+    of a browser outliving its engine. Treating the worker's own exit as
+    success would end cancellation here with a live process in the group, so
+    the polite path is verified too, the survivor is recorded at ``ERROR``,
+    and the group is then killed and confirmed empty.
+    """
+    group = stubborn_worker_tree.process_group
+    service._register_worker(stubborn_worker_tree.process)
+
+    with caplog.at_level(logging.WARNING, logger=service.__name__):
+        stopped = service._terminate_worker(
+            stubborn_worker_tree.process, grace_seconds=TEST_GRACE_SECONDS
+        )
+
+    time.sleep(TREE_REAP_SECONDS)
+
+    assert stopped is True
+    assert stubborn_worker_tree.member_count(group) == 0
+    assert [record.levelno for record in caplog.records if record.levelno >= logging.ERROR] == [
+        logging.ERROR
+    ]
+
+
+@REQUIRES_PROCESS_TREES
+def test_a_signalled_group_is_reached_through_the_captured_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the group id's source as the record, not a live lookup.
+
+    After a worker has been waited for, ``os.getpgid`` can no longer resolve
+    it - which is exactly when a browser still in its group has to be
+    reached. The captured id is therefore authoritative, and the live lookup
+    is only the fallback for a worker that was never registered.
+    """
+    signalled: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        service.os, "killpg", lambda group, number: signalled.append((group, number))
+    )
+    monkeypatch.setattr(service.os, "getpgid", _raiser(ProcessLookupError))
+
+    process = WorkerProcessDouble(pid=5150)
+    monkeypatch.setitem(service._worker_containment, 5150, service._WorkerContainment(5150, 9090, None))
+
+    assert service._signal_worker_group(process, signal.SIGTERM) is True
+    assert signalled == [(9090, signal.SIGTERM)]
+
+
+@REQUIRES_PROCESS_TREES
+def test_forgetting_a_worker_accounts_for_the_tree_it_left(
+    worker_tree: WorkerTree,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin verification on the path where the worker finished by itself.
+
+    A worker that exited normally can still have left a driver executable or
+    a browser behind, and nothing else in the run would notice. The check is
+    deliberately signal-free here - the leader has been reaped and its id
+    could in principle be recycled, so nothing is killed on this path - but
+    the survivor is reported, which is what makes the leak visible.
+    """
+    group = worker_tree.process_group
+    service._register_worker(worker_tree.process)
+
+    with caplog.at_level(logging.WARNING, logger=service.__name__):
+        service._forget_worker(worker_tree.process)
+
+    surviving = [record for record in caplog.records if record.levelno >= logging.ERROR]
+
+    assert len(surviving) == 1
+    assert str(group) in surviving[0].getMessage()
+    assert worker_tree.process.pid not in service._live_workers
+    assert worker_tree.process.pid not in service._worker_containment
+
+
+@REQUIRES_PROCESS_TREES
+def test_forgetting_a_worker_twice_is_silent_the_second_time(
+    worker_tree: WorkerTree,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the idempotence the two cleanup paths rely on.
+
+    The owning thread forgets its worker in a ``finally`` and
+    ``terminate_live_workers`` forgets whatever it stopped, so the same worker
+    is routinely dropped twice - and the second drop must neither raise nor
+    repeat the diagnosis of the first.
+    """
+    service._register_worker(worker_tree.process)
+    service._forget_worker(worker_tree.process)
+
+    # Cleared deliberately: ``caplog`` accumulates over the whole test, so the
+    # first drop's diagnosis would otherwise satisfy the assertion below and
+    # the second drop's silence would never be checked at all.
+    caplog.clear()
+
+    with caplog.at_level(logging.WARNING, logger=service.__name__):
+        service._forget_worker(worker_tree.process)
+
+    assert caplog.records == []
+
+
+@REQUIRES_PROCESS_TREES
+def test_a_worker_tree_confirmed_gone_is_reported_silently(
+    worker_tree: WorkerTree,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the clean case as silent - ordinary completion is not a diagnostic.
+
+    Every worker of every run passes through this path, so a record here would
+    put one line per shard into a CI log for nothing.
+
+    Both dimensions of the record are present, because silence is what a
+    *fully* confirmed release earns: a record whose session was never captured
+    is a record whose driver groups nobody could look for, and that is a
+    warning rather than a pass.
+    """
+    group = worker_tree.process_group
+    session = worker_tree.session
+    worker_tree.destroy(group)
+
+    containment = service._WorkerContainment(
+        worker_tree.process.pid, group, None, session
+    )
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        service._report_surviving_tree(containment, service._worker_tree_is_empty(containment))
+
+    assert caplog.records == []
+
+
+def test_an_unverifiable_worker_tree_is_a_warning_not_an_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the distinction between known-bad and unknown.
+
+    A tree still running is an ``ERROR`` - there is a browser holding a
+    session. A tree that could not be inspected is a ``WARNING``: the state is
+    unknown, and reporting it as known-bad would train an operator to ignore
+    the level that matters.
+    """
+    containment = service._WorkerContainment(4242, None, None)
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        service._report_surviving_tree(containment, None)
+
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+
+
+def test_a_windows_worker_is_contained_in_a_kill_on_close_job(
+    windows_worker_platform: FakeKernel32,
+) -> None:
+    """Pin the Windows mechanism and the order of its five calls.
+
+    A job limited with ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` is the only
+    Windows facility that terminates a tree, and children inherit it, so the
+    browser is in the job too. The process handle is opened with exactly the
+    two rights the assignment needs and closed again whatever the outcome.
+    """
+    containment = service._capture_containment(WorkerProcessDouble(pid=616))
+
+    assert containment.process_group is None
+    assert containment.job_handle == FAKE_JOB_HANDLE
+    assert windows_worker_platform.targets() == (
+        "CreateJobObjectW",
+        "SetInformationJobObject",
+        "OpenProcess",
+        "AssignProcessToJobObject",
+        "CloseHandle",
+    )
+
+    opened = next(
+        value for name, value in windows_worker_platform.calls if name == "OpenProcess"
+    )
+
+    assert opened == (service._PROCESS_ASSIGN_ACCESS, 616)
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_calls"),
+    [
+        ({"create": 0}, ("CreateJobObjectW",)),
+        ({"limit": 0}, ("CreateJobObjectW", "SetInformationJobObject", "CloseHandle")),
+        (
+            {"open_process": 0},
+            ("CreateJobObjectW", "SetInformationJobObject", "OpenProcess", "CloseHandle"),
+        ),
+        (
+            {"assign": 0},
+            (
+                "CreateJobObjectW",
+                "SetInformationJobObject",
+                "OpenProcess",
+                "AssignProcessToJobObject",
+                "CloseHandle",
+                "CloseHandle",
+            ),
+        ),
+    ],
+)
+def test_a_worker_job_that_cannot_be_established_leaks_no_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: dict[str, int],
+    expected_calls: tuple[str, ...],
+) -> None:
+    """Pin every Win32 failure step: nothing leaks, and the gap is recorded.
+
+    A job half-established is worse than none - its kill-on-close limit would
+    be held against a process that was never assigned to it - so each path
+    closes what it opened and reports ``None``, which the verification reads as
+    "never contained".
+    """
+    library = FakeKernel32(**failure)
+
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", False)
+    monkeypatch.setattr(service, "_kernel32", lambda: library)
+
+    with caplog.at_level(logging.WARNING, logger=service.__name__):
+        assert service._assign_kill_on_close_job(616) is None
+
+    assert library.targets() == expected_calls
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+
+
+def test_closing_a_windows_worker_job_terminates_its_tree_once(
+    windows_worker_platform: FakeKernel32,
+) -> None:
+    """Pin the Windows reclamation and its idempotence.
+
+    Closing the last handle terminates every process in the job, so the close
+    *is* the reclamation. The record is removed first, which is what makes a
+    second close a no-op instead of a double close of a handle Windows may
+    already have reused.
+    """
+    process = WorkerProcessDouble(pid=616)
+    service._register_worker(process)
+
+    service._close_worker_job(616)
+    service._close_worker_job(616)
+
+    assert windows_worker_platform.calls[-1] == ("CloseHandle", FAKE_JOB_HANDLE)
+    assert windows_worker_platform.targets().count("CloseHandle") == 2
+    assert 616 not in service._worker_containment
+
+
+def test_a_windows_worker_surviving_its_job_is_reported_as_unstopped(
+    windows_worker_platform: FakeKernel32,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the Windows verification: the wait after the close is the proof.
+
+    A process still running after its kill-on-close job was closed is the one
+    outcome that platform's containment cannot explain away, so it is an
+    ``ERROR`` and an unconfirmed result rather than a silent success.
+    """
+    process = WorkerProcessDouble(pid=616, outcome=subprocess.TimeoutExpired)
+    service._register_worker(process)
+
+    with caplog.at_level(logging.WARNING, logger=service.__name__):
+        assert service._verify_tree_stopped(process, grace_seconds=TEST_GRACE_SECONDS) is False
+
+    assert [record.levelno for record in caplog.records if record.levelno >= logging.ERROR] == [
+        logging.ERROR
+    ]
+    assert process.waits == [TEST_GRACE_SECONDS]
+
+
+def test_verification_of_an_unregistered_worker_answers_unknown() -> None:
+    """Pin the answer for a worker with no record at all.
+
+    Nothing was captured, so nothing can be confirmed. ``None`` keeps that
+    distinct from both "confirmed gone" and "still running", which is what
+    lets the caller report an unknown as an unknown.
+    """
+    assert service._verify_tree_stopped(WorkerProcessDouble(pid=4242)) is None
+
+
+
+@REQUIRES_POSIX_PLATFORM
+def test_a_platform_claiming_windows_without_win32_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the Win32 seam's own failure: Windows said, ``WinDLL`` absent.
+
+    Every other Windows test here stands a double in front of this function,
+    so this is what exercises the real one. A platform that identifies as
+    Windows and cannot supply the binding has no containment at all, which is
+    reported rather than raised - a run must still start, and what changes is
+    that its verification reports itself unconfirmed instead of claiming
+    success.
+    """
+    # The real platform first, which is the guard's other side: off Windows the
+    # answer is ``None`` with nothing loaded and nothing said.
+    assert service._kernel32() is None
+    assert caplog.records == []
+
+    monkeypatch.setattr(service.os, "name", "nt")
+
+    with caplog.at_level(logging.WARNING, logger=service.__name__):
+        assert service._kernel32() is None
+
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+
+
+def test_no_worker_job_is_attempted_without_a_win32_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the behaviour when Win32 itself is unavailable.
+
+    Nothing is attempted and ``None`` is returned, which the verification
+    reads as a worker that was never contained.
+    """
+    monkeypatch.setattr(service, "_kernel32", lambda: None)
+
+    assert service._assign_kill_on_close_job(616) is None
+
+
+def test_a_win32_error_while_building_a_worker_job_closes_it(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the error path of the job builder, handle included.
+
+    A Win32 call that raises rather than returning a failure code leaves a
+    created job behind, and a job holding a kill-on-close limit against
+    nothing is exactly what must not be leaked. One close, because the failure
+    came before the process handle was opened.
+    """
+
+    class ExplodingKernel32(FakeKernel32):
+        """A binding whose limit call raises instead of returning a code."""
+
+        def SetInformationJobObject(
+            self, job: int, info_class: int, info: Any, length: int
+        ) -> int:
+            """Record the attempt, then fail the way Win32 can."""
+            self.calls.append(("SetInformationJobObject", job))
+            raise OSError("win32 failure")
+
+    library = ExplodingKernel32()
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", False)
+    monkeypatch.setattr(service, "_kernel32", lambda: library)
+
+    with caplog.at_level(logging.WARNING, logger=service.__name__):
+        assert service._assign_kill_on_close_job(616) is None
+
+    assert library.targets() == (
+        "CreateJobObjectW",
+        "SetInformationJobObject",
+        "CloseHandle",
+    )
+    assert [record.exc_info is not None for record in caplog.records] == [True]
+
+
+def test_a_worker_job_that_cannot_be_closed_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the close failing: recorded, and never raised into cancellation.
+
+    This runs while a run is being cancelled, where an exception would replace
+    what the cancellation was reporting - so the failure is recorded and the
+    unconfirmed state is what the caller reads.
+    """
+
+    class UnclosableKernel32(FakeKernel32):
+        """A binding whose ``CloseHandle`` raises."""
+
+        def CloseHandle(self, handle: int) -> int:
+            """Record the attempt, then fail."""
+            self.calls.append(("CloseHandle", handle))
+            raise OSError("win32 failure")
+
+    library = UnclosableKernel32()
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", False)
+    monkeypatch.setattr(service, "_kernel32", lambda: library)
+    monkeypatch.setitem(
+        service._worker_containment, 616, service._WorkerContainment(616, None, FAKE_JOB_HANDLE)
+    )
+
+    with caplog.at_level(logging.WARNING, logger=service.__name__):
+        service._close_worker_job(616)
+
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+
+
+def test_a_running_windows_process_is_observed_without_being_touched(
+    windows_worker_platform: FakeKernel32,
+) -> None:
+    """Pin the Windows liveness probe: three calls, and no action among them.
+
+    This probe decides whether a run directory found in the shared
+    intermediates belongs to a run still writing into it, so on Windows it is
+    what stands between one invocation's ``--clean`` and a concurrent
+    invocation's results.  ``os.kill`` cannot be used there - every signal
+    number but the two console events *terminates* the target - so the probe
+    is an open, a zero-timeout wait and a close.
+
+    ``SYNCHRONIZE`` alone is asked for: it permits the wait and nothing else,
+    so the probe cannot terminate, read or requery the process even by
+    mistake.  And the handle is closed on the way out, because this runs once
+    per candidate directory per clean and a leaked handle per call would
+    accumulate for the supervisor's whole life.
+    """
+    assert service._process_is_alive(616) is True
+
+    assert windows_worker_platform.targets() == (
+        "OpenProcess",
+        "WaitForSingleObject",
+        "CloseHandle",
+    )
+    assert windows_worker_platform.calls[0] == ("OpenProcess", (SYNCHRONIZE_ACCESS, 616))
+    assert windows_worker_platform.calls[1] == ("WaitForSingleObject", (0x77, 0))
+    assert windows_worker_platform.calls[2] == ("CloseHandle", 0x77)
+
+
+def test_an_exited_windows_process_is_reported_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the one wait result that means the process is finished.
+
+    A process handle signals when the process exits, so ``WAIT_OBJECT_0`` is
+    the answer that releases the directory for cleaning - and the handle is
+    still closed, since the probe opened it either way.
+    """
+    library = FakeKernel32(wait=WAIT_OBJECT_0)
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", False)
+    monkeypatch.setattr(service, "_kernel32", lambda: library)
+
+    assert service._process_is_alive(616) is False
+    assert library.calls[-1] == ("CloseHandle", 0x77)
+
+
+def test_a_windows_wait_that_fails_leaves_the_process_presumed_running(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin ``WAIT_FAILED`` as an unknown rather than as "not running".
+
+    The finding this closes is a single equality test against ``WAIT_TIMEOUT``:
+    it makes every result that is not that one - ``WAIT_FAILED``,
+    ``WAIT_ABANDONED`` - read as a finished process, and the consequence is a
+    live sibling's intermediates deleted underneath it.  The direction of the
+    fail-safe is the whole point, so it is asserted against the failure code
+    itself rather than against a stand-in.
+    """
+    library = FakeKernel32(wait=WAIT_FAILED)
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", False)
+    monkeypatch.setattr(service, "_kernel32", lambda: library)
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        assert service._process_is_alive(616) is True
+
+    reported = [
+        record for record in caplog.records if "the wait reported" in record.getMessage()
+    ]
+
+    assert [record.levelno for record in reported] == [logging.DEBUG]
+    assert f"{WAIT_FAILED:#010X}"[2:] in reported[0].getMessage()
+    assert library.calls[-1] == ("CloseHandle", 0x77)
+
+
+def test_a_windows_process_that_will_not_open_is_told_apart_by_its_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the two meanings of a refused open, and that they differ.
+
+    ``OpenProcess`` returning nothing is either a process id that does not
+    exist or one this account may not observe, and only
+    ``ERROR_INVALID_PARAMETER`` means the former.  An access denial describes a
+    process that is very much alive, so reading every failure as "gone" would
+    delete the intermediates of a run owned by another account.
+
+    Nothing is waited on or closed in either case, because there is no handle
+    to wait on or close.
+    """
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", False)
+
+    absent = FakeKernel32(open_process=0)
+    monkeypatch.setattr(service, "_kernel32", lambda: absent)
+    monkeypatch.setattr(service, "_win32_last_error", lambda module: ERROR_INVALID_PARAMETER)
+
+    assert service._process_is_alive(616) is False
+    assert absent.targets() == ("OpenProcess",)
+
+    forbidden = FakeKernel32(open_process=0)
+    monkeypatch.setattr(service, "_kernel32", lambda: forbidden)
+    monkeypatch.setattr(service, "_win32_last_error", lambda module: ERROR_ACCESS_DENIED)
+
+    assert service._process_is_alive(616) is True
+    assert forbidden.targets() == ("OpenProcess",)
+
+
+def test_the_windows_liveness_probe_declares_the_handle_returning_prototypes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the declaration, which is the defect this probe carried.
+
+    Left undeclared, ctypes assumes a C ``int`` return and **truncates** the
+    64-bit ``HANDLE`` ``OpenProcess`` gives back on 64-bit Windows: the wait
+    then observes a handle the kernel never issued and the close reclaims
+    nothing.  The probe's answer would be about no process at all, which on
+    this path decides whether a running sibling's results are removed.
+
+    The double's entry points are plain functions, so they accept the
+    declaration and record it - which is what lets a non-Windows host assert
+    that the prototypes were set, and set to the widths
+    :func:`~app.services.test_run_service._win32_types` supplies.
+    """
+    handle_type, boolean, dword = service._win32_types(ctypes)
+
+    class PrototypeRecordingKernel32:
+        """A binding whose entry points remember how they were declared."""
+
+        def __init__(self) -> None:
+            def OpenProcess(access: int, inherit: bool, pid: int) -> int:
+                return 0x77
+
+            def WaitForSingleObject(handle: int, milliseconds: int) -> int:
+                return WAIT_TIMEOUT
+
+            def CloseHandle(handle: int) -> int:
+                return 1
+
+            self.OpenProcess = OpenProcess
+            self.WaitForSingleObject = WaitForSingleObject
+            self.CloseHandle = CloseHandle
+
+    library = PrototypeRecordingKernel32()
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", False)
+    monkeypatch.setattr(service, "_kernel32", lambda: library)
+
+    assert service._process_is_alive(616) is True
+
+    assert library.OpenProcess.restype is handle_type
+    assert library.OpenProcess.argtypes == (dword, boolean, dword)
+    assert library.WaitForSingleObject.restype is dword
+    assert library.WaitForSingleObject.argtypes == (handle_type, dword)
+    assert library.CloseHandle.restype is boolean
+    assert library.CloseHandle.argtypes == (handle_type,)
+
+    # The handle width is the finding: a declaration narrower than a pointer
+    # is what truncates, so the type carried has to be pointer-sized.
+    assert ctypes.sizeof(handle_type) == ctypes.sizeof(ctypes.c_void_p)
+
+
+def test_a_failed_probe_handle_close_is_reported_and_not_raised(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the probe's close failure as recorded, never propagated.
+
+    The probe runs inside the clean step's directory walk, so an exception
+    here would abort a clean over one unclosable handle.  The liveness answer
+    the probe computed still stands, and the close failure is recorded beside
+    it.
+    """
+
+    class UnclosableKernel32(FakeKernel32):
+        """A binding whose ``CloseHandle`` reports failure."""
+
+        def CloseHandle(self, handle: int) -> int:
+            """Record the attempt and report failure rather than raising."""
+            self.calls.append(("CloseHandle", handle))
+            return 0
+
+    library = UnclosableKernel32()
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", False)
+    monkeypatch.setattr(service, "_kernel32", lambda: library)
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        assert service._process_is_alive(616) is True
+
+    reported = [
+        record
+        for record in caplog.records
+        if "Could not close the probe handle" in record.getMessage()
+    ]
+
+    assert [record.levelno for record in reported] == [logging.DEBUG]
+    assert library.targets()[-1] == "CloseHandle"
+
+
+def test_a_windows_worker_that_cannot_be_waited_for_is_unknown(
+    windows_worker_platform: FakeKernel32,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin a wait that could not be performed as an unknown, not a success.
+
+    Nothing was observed, and a release nobody observed is not a release - so
+    the answer is ``None`` and the reason is recorded.
+    """
+    for outcome in (OSError, ValueError):
+        process = WorkerProcessDouble(pid=616, outcome=outcome)
+        service._register_worker(process)
+
+        caplog.clear()
+
+        with caplog.at_level(logging.WARNING, logger=service.__name__):
+            assert service._verify_tree_stopped(process) is None
+
+        assert [record.levelno for record in caplog.records] == [logging.WARNING]
+
+
+def test_no_group_is_signalled_where_the_platform_has_none(
+    windows_worker_platform: FakeKernel32,
+) -> None:
+    """Pin the platform guard on group signalling.
+
+    Windows has no ``killpg``, so the answer is ``False`` and the caller falls
+    back to the process itself - with the job, not the group, doing the
+    containment there.
+    """
+    assert service._signal_worker_group(WorkerProcessDouble(pid=616), signal.SIGTERM) is False
+    assert windows_worker_platform.calls == []
+
+
+@REQUIRES_PROCESS_TREES
+def test_a_group_that_can_no_longer_be_signalled_answers_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the fallback signal: a group that has gone is not an error.
+
+    ``ProcessLookupError`` here means the worker and everything it started
+    have already exited, which is the ordinary outcome of a second signal.
+    The caller is told the group could not be signalled so it falls back to
+    the process, and nothing is raised into the cancellation path.
+    """
+    monkeypatch.setattr(service.os, "killpg", _raiser(ProcessLookupError))
+    monkeypatch.setattr(service.os, "getpgid", lambda pid: pid)
+
+    assert service._signal_worker_group(WorkerProcessDouble(pid=616), signal.SIGTERM) is False
+
+
+@REQUIRES_PROCESS_TREES
+def test_stopping_a_worker_that_has_already_exited_does_nothing(
+    worker_tree: WorkerTree,
+) -> None:
+    """Pin the guard that makes active signalling safe.
+
+    Nothing is ever signalled for a process that has already exited, which is
+    what guarantees a recycled process id can never be signalled by mistake -
+    and it is why the normal-completion path verifies without signalling.
+    """
+    group = worker_tree.process_group
+    worker_tree.destroy(group)
+
+    assert service._terminate_worker(worker_tree.process) is False
+
+
+def test_a_windows_worker_confirmed_stopped_answers_true(
+    windows_worker_platform: FakeKernel32,
+) -> None:
+    """Pin the confirmed Windows outcome: job closed, process waited for.
+
+    The close terminates the job's members and the wait is what observes that
+    it took effect, so both having happened is the whole of the confirmation.
+    """
+    process = WorkerProcessDouble(pid=616)
+    service._register_worker(process)
+
+    assert service._verify_tree_stopped(process, grace_seconds=TEST_GRACE_SECONDS) is True
+    assert windows_worker_platform.calls[-1] == ("CloseHandle", FAKE_JOB_HANDLE)
+    assert process.waits == [TEST_GRACE_SECONDS]
+
+
+@REQUIRES_PROCESS_TREES
+def test_a_worker_that_ignores_the_request_is_killed_and_confirmed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the escalation when the *worker itself* will not stop.
+
+    The leader ignores ``SIGTERM`` and its child inherits that, so the polite
+    request achieves nothing and the wait runs out. Cancellation must then
+    escalate to a kill of the group and confirm the result - a run that
+    reported cancellation with a live engine and browser in it would be the
+    same defect at a different level.
+    """
+    launcher = (
+        "import signal, subprocess, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"subprocess.Popen([sys.executable, '-c', {STUBBORN_CHILD_SOURCE!r}])\n"
+        "time.sleep(300)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", launcher],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **service._process_group_keywords(),
+    )
+    time.sleep(TREE_SETTLE_SECONDS)
+    group = os.getpgid(process.pid)
+    service._register_worker(process)
+
+    assert len(group_members(group)) == 2
+
+    try:
+        with caplog.at_level(logging.WARNING, logger=service.__name__):
+            stopped = service._terminate_worker(process, grace_seconds=TEST_GRACE_SECONDS)
+
+        time.sleep(TREE_REAP_SECONDS)
+
+        assert stopped is True
+        assert group_members(group) == ()
+        assert any("killing it" in record.getMessage() for record in caplog.records)
+    finally:
+        # Best effort: the escalation under test has normally already emptied
+        # the group, and a cleanup that raised would mask the test's result.
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except OSError:
+            pass
+
+        service._forget_worker(process)
+
+
+@REQUIRES_PROCESS_TREES
+def test_a_worker_whose_group_cannot_be_signalled_is_stopped_directly(
+    monkeypatch: pytest.MonkeyPatch,
+    worker_tree: WorkerTree,
+) -> None:
+    """Pin the per-process fallback when the group cannot be reached.
+
+    Group signalling is what reaches the tree, so losing it is a real loss -
+    but losing it must not mean the worker is left running. Both the polite
+    and the forceful step fall back to the process itself, and the
+    verification that follows then reports what the fallback could not reach.
+    """
+    group = worker_tree.process_group
+    service._register_worker(worker_tree.process)
+    monkeypatch.setattr(service, "_signal_worker_group", lambda process, number: False)
+    monkeypatch.setattr(service.os, "killpg", _raiser(ProcessLookupError))
+
+    assert (
+        service._terminate_worker(worker_tree.process, grace_seconds=TEST_GRACE_SECONDS)
+        is True
+    )
+    assert worker_tree.process.poll() is not None
+    assert group > 0
+
+
+# --------------------------------------------------------------------------- #
+# Reclaiming a driver's own process group inside the worker's session
+#
+# The tests above start a tree whose child inherits the worker's group, which
+# is not the shape a driver has: a driver is launched into a process group of
+# its own, so signalling the worker's group reaches the engine and leaves the
+# driver and its browser running.  The tests below reproduce that shape with
+# ``NestedGroupTree`` and state the pgids and session ids they measured, so a
+# reclamation that only reaches the worker's own group cannot pass them.
+# --------------------------------------------------------------------------- #
+
+
+@REQUIRES_PROCESS_TREES
+def test_a_driver_group_is_nested_in_the_session_and_outside_the_workers_group(
+    nested_group_tree: NestedGroupTree,
+) -> None:
+    """Pin the topology the whole reclamation is built on.
+
+    Three measured facts, and every assertion below depends on all three: the
+    nested process leads a group of its **own**, it is nevertheless in the
+    worker's session, and signalling the worker's group therefore does not
+    reach it. The last one is the defect containment exists for, so it is
+    measured rather than described - after a ``SIGKILL`` of the worker's group
+    the nested group is still listed.
+
+    It is also what keeps the other tests honest: a tree whose child shared
+    the worker's group would pass a reclamation that never looked at the
+    session at all.
+    """
+    worker_group = nested_group_tree.process_group
+    session = nested_group_tree.session
+    nested = nested_group_tree.grandchild_group
+
+    assert nested != worker_group
+    assert nested == nested_group_tree.grandchild
+    assert nested_group_tree.grandchild_session == session
+    assert session == nested_group_tree.process.pid
+    assert group_members(worker_group) == (nested_group_tree.process.pid,)
+    assert group_members(nested) == (nested_group_tree.grandchild,)
+
+    members = service._session_members(session)
+
+    assert members is not None
+    assert members.pids == {nested_group_tree.process.pid, nested_group_tree.grandchild}
+    assert members.nested_groups(worker_group) == (nested,)
+
+    os.killpg(worker_group, signal.SIGKILL)
+    time.sleep(TREE_REAP_SECONDS)
+
+    assert group_members(nested) == (nested_group_tree.grandchild,)
+    assert service._session_is_empty(session) is False
+
+
+@REQUIRES_PROCESS_TREES
+def test_cancelling_a_worker_reaches_a_driver_in_its_own_group(
+    stubborn_nested_group_tree: NestedGroupTree,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin cancellation against the production topology.
+
+    The nested process is in a group of its own and ignores ``SIGTERM``, which
+    together are a browser that does not close when its driver is asked
+    politely. Cancellation has to escalate to the nested group specifically -
+    the worker's own group does not contain it - and then confirm the session
+    empty, not merely the worker's group empty.
+    """
+    worker_group = stubborn_nested_group_tree.process_group
+    session = stubborn_nested_group_tree.session
+    nested = stubborn_nested_group_tree.grandchild_group
+
+    assert nested != worker_group
+    assert stubborn_nested_group_tree.grandchild_session == session
+
+    service._register_worker(stubborn_nested_group_tree.process)
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        stopped = service._terminate_worker(
+            stubborn_nested_group_tree.process, grace_seconds=TEST_GRACE_SECONDS
+        )
+
+    time.sleep(TREE_REAP_SECONDS)
+
+    assert stopped is True
+    assert group_members(worker_group) == ()
+    assert group_members(nested) == ()
+    assert process_is_alive(stubborn_nested_group_tree.grandchild) is False
+    assert service._session_is_empty(session) is True
+    assert service._worker_tree_is_empty(
+        service._WorkerContainment(
+            stubborn_nested_group_tree.process.pid, worker_group, None, session
+        )
+    ) is True
+    assert any(
+        str(nested) in record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    )
+
+
+@REQUIRES_PROCESS_TREES
+def test_a_worker_whose_leader_exited_is_still_reclaimed(
+    nested_group_tree: NestedGroupTree,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the path that used to fail open: the leader has already gone.
+
+    Cancellation arriving after the engine exited is not cancellation with
+    nothing to do - the driver and the browser it started are in a group of
+    their own and are still holding an authenticated session. So the worker is
+    reclaimed before the answer "it was not running" is given, and the answer
+    itself is unchanged.
+
+    The reclamation cannot be relying on the worker's own group here, and that
+    is asserted too: with the leader reaped, ``getsid`` of that group id no
+    longer resolves, so the only thing that can attribute the nested group is
+    the session's membership.
+    """
+    worker_group = nested_group_tree.process_group
+    session = nested_group_tree.session
+    nested = nested_group_tree.grandchild_group
+
+    service._register_worker(nested_group_tree.process)
+    nested_group_tree.stop_leader()
+
+    assert nested_group_tree.process.poll() is not None
+    assert group_members(nested) == (nested_group_tree.grandchild,)
+
+    with pytest.raises(ProcessLookupError):
+        os.getsid(worker_group)
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        stopped = service._terminate_worker(
+            nested_group_tree.process, grace_seconds=TEST_GRACE_SECONDS
+        )
+
+    time.sleep(TREE_REAP_SECONDS)
+
+    assert stopped is False
+    assert group_members(nested) == ()
+    assert process_is_alive(nested_group_tree.grandchild) is False
+    assert service._session_is_empty(session) is True
+    assert any(
+        str(nested) in record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    )
+
+
+@REQUIRES_PROCESS_TREES
+def test_a_completed_worker_that_left_a_driver_behind_is_reclaimed(
+    nested_group_tree: NestedGroupTree,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the ordinary path, which is where a leaked browser actually appears.
+
+    Most runs are never cancelled. A worker that finished on its own can still
+    have left a driver and a browser in their own process group, and nothing
+    else in the run would notice, so dropping a worker reclaims its session
+    exactly as cancelling one does - and stays idempotent, because the owning
+    thread and the interrupt path both drop the same worker.
+    """
+    session = nested_group_tree.session
+    nested = nested_group_tree.grandchild_group
+
+    service._register_worker(nested_group_tree.process)
+    nested_group_tree.stop_leader()
+
+    assert group_members(nested) == (nested_group_tree.grandchild,)
+
+    with caplog.at_level(logging.WARNING, logger=service.__name__):
+        service._forget_worker(
+            nested_group_tree.process, grace_seconds=TEST_GRACE_SECONDS
+        )
+
+    time.sleep(TREE_REAP_SECONDS)
+
+    assert group_members(nested) == ()
+    assert service._session_is_empty(session) is True
+    assert nested_group_tree.process.pid not in service._live_workers
+    assert nested_group_tree.process.pid not in service._worker_containment
+    assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
+
+    caplog.clear()
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        service._forget_worker(nested_group_tree.process)
+
+    assert caplog.records == []
+
+
+def test_a_group_that_left_the_session_is_skipped_rather_than_signalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin attribution as the condition every signal is subject to.
+
+    A process-group id is recycled: once the group is gone the same number is
+    handed to something else, and signalling it then kills a process this run
+    never started. So a candidate is signalled only while it is attributable
+    to the session captured at launch - and the discrimination is asserted in
+    both directions, because a reclamation that signalled nothing would also
+    satisfy a one-sided assertion.
+    """
+    session = 4242
+    mine = 4300
+    recycled = 4400
+    sessions = {mine: session, recycled: 9999}
+    signalled: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(service.os, "getsid", lambda pid: sessions[pid], raising=False)
+    monkeypatch.setattr(
+        service.os,
+        "killpg",
+        lambda group, number: signalled.append((group, number)),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        service,
+        "_session_members",
+        lambda asked: service._SessionMembers(
+            asked, frozenset({session, mine, recycled}), frozenset({mine, recycled})
+        ),
+    )
+
+    containment = service._WorkerContainment(session, session, None, session)
+
+    assert service._group_in_session(mine, session) is True
+    assert service._group_in_session(recycled, session) is False
+    assert service._signal_nested_groups(containment, signal.SIGTERM) == (mine,)
+    assert signalled == [(mine, signal.SIGTERM)]
+
+
+def test_a_group_whose_leader_has_gone_is_attributed_by_membership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the second instrument, which the two reclamation paths depend on.
+
+    Once a group's leader has been reaped, ``getsid`` of that group id answers
+    nothing - and that is precisely the state of every group whose driver
+    exited while its browser did not. A live process of the captured session
+    carrying the group id is the same evidence, so it is accepted; no evidence
+    at all is not, and stays distinct from "belongs to another session".
+    """
+    session = 4242
+    group = 4300
+
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(service.os, "getsid", _raiser(ProcessLookupError), raising=False)
+
+    members = service._SessionMembers(session, frozenset({4301}), frozenset({group}))
+
+    assert service._group_in_session(group, session, members) is True
+    assert service._group_in_session(9999, session, members) is False
+
+    # No membership to fall back on, on a platform that cannot supply one.
+    monkeypatch.setattr(service, "_session_members", lambda asked: None)
+
+    assert service._group_in_session(group, session) is None
+
+
+def test_a_session_that_cannot_be_enumerated_is_unverified_and_unsignalled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Pin the platform without a process directory: unknown, never clean.
+
+    A session that cannot be read is a session whose driver groups nobody
+    could look for. Claiming the release would be the same defect as never
+    checking, so the answer is ``None``, the report is a ``WARNING`` rather
+    than silence, and nothing is signalled - an id that cannot be attributed
+    is not an id this run may kill.
+    """
+    signalled: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", True)
+    monkeypatch.setattr(service, "_PROC_ROOT", tmp_path / "absent")
+    monkeypatch.setattr(
+        service.os,
+        "killpg",
+        lambda group, number: signalled.append((group, number)),
+        raising=False,
+    )
+
+    containment = service._WorkerContainment(4242, None, None, 4242)
+
+    assert service._session_members(4242) is None
+    assert service._session_is_empty(4242) is None
+    assert service._worker_tree_is_empty(containment) is None
+    assert service._signal_nested_groups(containment, signal.SIGTERM) == ()
+    assert signalled == []
+
+    with caplog.at_level(logging.DEBUG, logger=service.__name__):
+        assert service._reclaim_worker_session(containment) is None
+
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+
+
+def test_the_session_reader_parses_every_shape_of_status_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Pin the ``stat`` parse, whose one hard case is the program's own name.
+
+    That name is the second field, it is parenthesised, and it may contain
+    spaces and parentheses of its own - ``chrome (2)`` is an ordinary one.
+    Splitting the whole line on whitespace mis-numbers every field after it,
+    which would read a process's group and session from its run state and its
+    parent, so the text is cut at its **last** ``)`` first.
+
+    Everything else a reader of a live process directory meets is pinned
+    alongside it: entries that are not pids, a process that exited between the
+    listing and the read, a truncated file, an unreadable one, and a process
+    of another session.
+    """
+    session = 4242
+    root = tmp_path / "proc"
+    root.mkdir()
+
+    def plant(pid: int, comm: str, group: int, belongs_to: int) -> None:
+        directory = root / str(pid)
+        directory.mkdir()
+        (directory / "stat").write_text(
+            f"{pid} ({comm}) S 1 {group} {belongs_to} 0 -1 4194304 0 0",
+            encoding="utf-8",
+        )
+
+    plant(101, "python3.14", 101, session)
+    plant(102, "a program (2) name", 102, session)
+    plant(103, "chrome", 102, session)
+    plant(104, "somebody-elses-shell", 104, 9999)
+    (root / "not-a-pid").mkdir()
+    (root / "105").mkdir()
+    (root / "106").mkdir()
+    (root / "106" / "stat").write_text("106 (truncated) S", encoding="utf-8")
+
+    monkeypatch.setattr(service, "_PROC_ROOT", root)
+
+    members = service._session_members(session)
+
+    assert members is not None
+    assert members.session == session
+    assert members.pids == {101, 102, 103}
+    assert members.groups == {101, 102}
+    assert members.nested_groups(101) == (102,)
+    assert members.nested_groups() == (101, 102)
+    assert service._session_is_empty(session) is False
+    assert service._session_is_empty(9999) is False
+    assert service._session_is_empty(5150) is True
+
+    # The parse itself, stated on the case that makes it necessary.
+    assert service._stat_ids("7 (a program (2) name) S 1 8 9 0") == (8, 9)
+    assert service._stat_ids("7 (short) S 1") is None
+    assert service._stat_ids("no parenthesis here") is None
+    assert service._stat_ids("7 (odd) S 1 x y") is None
+
+
+def test_a_worker_tree_answers_only_when_every_dimension_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the combination, which is where a half-confirmed release would hide.
+
+    A worker's own group and its session are separate questions with separate
+    answers, and the tree is both together: either one still holding a process
+    means something survived, and a confirmed release requires every dimension
+    the record carries to say so. An unanswerable dimension leaves the whole
+    answer unknown rather than letting the other dimension pass for it.
+    """
+    matrix: list[tuple[bool | None, bool | None, bool | None]] = [
+        (True, True, True),
+        (True, False, False),
+        (False, True, False),
+        (False, None, False),
+        (None, False, False),
+        (True, None, None),
+        (None, True, None),
+        (None, None, None),
+    ]
+
+    for group_state, session_state, expected in matrix:
+        monkeypatch.setattr(
+            service, "_process_group_is_empty", lambda group, answer=group_state: answer
+        )
+        monkeypatch.setattr(
+            service, "_session_is_empty", lambda session, answer=session_state: answer
+        )
+
+        containment = service._WorkerContainment(4242, 4242, None, 4242)
+
+        assert service._worker_tree_is_empty(containment) is expected, (
+            group_state,
+            session_state,
+        )
+
+
+class DeclaringKernel32:
+    """A ``kernel32`` stand-in whose entry points accept a prototype.
+
+    ctypes' own function pointers carry ``restype`` and ``argtypes``; a bound
+    method does not, so the recording double above cannot show whether the
+    module declares them. These entry points are plain function objects, which
+    can, and they are what makes the declaration observable off Windows.
+
+    :param close: What ``CloseHandle`` returns; ``0`` is a close that did not
+        take effect.
+    """
+
+    def __init__(self, *, close: int = 1) -> None:
+        #: Entry point names in call order, with the arguments each received.
+        self.calls: list[tuple[str, tuple[Any, ...]]] = []
+
+        for name, result in (
+            ("CreateJobObjectW", FAKE_JOB_HANDLE),
+            ("SetInformationJobObject", 1),
+            ("OpenProcess", 0x77),
+            ("AssignProcessToJobObject", 1),
+            ("CloseHandle", close),
+        ):
+            setattr(self, name, self._entry_point(name, result))
+
+    def _entry_point(self, name: str, result: int) -> Any:
+        """Build one recording entry point.
+
+        :param name: The entry point's name.
+        :param result: What it returns.
+        :returns: A plain function, so a prototype can be set on it.
+        """
+
+        def entry_point(*arguments: Any) -> int:
+            self.calls.append((name, arguments))
+            return result
+
+        return entry_point
+
+    def targets(self) -> tuple[str, ...]:
+        """The recorded call names, in order.
+
+        :returns: The sequence of entry points called.
+        """
+        return tuple(name for name, _ in self.calls)
+
+
+def test_every_win32_containment_call_declares_its_handle_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the ctypes prototypes, which are a correctness requirement.
+
+    Undeclared, ctypes assumes a C ``int`` return, and on 64-bit Windows that
+    **truncates** the job and process handles the kernel returns: the value
+    kept is not the handle that was created, so closing it neither terminates
+    the job's members nor reports that it did not - a browser left running
+    with nothing recorded. So every handle-returning and handle-taking call is
+    declared, and the width of the declared type is asserted against a
+    pointer's rather than taken on trust.
+    """
+    import ctypes
+
+    library = DeclaringKernel32()
+
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", False)
+    monkeypatch.setattr(service, "_kernel32", lambda: library)
+
+    assert service._assign_kill_on_close_job(616) == FAKE_JOB_HANDLE
+
+    handle, boolean, dword = service._win32_types(ctypes)
+
+    assert ctypes.sizeof(handle) == ctypes.sizeof(ctypes.c_void_p)
+    assert library.CreateJobObjectW.restype is handle
+    assert library.OpenProcess.restype is handle
+    assert library.OpenProcess.argtypes == (dword, boolean, dword)
+    assert library.SetInformationJobObject.restype is boolean
+    assert library.SetInformationJobObject.argtypes[0] is handle
+    assert library.AssignProcessToJobObject.argtypes == (handle, handle)
+    assert library.CloseHandle.restype is boolean
+    assert library.CloseHandle.argtypes == (handle,)
+
+    # And the process handle is still closed exactly once, whatever the
+    # declaration: the job outlives the call, the process handle must not.
+    assert library.targets().count("CloseHandle") == 1
+    assert library.calls[-1] == ("CloseHandle", (0x77,))
+
+
+def test_a_containment_job_close_that_reports_failure_is_reported(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Pin the close's *result* as something read rather than discarded.
+
+    On Windows the close is the reclamation, so a ``CloseHandle`` that returns
+    failure without raising is a job whose kill-on-close limit never fired and
+    a tree still running. Reported at ``WARNING`` and never raised, because
+    this runs while a run is being cancelled.
+    """
+    library = DeclaringKernel32(close=0)
+
+    monkeypatch.setattr(service, "_HAS_PROCESS_GROUPS", False)
+    monkeypatch.setattr(service, "_kernel32", lambda: library)
+    monkeypatch.setitem(
+        service._worker_containment,
+        616,
+        service._WorkerContainment(616, None, FAKE_JOB_HANDLE),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=service.__name__):
+        service._close_worker_job(616)
+
+    assert library.targets() == ("CloseHandle",)
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
+    assert 616 not in service._worker_containment

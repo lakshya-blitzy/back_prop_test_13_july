@@ -1,42 +1,88 @@
 {#-
-  ===========================================================================
-  view/feature.html - one feature, served read-only at the feature endpoint.
-  ===========================================================================
+  view/feature.html - one feature, served read-only at the feature endpoint:
+  its values, its tallies and every element in results-file order. Extends
+  base.html, sets active_nav to "reports-detail", overrides title - the
+  feature's name - and content, which opens at h2 under the shell's one h1.
 
-  This page is the HTTP analogue of a single feature page in the generated
-  report tree: one feature's own values, its aggregate tallies, and every one
-  of its elements - backgrounds and scenarios alike - in the order the results
-  file carries them, with each scenario linking on to its own detail view. It
-  reads what a run has already written and nothing else: no form, no control
-  that starts a run, no endpoint of its own invention, and no write of any
-  kind. Runs start from the command line.
+  CONTEXT - feature, required: ONE raw feature mapping, handed over whole; the
+  route must NOT pre-split its elements, the interleaving being load-bearing
+  for the scenario index below. findex, required: that feature's ZERO-BASED
+  POSITION in the top-level list, this route's key and every link's, and
+  deliberately not its id - two pairs of features share an id slug because they
+  share a title, so an id is displayable data, never a link key.
+  artifact_modified, optional: that file's modification time as UTC ISO-8601
+  with a literal Z. Unusable results and an out-of-range position are both a
+  404, so this template only ever renders a real feature.
 
   ---------------------------------------------------------------------------
   RENDER CONTEXT - the contract for app/web/routes.py
   ---------------------------------------------------------------------------
+  This page DERIVES NO AGGREGATE. Every status, count, duration and timestamp
+  below is computed by app/reporting/aggregation.py - the project's one
+  normalized result model - handed over by the route, and formatted here. That
+  is what keeps this page, the overview, GET /reports/summary and the two
+  generated HTML artifacts four readings of one calculation; when each derived
+  its own, they disagreed, and an element's badge here could read passed while
+  the artifacts read failed for the very same element.
+
   REQUIRED
 
-      feature    ONE raw feature mapping from the parsed results file, exactly
-                 as the JSON writer produced it. Nothing is pre-processed and
-                 no aggregate is pre-computed: every count, status and total
-                 below is derived here, from that one mapping, so this page and
-                 the artifact it describes cannot drift apart. The route stays
-                 a lookup and carries no reporting logic of its own, and it
-                 must NOT pre-split the elements into backgrounds and
-                 scenarios - the interleaving is load-bearing, as the next
-                 section explains.
+      feature    ONE decorated feature mapping: the results file's own keys,
+                 plus the aggregate the model computed for it. Its display
+                 values - keyword, name, description, identifier, source path
+                 and line - are read from it directly and are still
+                 type-guarded here, because a malformed document has to render
+                 rather than take the page down.
 
-      findex     The feature's ZERO-BASED POSITION in the results file's
-                 top-level list, which is this route's own key and the key of
-                 every link on the page. It is deliberately NOT the feature's
-                 own identifier: two pairs of features in this suite share an
-                 identifier slug because they share a title, and that collision
-                 is source behaviour this port preserves rather than
-                 disambiguates. An identifier rendered as displayed data is
-                 correct; an identifier used as a link key is a defect, and it
-                 would serve one feature of a colliding pair in place of the
-                 other. Every URL here is built with the framework's own URL
-                 builder, so no route shape is written by hand in markup.
+      blocks     ONE BLOCK PER ELEMENT, IN SOURCE ORDER, backgrounds and
+                 scenarios still interleaved: the interleaving is load-bearing,
+                 as the next section explains. Each block carries
+
+                   kind        'scenario', 'background' or 'other' - the last
+                               for an element of a type this model does not
+                               name, which is rendered neutrally rather than
+                               dropped.
+                   element     the decorated element itself, for its display
+                               values, its tags and its screenshots.
+                   position    its position among the elements.
+                   sindex      its position among the SCENARIOS, or nothing.
+                   steps       the step mappings to render, coerced.
+                   tokens      those steps' normalised statuses.
+                   status      THE ELEMENT'S OWN STATUS: the fold over its own
+                               steps AND ITS OWN HOOKS.
+                   started     its start timestamp, or the empty string.
+                   duration    seconds as text, or nothing.
+                   step_count  how many steps it carries.
+
+      feature_status feature_stats feature_duration feature_started
+                 The feature's own aggregate: its status, the statistics
+                 figures, its duration as text and its earliest scenario
+                 start.
+
+      step_tally The feature's steps by status - total plus a by_status map
+                 holding only the non-zero statuses in reading order.
+
+      scenario_count
+                 How many of the blocks are scenarios, which is what the
+                 filter acts on.
+
+      filters    One entry per status the scenario blocks carry, in severity
+                 order, each with its token and its count.
+
+  STATE, three separate vocabularies. The data-report- hooks emitted here are
+  data-report-filter on each filter button, data-report-filterable with
+  data-report-status on each scenario block, data-report-toggle with
+  aria-controls on each step-list control and data-report-detail on its list,
+  and data-report-toggle-all on the two detail controls; data-report-root, the
+  page scope, belongs to base.html. The mutable ARIA mirrors authored here are
+  aria-pressed on the filter buttons - "all" pressed, each status unpressed -
+  and aria-expanded="true" on every step-list control: the fully expanded,
+  unfiltered page report.js then maintains. The aria-current="page" on the
+  breadcrumb's current item is static semantics rather than a mirror, which is
+  why the shell is told to mark no navigation link instead. The runtime classes
+  report-is-collapsed, report-is-filtered-out and report-lightbox-is-open are
+  report.js's alone to write and main.css's alone to read, which reads their
+  absence as expanded, visible and closed; none is server-rendered.
 
   OPTIONAL
 
@@ -107,11 +153,14 @@
   elements. In the reference feature the four scenarios stand at element
   positions 1, 3, 5 and 7, so their keys are 0, 1, 2 and 3.
 
-  So the derivation below walks the elements IN ORDER and carries a counter:
-  each element is recorded in place, and an element whose type is "scenario"
-  takes the counter's current value before the counter advances. A loop index
-  over the raw elements would mis-key every link as soon as a background
-  precedes a scenario, which in this suite is always.
+  So the route walks the elements IN ORDER and carries a counter: each element
+  becomes a block in place, and an element whose type is "scenario" takes the
+  counter's current value before the counter advances. That value arrives here
+  as the block's sindex and is what every scenario link on this page is keyed
+  by. A loop index over the elements would mis-key every link as soon as a
+  background precedes a scenario, which in this suite is always - which is
+  also why the scenario route derives the same value from the same blocks
+  rather than from a rule of its own.
 
   The repeated backgrounds are never reordered, deduplicated or collapsed
   either: the results file's structure has to be deterministic for identical
@@ -120,34 +169,43 @@
   per scenario.
 
   ---------------------------------------------------------------------------
-  AGGREGATION RULES - the same definitions view/overview.html applies
+  AGGREGATION RULES - one definition, and it is not here
   ---------------------------------------------------------------------------
-  This page and the overview are two presentations of one calculation, so a
-  reader comparing them can never be shown two different answers. The
-  precedence order, the counting rules and the duration and timestamp
-  formatting below are the overview's, name for name:
+  app/reporting/aggregation.py owns every rule below, and the overview page
+  presents the same ones. They are restated here as documentation of what the
+  values in the context MEAN, not as instructions this file carries out - and
+  if any statement here ever disagrees with that module, that module is right:
 
     1. Step counts   Every step of every element is counted, backgrounds
                      included, because a repeated background genuinely ran once
-                     per scenario. Each step's status is normalised through the
-                     status partial, the project's single normalisation point.
-    2. Scenario      The worst status among that scenario's OWN steps, by the
-       status        precedence declared below, highest first: failed,
-                     undefined, ambiguous, pending, skipped, untested, passed.
-                     An element with no steps is unknown.
-    3. Feature       The same precedence applied across the steps of ALL this
-       status        feature's elements, backgrounds included.
-    4. Duration      The sum of the duration values that are PRESENT AND
-                     USABLE, in nanoseconds, rendered as seconds to three
-                     decimals. Usable is the step partial's own exported
-                     predicate - a non-negative integer that is not a boolean -
+                     per scenario. A HOOK IS NEVER A STEP, and no hook's
+                     duration is ever added.
+    2. Element       The severity fold over that element's OWN steps AND ITS
+       status        OWN HOOKS, highest first: failed, undefined, ambiguous,
+                     pending, skipped, untested, passed. So the badge on a
+                     scenario whose steps all passed but whose after-hook
+                     failed reads failed. An element with neither steps nor
+                     hooks is PASSED - the reference generator's measured
+                     rendering of the step-less Background in this suite's own
+                     EmployeeFc.feature - and unknown is kept for a status the
+                     model never produced.
+    3. Feature       The same fold over this feature's element statuses,
+       status        backgrounds included, so a background-only failure moves
+                     this feature's status without moving any scenario's.
+    4. Duration      The sum of the STEP duration values that are present and
+                     usable, in nanoseconds, rendered as seconds to three
+                     decimals. Usable is a non-negative integer that is not a
+                     boolean, the same predicate the step partial renders by,
                      so an element's total can never count a sample its own
-                     step rows decline to render. With no usable duration at
-                     all the total is unknown rather than zero, and renders an
-                     em dash.
+                     step rows decline to show. With no usable sample at all
+                     the total is unknown rather than zero, and renders an em
+                     dash.
     5. Scenario      The number of elements whose type is "scenario", and NEVER
        count         the element count, which double-counts every feature's
                      scenarios in this suite.
+    6. Timestamps    Only a value the model can parse is displayed, so this
+                     page can never show a start time GET /reports/summary
+                     reports as null.
 
   ---------------------------------------------------------------------------
   VOCABULARY AND PROHIBITIONS
@@ -239,59 +297,23 @@
     they are on the overview when they are on a feature. The breadcrumb below
     names the current item, which is where a reader's position is stated. -#}
 {% set active_nav = "reports-detail" %}
-{% from "partials/status_badge.html" import status_badge, status_token %}
-{#- duration_is_usable is imported beside the row it belongs to: the row
-    renders a duration only for a non-negative, non-boolean integer, so the
-    element, feature and run totals below admit exactly the same values and
-    cannot count a sample no step row shows. -#}
-{% from "partials/step_row.html" import step_row, duration_is_usable %}
+{#- The badge is the shared partial's, so a status reads identically here, on
+    the other two views and in both generated HTML artifacts. It normalises
+    the token it is handed, which is already a normalised token from the one
+    result model - applying that normalisation to its own answer changes
+    nothing, and it is the partial's contract rather than a step this page
+    performs. -#}
+{% from "partials/status_badge.html" import status_badge %}
+{% from "partials/step_row.html" import step_row %}
 {% from "partials/lightbox.html" import screenshots, lightbox_overlay %}
 
-{#- Rule 2 of the aggregation contract, as data, and the same sequence
-    view/overview.html declares. Highest severity first: the first member of
-    this sequence that occurs among a set of step statuses is the status of the
-    element or feature those steps belong to. It is declared once, here, and
-    reaches worst_token below as that macro's default argument so the order
-    cannot be restated - and therefore cannot be restated differently -
-    anywhere else in this file. -#}
-{% set STATUS_PRECEDENCE = ('failed', 'undefined', 'ambiguous', 'pending', 'skipped', 'untested', 'passed') %}
-
-{#- Reading order for the tallies, again the overview's: the reference overview
-    page's own column order first - passed, failed, skipped, pending,
-    undefined - then the three remaining states that page has no column for, so
-    a tally is never silently dropped. Every token the status partial can answer
-    with appears exactly once. -#}
-{% set STATUS_READING_ORDER = ('passed', 'failed', 'skipped', 'pending', 'undefined', 'untested', 'ambiguous', 'unknown') %}
-
-{#- The worst status in a collection of already-normalised tokens, by the
-    precedence above. Answers "unknown" for an empty collection, for a missing
-    one, and for a collection holding nothing the precedence names - a status
-    the model never produced must not be reported as a pass. -#}
-{%- macro worst_token(tokens, precedence=STATUS_PRECEDENCE) -%}
-    {%- set found = namespace(token='') -%}
-    {%- set candidates = tokens|default([], true) -%}
-    {%- for candidate in precedence -%}
-        {%- if not found.token and candidate in candidates -%}
-            {%- set found.token = candidate -%}
-        {%- endif -%}
-    {%- endfor -%}
-    {{- found.token if found.token else 'unknown' -}}
-{%- endmacro -%}
-
-{#- How many of one token a collection holds. Kept as a macro so the feature's
-    tallies and each filter control's count are counted the same way. -#}
-{%- macro count_of(tokens, token) -%}
-    {{- (tokens|default([], true))|select('equalto', token)|list|length -}}
-{%- endmacro -%}
-
-{#- A nanosecond total as seconds to three decimals. samples is the number of
-    duration keys that were actually present, which is what separates a
-    genuinely zero total from a total of nothing at all: with no sample the
-    duration is unknown and renders an em dash. The raw nanosecond integer is
-    never rendered. -#}
-{%- macro duration_value(total_ns, samples) -%}
-    {%- if (samples|default(0, true)) > 0 and (total_ns|default(0, true)) is number -%}
-        <span class="tqa-duration">{{ '%.3f'|format(total_ns / 1000000000) }} s</span>
+{#- A duration as the route supplies it: the seconds figure the one result
+    model formatted, or nothing at all when no step carried a usable sample -
+    which is unknown rather than zero, and renders an em dash. The raw
+    nanosecond integer never reaches this page. -#}
+{%- macro duration_value(seconds) -%}
+    {%- if seconds -%}
+        <span class="tqa-duration">{{ seconds }} s</span>
     {%- else -%}
         <span class="tqa-duration">&mdash;</span>
     {%- endif -%}
@@ -299,10 +321,10 @@
 
 {#- One timestamp, machine-readable and human-readable from the same string:
     the results file already carries fixed-width UTC ISO-8601, so reformatting
-    it would only invite the two forms to disagree. Blank or absent renders an
-    em dash. -#}
-{%- macro timestamp_value(iso) -%}
-    {%- set stamp = iso|default('', true)|string|trim -%}
+    it would only invite the two forms to disagree. The route has already
+    dropped any value the result model cannot parse, so what arrives here is
+    either a usable timestamp or nothing; blank renders an em dash. -#}
+{%- macro timestamp_value(stamp) -%}
     {%- if stamp -%}
         <time class="tqa-timestamp" datetime="{{ stamp }}">{{ stamp }}</time>
     {%- else -%}
@@ -395,92 +417,25 @@
 
 {% block content %}
     {#- ---------------------------------------------------------------------
-        Derivation. ONE pass over the elements builds one record per element,
-        in source order, while the feature-level tallies accumulate as that
-        pass goes - so the summary above, the filter controls and the element
-        list below are three readings of a single calculation rather than
-        three calculations.
+        CONSUMPTION, not derivation. The route hands this page one block per
+        element - in source order, backgrounds and scenarios still
+        interleaved - together with the feature's own aggregate and its step
+        tally, all computed by app/reporting/aggregation.py. So the summary
+        above, the filter controls and the element list below are three
+        renderings of one calculation rather than three calculations, and an
+        element's badge here is the same grading the generated artifacts and
+        GET /reports/summary apply to that element: its own steps AND ITS OWN
+        HOOKS, with an element carrying neither graded passed.
 
-        The pass is also where the scenario index comes from: the counter
-        advances only on a scenario element, so a scenario's key is its
-        position among the scenarios and not among the elements. See THE
+        The scenario index arrives with each block for the same reason. The
+        counter advanced only on a scenario element, so a scenario's key is
+        its position among the scenarios and not among the elements, and the
+        scenario route reads the same blocks to answer at that key. See THE
         SCENARIO INDEX above; this is the rule that section describes.
-
-        Every lookup is guarded, and by a type test rather than a truth test
-        wherever an absent key is legitimate. A sequence that is a string or a
-        mapping is rejected rather than iterated, since both would otherwise
-        iterate into nonsense.
         --------------------------------------------------------------------- -#}
-    {%- set raw_elements = feature_map.get('elements') -%}
-    {%- set element_list = raw_elements if (raw_elements is sequence and raw_elements is not string and raw_elements is not mapping) else [] -%}
-
-    {%- set blocks = [] -%}
-    {%- set counter = namespace(sindex=0) -%}
-    {%- set tally = namespace(steps=[], scenarios=[], duration_ns=0, samples=0, starts=[]) -%}
-
-    {%- for element in element_list -%}
-        {%- set el = element if element is mapping else {} -%}
-        {%- set el_type = (el.get('type') if el.get('type') is string else '')|trim|lower -%}
-        {%- set raw_steps = el.get('steps') -%}
-        {%- set step_list = raw_steps if (raw_steps is sequence and raw_steps is not string and raw_steps is not mapping) else [] -%}
-        {#- This element's own step statuses, kept apart from the feature's so
-            an element's status is decided by its own steps alone. -#}
-        {%- set el_tokens = [] -%}
-        {%- set el_time = namespace(duration_ns=0, samples=0) -%}
-        {%- for step in step_list -%}
-            {%- set result = step.get('result') if step is mapping else none -%}
-            {%- set result_map = result if result is mapping else {} -%}
-            {%- set token = status_token(result_map.get('status'))|string|trim -%}
-            {%- set _ = el_tokens.append(token) -%}
-            {%- set _ = tally.steps.append(token) -%}
-            {#- A skipped step may carry no duration key at all, and a value
-                the step row would decline to render - a float, a negative
-                count, a boolean, anything but a non-negative integer - must
-                not reach a total shown beside that row. Both count as no
-                sample rather than as zero, and the test is the step partial's
-                own exported predicate rather than a second one stated here,
-                so one reading of a duration serves the step, the element, the
-                feature and the run. Zero passes it, which is deliberate: a
-                skipped or undefined step records the integer zero. -#}
-            {%- set step_duration = result_map.get('duration') -%}
-            {%- if duration_is_usable(step_duration)|trim != '' -%}
-                {%- set el_time.duration_ns = el_time.duration_ns + step_duration -%}
-                {%- set el_time.samples = el_time.samples + 1 -%}
-                {%- set tally.duration_ns = tally.duration_ns + step_duration -%}
-                {%- set tally.samples = tally.samples + 1 -%}
-            {%- endif -%}
-        {%- endfor -%}
-        {%- set el_status = worst_token(el_tokens)|string|trim -%}
-        {%- set el_started = (el.get('start_timestamp') if el.get('start_timestamp') is string else '')|trim -%}
-        {%- set is_scenario = el_type == 'scenario' -%}
-        {%- if is_scenario -%}
-            {%- set _ = tally.scenarios.append(el_status) -%}
-            {%- if el_started -%}
-                {%- set _ = tally.starts.append(el_started) -%}
-            {%- endif -%}
-        {%- endif -%}
-        {#- kind, rather than the raw type, is what the markup below branches
-            on: an element whose type is missing or unrecognised is recorded as
-            "other" and rendered as a neutral block, because dropping it would
-            misreport the run and raising on it would take the page down. -#}
-        {%- set _ = blocks.append({
-                'kind': 'scenario' if is_scenario else ('background' if el_type == 'background' else 'other'),
-                'element': el,
-                'position': loop.index0,
-                'sindex': counter.sindex if is_scenario else none,
-                'steps': step_list,
-                'tokens': el_tokens,
-                'status': el_status,
-                'started': el_started,
-                'duration_ns': el_time.duration_ns,
-                'samples': el_time.samples
-            }) -%}
-        {%- if is_scenario -%}
-            {%- set counter.sindex = counter.sindex + 1 -%}
-        {%- endif -%}
-    {%- endfor -%}
-
-    {%- set feature_status = worst_token(tally.steps)|string|trim -%}
+    {%- set blocks = blocks|default([], true) -%}
+    {%- set step_counts = step_tally|default({}, true) -%}
+    {%- set feature_stats = feature_stats|default({}, true) -%}
     {%- set scenario_blocks = blocks|selectattr('kind', 'equalto', 'scenario')|list -%}
 
     {#- The blocks that will actually emit a step list, which is the only thing
@@ -491,16 +446,6 @@
         would be inert furniture - so they are gated on this, not on the
         presence of elements. -#}
     {%- set detail_blocks = blocks|selectattr('steps')|list -%}
-
-    {#- The statuses the scenario blocks actually carry, in severity order,
-        which is what the filter controls offer. Offering a status no scenario
-        carries would give the reader a button that empties the page. -#}
-    {%- set filter_statuses = [] -%}
-    {%- for token in STATUS_PRECEDENCE + ('unknown',) -%}
-        {%- if scenario_blocks|selectattr('status', 'equalto', token)|list -%}
-            {%- set _ = filter_statuses.append(token) -%}
-        {%- endif -%}
-    {%- endfor -%}
 
     {#- Feature-level tags, collected first so a tags list holding nothing but
         blank names reads as none rather than as an empty list. Only a tag's
@@ -568,23 +513,23 @@
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Scenarios</dt>
-                <dd class="tqa-meta-value">{{ scenario_blocks|length }}</dd>
+                <dd class="tqa-meta-value">{{ feature_stats.scenarios_total|default(0, true) }}</dd>
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Steps</dt>
-                <dd class="tqa-meta-value">{{ tally.steps|length }}</dd>
+                <dd class="tqa-meta-value">{{ feature_stats.steps_total|default(0, true) }}</dd>
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Total duration</dt>
-                <dd class="tqa-meta-value">{{ duration_value(tally.duration_ns, tally.samples) }}</dd>
+                <dd class="tqa-meta-value">{{ duration_value(feature_duration) }}</dd>
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">First scenario started</dt>
-                <dd class="tqa-meta-value">{{ timestamp_value((tally.starts|sort|first) if tally.starts else '') }}</dd>
+                <dd class="tqa-meta-value">{{ timestamp_value(feature_started) }}</dd>
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Results modified</dt>
-                <dd class="tqa-meta-value">{{ timestamp_value(artifact_modified|default('', true)) }}</dd>
+                <dd class="tqa-meta-value">{{ timestamp_value(artifact_modified) }}</dd>
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Tags</dt>
@@ -622,25 +567,28 @@
 
         <p>
             Steps are counted across all elements of this feature, backgrounds
-            included, because a background genuinely runs once per scenario. A
-            scenario and the feature itself each take the worst status among
-            their steps, so one failure is never averaged away by the passes
-            around it.
+            included, because a background genuinely runs once per scenario. An
+            element takes the worst status among its own steps and its own
+            hooks, and the feature the worst among its elements, so one failure
+            is never averaged away by the passes around it and a failed
+            teardown is never reported as a pass.
         </p>
 
+        {#- The tally's own map, which carries only the non-zero statuses and
+            is already in reading order - the reference overview page's five
+            columns first, then the three states that page has no column for,
+            so nothing is silently dropped. The total is the map's own, so the
+            parts and the total cannot disagree. -#}
         <ul class="tqa-summary">
-            {%- for token in STATUS_READING_ORDER %}
-            {%- set counted = count_of(tally.steps, token)|int %}
-            {%- if counted %}
+            {%- for token, counted in (step_counts.by_status|default({}, true)).items() %}
             <li class="tqa-count" data-report-status="{{ token }}">
                 {{ status_badge(token) }}
                 <strong>{{ counted }}</strong>
             </li>
-            {%- endif %}
             {%- endfor %}
             <li class="tqa-count">
                 <span>All steps</span>
-                <strong>{{ tally.steps|length }}</strong>
+                <strong>{{ step_counts.total|default(0, true) }}</strong>
             </li>
         </ul>
     </section>
@@ -680,11 +628,11 @@
     {%- if scenario_blocks %}
     <div class="tqa-filter" role="group" aria-label="Filter scenarios by status">
         <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="true">
-            All scenarios ({{ scenario_blocks|length }})
+            All scenarios ({{ scenario_count|default(0, true) }})
         </button>
-        {%- for token in filter_statuses %}
-        <button type="button" class="tqa-filter-btn" data-report-filter="{{ token }}" aria-pressed="false">
-            {{ token|capitalize }} ({{ scenario_blocks|selectattr('status', 'equalto', token)|list|length }})
+        {%- for control in filters|default([], true) %}
+        <button type="button" class="tqa-filter-btn" data-report-filter="{{ control.token }}" aria-pressed="false">
+            {{ control.token|capitalize }} ({{ control.count }})
         </button>
         {%- endfor %}
     </div>
@@ -732,7 +680,6 @@
     {%- set el_name = (el.get('name') if el.get('name') is string else '')|trim %}
     {%- set el_desc = el.get('description') if el.get('description') is string else '' %}
     {%- set el_id = (el.get('id') if el.get('id') is string else '')|trim %}
-    {%- set el_token = status_token(block.status)|string|trim %}
     {#- A blank name would leave a scenario link with no accessible name at
         all, so the element's keyword stands in, and its position behind
         that - both values the results file itself carries. -#}
@@ -786,7 +733,7 @@
         either, since it has no scenario key to link to. -#}
     <section class="{{ 'tqa-background' if block.kind == 'background' else 'tqa-scenario' }}"
              id="{{ el_dom_id }}"
-             {%- if block.kind == 'scenario' %} data-report-status="{{ el_token }}" data-report-filterable{% endif %}>
+             {%- if block.kind == 'scenario' %} data-report-status="{{ block.status }}" data-report-filterable{% endif %}>
         <h3 class="tqa-scenario-name">
             {%- if block.kind == 'scenario' %}
             <a class="tqa-link"
@@ -835,12 +782,12 @@
             {%- else %}
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Steps</dt>
-                <dd class="tqa-meta-value">{{ block.tokens|length }}</dd>
+                <dd class="tqa-meta-value">{{ block.step_count|default(0, true) }}</dd>
             </div>
             {%- endif %}
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Duration</dt>
-                <dd class="tqa-meta-value">{{ duration_value(block.duration_ns, block.samples) }}</dd>
+                <dd class="tqa-meta-value">{{ duration_value(block.duration) }}</dd>
             </div>
         </dl>
 

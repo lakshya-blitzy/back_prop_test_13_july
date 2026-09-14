@@ -1,314 +1,79 @@
 {#-
-  ===========================================================================
+  ---------------------------------------------------------------------------
   partials/step_row.html - one step of a scenario or a background, with its
-  detail, rendered identically on each of the three surfaces this project
-  writes.
-  ===========================================================================
+  detail.
+  ---------------------------------------------------------------------------
+  One of the three shared partials, rendered into all three surfaces: the
+  single self-contained artifact page, the generated report tree and the HTTP
+  views. It composes the other two rather than restating them - badge markup
+  comes from partials/status_badge.html, screenshot markup from
+  partials/lightbox.html.
 
-  The third and largest of exactly three shared partials - the status badge,
-  the screenshot lightbox and this one. "One step" is its whole concern. It
-  composes the other two rather than restating them: the badge markup comes
-  from partials/status_badge.html and the screenshot markup from
-  partials/lightbox.html, and neither is duplicated below.
+  API - imported without the calling context, so every value arrives as an
+  argument:
 
       {% from 'partials/step_row.html' import step_row, step_keyword %}
 
-  The import is deliberately the plain form, without the calling context. No
-  partial may read an ambient template variable, and that restraint is what
-  makes the output identical wherever it is rendered: every value a macro
-  needs arrives as an argument.
+  step_keyword(step) answers the keyword as text, trimmed, and emits no
+  markup. The model carries it with the trailing space of the reference
+  formatter - "Given ", "And " - and this is the one place that space is
+  removed. It is a macro because the pretty templates need the same token to
+  build the generated tree's per-keyword class. A step that is not a mapping
+  answers the empty string.
 
-  ---------------------------------------------------------------------------
-  MACRO 1 - step_keyword(step)
-  ---------------------------------------------------------------------------
-      step   REQUIRED. The step mapping. Anything else - none, a string, a
-             number, or the name of a variable the calling template never
-             defined - answers the empty string instead of raising.
+  step_row(step, uid=none, extra_classes={}, filterable=true,
+      duration_fallback=none, inline_args=false, show_location=false,
+      embeddings=none, screenshot_fallback_caption=none) renders one step, and
+      the EMPTY STRING when step is not a mapping. An EMPTY mapping does
+      render - no keyword, no name, an unknown status - because dropping a
+      step would misreport the run.
+      uid distinguishes this row's detail id; see determinism below.
+      extra_classes carries class tokens per slot - step keyword name badge
+      duration detail error args arg - or a plain string for the step
+      container alone. A missing, blank or non-string slot means none, and
+      slots.badge set to boolean false, tested by identity, is the one
+      sentinel in this file: it suppresses the badge.
+      filterable=true puts the status-filter hooks on this row; a caller whose
+      scenario container is already the filter unit passes false, because
+      hiding an element hides its whole subtree.
+      duration_fallback is what renders when no usable duration arrives; its
+      default renders no duration element at all.
+      inline_args splices the matched arguments into the name at their
+      recorded offsets rather than listing them in the detail region, falling
+      back to the list when an offset does not fit the name exactly.
+      show_location renders the resolved step location in the detail region.
+      embeddings are screenshot embeddings handed to the lightbox partial;
+      they live on the SCENARIO, so the caller decides which step carries
+      them, and screenshot_fallback_caption is forwarded as that partial's
+      fallback caption, used only when an embedding's own name is blank.
 
-  Answers the step's keyword as text with its surrounding whitespace removed,
-  and emits no markup. The result model carries the keyword with the single
-  trailing space the JVM emits - "Given ", "When ", "And ", "Then " - and
-  this macro is THE ONE PLACE in the project where that space is removed for
-  display. app/reporting/events.py appends it in one function; this removes it
-  in one macro; the two are the whole story.
-
-  It is a macro rather than a private detail because the pretty template set
-  needs the same normalised token to build the reference generator's own
-  per-keyword class name, and re-implementing the trim there is how the two
-  would drift apart. Given, When, Then, And and But all work; But never
-  occurs in this suite but is not special-cased.
-
-  ---------------------------------------------------------------------------
-  MACRO 2 - step_row(step, uid=none, extra_classes={}, filterable=true,
-                     duration_fallback=none, inline_args=false,
-                     show_location=false, embeddings=none,
-                     screenshot_fallback_caption=none)
-  ---------------------------------------------------------------------------
-      step               REQUIRED. The step mapping described under THE INPUT
-                         MODEL below. A step that is not a mapping - none, a
-                         string, or an undefined name - renders the EMPTY
-                         STRING and raises nothing.
-
-      uid                OPTIONAL, default none. A caller-supplied token that
-                         makes the detail region's id unique across the page.
-                         See DETERMINISM below for the derivation and for what
-                         happens when it is omitted. Any type is accepted; it
-                         is read as text.
-
-      extra_classes      OPTIONAL, default an empty mapping. Extra class
-                         tokens per slot. See SLOTS below. A plain string is
-                         also accepted and means "apply these to the step
-                         container only", which is the common case.
-
-      filterable         OPTIONAL, default true. When true the step container
-                         carries the two behaviour hooks the report script
-                         filters on, so the step is the unit the status filter
-                         hides. A caller whose scenario container is already
-                         the filter unit passes false, because hiding an
-                         element hides its whole subtree and a nested second
-                         registration would be redundant.
-
-      duration_fallback  OPTIONAL, default none. What to render when the
-                         result carries no usable duration. The default
-                         renders NO duration element at all. The pretty
-                         template set passes '0.000', because its generator
-                         fabricates a zero there; that is a per-surface
-                         convention rather than a fact about the model, which
-                         is exactly why it is a parameter and not a constant.
-
-      inline_args        OPTIONAL, default false. When true the matched
-                         arguments are spliced into the step name at their
-                         recorded offsets, each wrapped for highlighting -
-                         the reference generator's own rendering, and what the
-                         pretty template set uses. When false they are listed
-                         after the name inside the detail region instead.
-
-      show_location      OPTIONAL, default false. When true the resolved step
-                         function's location is rendered inside the detail
-                         region as plain data, in an inline element that wraps
-                         - see the class note below, since a location is one
-                         unbreakable token and overflows a narrow viewport
-                         without it. Nothing is asserted about its shape: it
-                         is a dotted path here where the original carried a
-                         method signature, and an undefined step has no
-                         location at all.
-
-      embeddings         OPTIONAL, default none. Screenshot embeddings for the
-                         detail region, handed straight to the lightbox
-                         partial. Embeddings live on the SCENARIO's after-hook
-                         list, never on a step, so the calling template
-                         decides which step - if any - carries them; passing
-                         that list in unchanged is supported.
-
-      screenshot_fallback_caption
-                         OPTIONAL, default none. Forwarded to the lightbox
-                         partial as its fallback caption, which that partial
-                         uses ONLY when the embedding's own name carries no
-                         text. It exists because an embedding belongs to the
-                         scenario while this macro renders a step: when a
-                         caller routes a scenario's captures through the step
-                         that failed, the scenario's own heading is the label
-                         for them, and without this parameter a capture whose
-                         name arrived blank rendered with an empty alt, no
-                         caption and no accessible name on its trigger - an
-                         unlabelled image standing in for failure evidence.
-                         It never displaces a name the model carries.
-
-  SLOTS - the keys extra_classes may carry, each a string of class tokens
-  appended after this project's own class on that element:
-
-      step keyword name badge duration detail error args arg
-
-  A missing slot, a blank slot and a non-string slot are all "no extra
-  classes". Runs of whitespace inside a caller's value collapse to single
-  spaces, so a class list assembled across several template lines cannot land
-  a newline inside an attribute. Two slots are worth naming:
-
-      arg     goes on each highlighted argument, and is the ONLY class those
-              elements carry. The stylesheet declares no per-argument class,
-              so the pretty template set passes the vendored generator's own
-              argument class here to pick up its styling. No class name is
-              invented for it.
-
-      badge   styles the status badge, and the one sentinel in this file: the
-              value boolean false - not the string, not none, not a blank -
-              suppresses the badge entirely. The signature above is fixed, so
-              a surface that does not want a badge says so here. Rendering it
-              is the default, deliberately: the reports artifact test requires
-              every step's status to appear in the page.
-
-  RENDER-NOTHING CONDITIONS
-
-    - A step that is not a mapping renders the empty string. An EMPTY mapping
-      does render, as a step with no keyword, no name and an unknown status,
-      because silently dropping a step would misreport the run - and a report
-      is what a reader turns to precisely when a run has gone wrong.
-    - The toggle and the detail region are emitted ONLY when the detail region
-      would have content: matched arguments to list, a location to show, an
-      error message, or a screenshot. An expander controlling nothing is an
-      accessibility defect and it pollutes the artifact page, so neither
-      element appears.
-    - The duration element is omitted when the result carries no usable
-      duration and no fallback was supplied.
-    - The argument list, the location and the error block are each omitted
-      when their own value is absent, blank or unusable.
-
-  THE INPUT MODEL - measured against the reference report, not assumed. Every
-  field is optional and every one is type-tested before use:
-
-      keyword   "Given " etc, with the trailing space. Trimmed for display.
-      line      the step's line in its feature file. Feeds the detail id when
-                no uid is supplied.
-      name      the step text, already substituted for an outline row.
-      match     { location, arguments }. Both optional: an undefined step's
-                match is an empty mapping and carries neither.
-                arguments is a list of { val, offset } where val INCLUDES its
-                surrounding quotation marks and offset is a zero-based
-                character offset into name.
-      result    { status, duration, error_message }.
-                status is lower case and is normalised by the badge partial,
-                never here.
-                duration is a NANOSECOND INTEGER and is INDEPENDENTLY OPTIONAL
-                FOR EVERY STATUS - the reference carries one skipped step with
-                a duration and another without, so its presence is never
-                inferred from the status. It is rendered as seconds to three
-                decimal places, never as a bare nanosecond count, with the
-                exact integer preserved in advisory text so a test can read
-                the model value back out of the page. Zero is a real value and
-                renders; a negative, a float, a boolean and a non-number
-                render nothing.
-                error_message appears only on a failure, spans many lines, and
-                carries assertion text and a traceback.
-
-  This macro reads ONLY step.* - never a scenario's id, tags or start
-  timestamp. That is not tidiness: in the reference the eight elements are
-  four backgrounds and four scenarios interleaved, so the same background is
-  rendered before each scenario, and a background element carries none of
-  those three keys. Reading only the step is what lets one macro serve both.
-  No partial in this folder renders a timestamp either; that belongs to the
-  templates that own a scenario or a feature.
-
-  Step docstrings and step-level data tables are deliberately absent, and this
-  is a settled exclusion rather than work left undone: the suite contains
-  neither - all ten feature files were searched - and the result model carries
-  neither, so rendering them would be an addition nobody asked for. Such a key
-  arriving anyway is ignored rather than treated as an error.
-
-  DETERMINISM - the emitted structure has to be identical for identical
-  input, so the detail region's id is derived, never generated. There is no
-  unpredictable source, no unique-value generator and no counter whose value
-  depends on the order pages happen to be rendered in. The id is this
-  project's own prefix followed by the uid when one is supplied, and by the step's line
-  otherwise; characters outside letters, digits, the hyphen and the underscore
-  become hyphens, and the prefix guarantees the result is a usable id. Two
-  consequences for callers: the same step with the same uid always yields
-  byte-identical ids, and PAGE-WIDE UNIQUENESS IS THE CALLER'S JOB - a page
-  rendering a step more than once, or rendering two features whose steps share
-  line numbers, must pass a uid that distinguishes them.
-
-  THE THREE SURFACES, AND WHAT THEY FORBID
-  ----------------------------------------
-  This markup is rendered into three places whose asset rules do not agree:
-
-    1. The single self-contained page app/reporting/html_report.py writes to
-       the reports HTML artifact, which carries no external asset reference of
-       any kind - the reference artifact has exactly one reference in
-       1,440,365 bytes, and it is an inline data URI.
-    2. The report tree app/reporting/pretty_reports.py writes, opened straight
-       from a Jenkins workspace, where every reference has to resolve inside
-       that tree.
-    3. The Flask views under view/, which extend base.html - and it is
-       base.html, never this file, that resolves the stylesheet and the
-       behaviour script for them.
-
-  So, with no exception: this partial builds no application endpoint URL,
-  calls no framework URL-building helper, references no stylesheet, behaviour
-  script, image file or sibling page, and contains no absolute or
-  protocol-relative web address. Anything link-shaped a caller needs is passed
-  in as text the calling template has already built; with none passed in, the
-  step name is plain text.
-
-  NO LINK DETECTION, ANYWHERE. No automatic link-detection filter is applied
-  to any value - not the error message, not the location, not the name. This
-  is not a preference. The reference failure text contains a literal web
-  address of its own, and the reference generator renders it as plain text
-  inside a preformatted block with no anchor to it anywhere on the page.
-  Detecting it would inject a genuine external reference into the
-  self-contained artifact FROM DATA, which no reading of this template would
-  ever reveal, and the artifact test that forbids exactly that would fail.
-
-  ESCAPING - this file leans on the engine's own default escaping of HTML
-  templates for every interpolated value and never declares a value
-  pre-escaped or trusted markup. Assertion text and Selenium messages carry
-  angle brackets, quotation marks, apostrophes, braces, tabs and characters
-  outside ASCII, and every one of them is escaped on the way out. The
-  stylesheet handles the wrapping and the monospacing of what remains.
-
-  WHAT IT DELIBERATELY DOES NOT EMIT
-
-    - No icon markup, in any vocabulary. The expander glyph is supplied by the
-      stylesheet as generated content, and the icon fonts ship only inside the
-      generated report tree, so a glyph element here would be a blank box on
-      two of the three surfaces. The generator's own icon class names stay
-      reachable through extra_classes.
-
-    - None of the three boolean state attributes the stylesheet reads, and
-      none of the three state classes the report script sets at run time. The
-      stylesheet reads the absence of those attributes as expanded, visible
-      and closed, so server output always describes the fully expanded page.
-      That is what keeps both artifacts legible with scripting turned off and
-      correct on paper, and it is why the toggle is authored expanded.
-
-    - None of the vendored generator's own collapse attributes, even though
-      the reference generator uses them. The report script is the single owner
-      of interactivity across all three surfaces, and the vendored behaviour
-      script is loaded on only one of them.
-
-    - No presentation attribute on any element and no embedded stylesheet
-      block: presentation belongs to main.css, which one writer inlines and
-      the other copies.
-
-    - No class outside the set main.css declares, and no new name invented in
-      its namespace. The location is a plain inline element carrying the
-      stylesheet's own metadata-value class, and deliberately not either of the
-      two elements that would suggest themselves for a dotted path: those are
-      styled bare by the vendored stylesheets inside the generated report tree,
-      which would give the location one appearance there and another on the two
-      surfaces that never load them. A class out of main.css has no such
-      asymmetry, because main.css reaches all three - inlined into one
-      artifact, copied into the other, linked by the views. It is also what
-      makes the location WRAP: a location is a single unbreakable token, and
-      measurement at a 480px viewport showed that without that class one such
-      token pushes the whole document into horizontal overflow.
-
-  ACCESSIBILITY - a real button for the toggle, non-navigating, carrying its
-  expanded state and the id of the region it controls, and named in words
-  because its glyph is generated content and therefore has no text of its own
-  to be named by. The error message is a preformatted block, which is both
-  what the plan requires for text carrying tracebacks and what preserves its
-  many lines without any bypass of escaping. Status is never carried by colour
-  alone: the badge spells the status out in words, and the stylesheet pairs
-  each status colour with a border style and a weight so it survives greyscale
-  printing.
-
-  VOCABULARY - classes from app/static/css/main.css and behaviour hooks from
-  app/static/js/report.js, with nothing invented in either namespace:
-      tqa-step, tqa-step-keyword, tqa-step-name, tqa-step-args,
-      tqa-step-detail, tqa-duration, tqa-error, tqa-toggle, tqa-meta-value
-      data-report-status, data-report-filterable, data-report-toggle,
-      data-report-detail
-
-  ONE STATUS ATTRIBUTE PER ROW, ALWAYS: data-report-status, whatever the row's
-  filterability. data-report-filterable is the separate, conditional fact -
-  whether the status filter may hide this row - and it carries no value.
-  Colouring a row and filtering it are therefore driven by the same single
-  attribute, so a non-filterable row is still coloured and a filterable one
-  carries no duplicate of its own status.
-
-  THE MATCHED ARGUMENTS are one inline container of inline values, not a
-  table: the model carries a flat list of matched strings with no header row
-  and nothing to align in columns, and the stylesheet draws each value as its
-  own chip.
+  CONSTRAINTS THAT CANNOT BE READ OFF THE CODE
+    - This macro reads ONLY step.*, never a scenario's id, tags or timestamp,
+      which is what lets one macro serve a background and a scenario alike.
+      A duration is a nanosecond integer and is independently optional for
+      every status, so its presence is never inferred from one.
+    - PAGE-WIDE UNIQUENESS OF THE DETAIL ID IS THE CALLER'S JOB. The id is
+      derived from uid, or from the step's line when no uid is given, so a
+      page rendering one step twice, or two features whose steps share line
+      numbers, must pass a uid that separates them.
+    - NO LINK DETECTION, ANYWHERE, and no URL, asset or endpoint reference of
+      any kind. Failure text carries a literal web address of its own, and
+      linking it would inject an external reference into the self-contained
+      artifact FROM DATA, which no reading of this template would reveal.
+      Escaping is automatic and nothing is declared trusted markup.
+    - The toggle and the detail region are emitted only when the detail would
+      have content - arguments, a location, an error or a screenshot - because
+      a control that expands nothing is an accessibility defect.
+    - The toggle is authored EXPANDED, aria-expanded="true", which report.js
+      maintains from there and main.css reads for the collapsed glyph; that is
+      the only mutable ARIA mirror this file authors, its accessible name and
+      aria-controls relationship being static semantics. data-report-status, the
+      conditional data-report-filterable, data-report-toggle with its
+      aria-controls, and data-report-detail are selection hooks rather than
+      state. None of the three runtime classes report.js writes -
+      report-is-collapsed, report-is-filtered-out, report-lightbox-is-open -
+      is ever server-rendered; main.css alone reads them, and their absence is
+      the fully expanded, fully visible page.
 -#}
 
 {%- from 'partials/status_badge.html' import status_badge, status_token -%}
@@ -388,7 +153,6 @@
         that none, a blank string and a class list all still render a badge. -#}
     {%- set show_badge = slots.get('badge') is not false -%}
 
-    {#- ---- the model ---------------------------------------------------- -#}
     {%- set result = step.get('result') if step.get('result') is mapping else {} -%}
     {%- set match = step.get('match') if step.get('match') is mapping else {} -%}
     {%- set name = step.get('name') if step.get('name') is string else '' -%}
@@ -454,7 +218,6 @@
     {%- set use_inline = inline_args and splice.valid -%}
     {%- set show_args_block = (not use_inline) and usable_args|length > 0 -%}
 
-    {#- ---- location, error and screenshots ------------------------------- -#}
     {%- set location = match.get('location') -%}
     {%- set location_text = (location if location is string else '')|trim -%}
     {%- set show_location_block = show_location and location_text != '' -%}

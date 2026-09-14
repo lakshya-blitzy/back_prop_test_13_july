@@ -1,14 +1,21 @@
 """Tests for the grouped rerun manifest -- ``app/reporting/rerun_report.py``.
 
-This module is the gate on a **machine input**, not on a log.
-``FailedTestRunner.java:11`` declares ``features = "@target/rerun.txt"``, and in
-this port ``run-tests --rerun`` reads the same file, so whatever the writer
-emits is what a second run executes: a format error here silently changes which
-scenarios are retried, and nothing downstream would notice.  That is why this
-module asserts the manifest's *bytes* and not merely its meaning.
+This module gates a **machine input**, not a log.  ``FailedTestRunner.java:11``
+declares ``features = "@target/rerun.txt"`` and in this port ``run-tests
+--rerun`` reads the same file, so whatever the writer emits is what a second
+run executes: a format error silently changes which scenarios are retried and
+nothing downstream notices.  That is why the manifest's *bytes* are asserted
+and not merely its meaning, and why a comment, an absolute path or a traversal
+component is asserted to be refused through the module's single error channel,
+with a production read confining every entry to a real Gherkin source file.
 
-The measured baseline
----------------------
+AAP 0.6 fixes the format -- one line per feature, a ``file:`` prefix, each
+failing line appended colon-separated, features in source order, line numbers
+ascending and deduplicated, failures only, an empty run writing zero bytes --
+and the round trip: the file the writer produces must select exactly the
+scenarios that failed.  What counts as a failure is ``FAILURE_STATUSES`` alone,
+restated below as a literal so the two are comparable in both directions.
+
 ``tests/fixtures/golden_rerun.txt`` is the committed reference artifact taken
 verbatim: 50 bytes, one line, one trailing LF, free of merge-conflict markers
 and of any header -- one feature with its two failing scenario lines appended
@@ -39,43 +46,63 @@ What this module gates, section by section
 5. the I/O wrapper: where it writes, what bytes reach disk, and what it never
    does to a file it did not create;
 6. the published surface ``app/cli.py`` depends on, and the single
-   implementation of the failure rule every ordering property falls out of.
+   implementation of the failure rule every ordering property falls out of;
+7. the bounded, verified read of the manifest itself, and the verified
+   resolution of the feature files its entries name.
 
-A note on two settled cells
----------------------------
-Two behaviours of the module under test were under revision while most of this
-file was written, and both have since landed.  The assertions were deliberately
-kept at a level either outcome satisfied, so nothing here had to be undone;
-what the two now say is:
+The two rules this module holds the parser to
+---------------------------------------------
+Both are properties of the code as it stands, asserted in one direction only.
+A test that accepted either of two outcomes for machine input would pass
+whichever way the parser drifted, which for a file a second run *executes from*
+is not a gate at all.
 
-*The failure vocabulary is wider than the literal ``failed``.*
+*The failure vocabulary is wider than the literal* ``failed``.
 ``FAILURE_STATUSES`` is the single statement of it, and :data:`FAILING_STATUSES`
 below restates it as a literal so the two can be compared in both directions.
 ``failed`` is still what every scenario expected **in** the manifest carries
 unless the vocabulary itself is the subject, and ``passed``/``skipped`` what
-every scenario expected **out** carries -- those two are the only statuses whose
-exclusion is settled, because the JVM's ``Status.isOk()`` is ``PASSED ||
-SKIPPED`` and nothing else.
+every scenario expected **out** carries -- those two are the only statuses the
+JVM's ``Status.isOk()`` admits, since it is ``PASSED || SKIPPED`` and nothing
+else.
 
-*The parser rejects rather than tolerates* a comment, an absolute path or a
-traversal component, and a production read confines every entry to a real file
-inside the features directory.  The contested input shapes are still asserted
-through the *integrity property* -- such a line never becomes a selection --
-which is what makes those assertions indifferent to skip-versus-reject.
+*Anything that is not an entry of this grammar is rejected, through*
+``RerunManifestError`` *and nothing else.*  A comment -- behave's own
+``# -- RERUN:`` header included -- an absolute path, a path with a ``.`` or
+``..`` component, a hidden, nested, padded or non-Gherkin name, a missing
+``file:`` scheme and a line carrying no line number are each refused, and the
+refusal discards the whole document rather than skipping the line: behave's
+header means the remaining lines are in *its* ungrouped grammar, so reading on
+would select a scenario set nobody asked for.  Two further properties travel
+with every refusal and are asserted with it -- the message names the source and
+the entry's one-based position, and it reproduces **none** of the refused text,
+because it reaches stderr and a Jenkins console record (CWE-117, CWE-532).
+
+On top of the grammar, a **production read confines every entry to a verified
+regular file inside the features directory**: the manifest is opened no-follow
+through ``app/utils/paths.py`` and read under a byte bound, and each entry is
+opened no-follow beneath a no-follow features root and checked on the
+descriptor, so a linked manifest, a named pipe, an over-sized file, a linked
+features root, a linked or hard-linked entry and a non-regular entry are each
+refused rather than executed.  Section 8 is that surface, end to end.
 """
 
 from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import logging
-from collections.abc import Sequence
+import os
+import signal
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Final
 
 import pytest
 
-from app.reporting import rerun_report
+from app.reporting import aggregation, cucumber_json, rerun_report
 from app.reporting.events import (
     ELEMENT_TYPE_BACKGROUND,
     ELEMENT_TYPE_SCENARIO,
@@ -136,6 +163,18 @@ FAILED: Final[str] = rerun_report.FAILED_STATUS
 PASSED: Final[str] = "passed"
 SKIPPED: Final[str] = "skipped"
 UNDEFINED: Final[str] = "undefined"
+
+#: What behave records for **every** step of a dry run, matched or not, which
+#: is why the dry-run rule reads a step's match state instead of its status.
+DRY_RUN_RECORDED_STATUS: Final[str] = "untested"
+
+#: The duration and the assertion text a genuinely failed step carries, for
+#: the one document that has to reproduce the JVM baseline's *result key set*
+#: rather than only its statuses.  Nothing asserts on the values themselves;
+#: what matters is that both keys are present and the duration is non-zero,
+#: because the JSON writer omits a zero one.
+FAILED_STEP_DURATION_NS: Final[int] = 1_000_000
+FAILED_STEP_MESSAGE: Final[str] = "AssertionError: the background step failed"
 
 #: Every status that puts a scenario in the manifest, spelled out here rather
 #: than read from the module so the comparison against
@@ -203,6 +242,47 @@ FEATURE_LINE: Final[int] = 2
 BACKGROUND_LINE: Final[int] = 6
 DEFAULT_STEP_LINE: Final[int] = 10
 
+#: The Cucumber-JVM baseline for a **Background-only failure**, measured
+#: offline: Cucumber-JVM 7.2.3 (``cucumber-java`` 7.2.3, ``cucumber-junit``
+#: 7.3.4, JUnit 4.13.2) driven through ``io.cucumber.core.cli.Main`` with the
+#: ``rerun:`` and ``json:`` plugins, over a probe feature whose Background step
+#: fails and whose two following scenarios -- at lines 6 and 10 -- hold steps
+#: that would pass.
+#:
+#: The manifest it wrote is below.  Three properties of it are what this port
+#: is held to, and none of them is inferred: the **scenario** lines appear,
+#: they are **grouped on one line** for the feature, and the Background's own
+#: line is **absent** -- a Background is not an addressable test case.  The
+#: probe's own directory component is reached through
+#: ``paths.NORMALIZED_FEATURES_PREFIX`` for the reason
+#: :func:`test_this_module_names_no_feature_directory_prefix` states: no test
+#: in this file spells that prefix.  The probe's path is deliberately *not*
+#: compared with this port's, whose feature directory AAP deviation 1 moved;
+#: the committed reference manifest remains the only byte-for-byte baseline
+#: and is untouched by this measurement.
+JVM_BACKGROUND_ONLY_MANIFEST: Final[str] = (
+    f"{paths.FILE_URI_SCHEME}src/test/resources/"
+    f"{paths.NORMALIZED_FEATURES_PREFIX}Probe.feature:6:10"
+)
+
+#: The result keys the same run's JSON carried on the **failed Background
+#: step**: a duration, the failure text and the status, and the status is
+#: ``failed``.
+JVM_FAILED_STEP_RESULT_KEYS: Final[frozenset[str]] = frozenset(
+    {"duration", "error_message", "status"}
+)
+
+#: The result keys it carried on each **scenario step behave skipped** after
+#: the Background failed: the status alone, in this order, with **no
+#: ``duration``** -- a skipped step's duration is absent rather than zero.
+JVM_SKIPPED_STEP_RESULT_KEYS: Final[tuple[str, ...]] = ("status",)
+
+#: The key **no element** of that JSON carried.  Cucumber's elements have no
+#: status of their own: a scenario's outcome is derived from its steps and the
+#: Background occurrence in front of it, which is why the roll-up lives in
+#: ``app/reporting/aggregation.py`` and not in either artifact.
+JVM_ELEMENT_STATUS_KEY_ABSENT: Final[str] = "status"
+
 #: behave's own rerun formatter header, measured in ``behave/formatter/rerun.py``
 #: and the shape this writer must never pass through.  The port's manifest is
 #: grouped, ``file:``-prefixed and headerless.
@@ -210,10 +290,18 @@ BEHAVE_RERUN_HEADER: Final[str] = (
     "# -- RERUN: 2 failing scenarios during last test run."
 )
 
-#: Substrings that must never appear inside a *selected path*.  A parser that
-#: turned behave's header, or a hand-written comment, into a selection would
-#: produce one of these.
+#: Substrings that must never appear inside a *selected path*.  A writer that
+#: passed behave's header through, or a parser that turned a hand-written
+#: comment into a selection, would produce one of these; asserted over every
+#: emitted line by :func:`_assert_manifest_shape`.
 NEVER_IN_A_SELECTED_PATH: Final[tuple[str, ...]] = ("#", "RERUN", " ")
+
+#: The ``source`` label every parse in this module passes.  A rejection message
+#: has to name where the entry came from -- that is how an operator finds it,
+#: given that the message deliberately reproduces nothing of the entry itself --
+#: so the label is one constant the assertions can look for rather than a word
+#: repeated per test.
+SOURCE_LABEL: Final[str] = "a-parsed-manifest"
 
 #: A run specification: features in source order, each with its scenarios as
 #: ``(line, status)`` pairs.  Used by the round-trip tests, where the point is
@@ -336,6 +424,73 @@ def _background(
     )
 
 
+def _failed_background_occurrence() -> JsonDict:
+    """Build a Background occurrence whose step failed the way a real one does.
+
+    :func:`_background` records a status and a zero duration, which is all most
+    tests need; a *genuine* failure also carries the time it took and the
+    assertion text, and both are load-bearing here: the JVM baseline's failed
+    Background step carries exactly ``duration``, ``error_message`` and
+    ``status``, and the JSON writer omits a zero duration and an absent
+    message.
+
+    :returns: The Background occurrence, on :data:`BACKGROUND_LINE` like every
+        other occurrence of one.
+    """
+    return new_element(
+        element_type=ELEMENT_TYPE_BACKGROUND,
+        keyword=BACKGROUND_KEYWORD_NAME,
+        line=BACKGROUND_LINE,
+        name=BACKGROUND_NAME,
+        steps=[
+            new_step(
+                keyword="Given",
+                line=DEFAULT_STEP_LINE,
+                name=STEP_NAME,
+                matched=True,
+                match={"location": STEP_LOCATION},
+                result={
+                    "status": FAILED,
+                    "duration": FAILED_STEP_DURATION_NS,
+                    "error_message": FAILED_STEP_MESSAGE,
+                },
+            )
+        ],
+    )
+
+
+def _dry_run_unmatched_scenario(line: int) -> JsonDict:
+    """Build the scenario a dry run leaves behind for an unresolved step.
+
+    The shape is behave's own and it is the whole point of the dry-run rule:
+    the step carries ``matched=False`` and an empty ``match``, while the status
+    behave records is :data:`DRY_RUN_RECORDED_STATUS` -- the same ``untested``
+    it records for a step that *did* resolve.  Only the match state
+    distinguishes them, which is why the manifest has to read it.
+
+    :param line: The scenario element's own line, the number the manifest must
+        carry.
+    :returns: The scenario element.
+    """
+    return new_element(
+        element_type=ELEMENT_TYPE_SCENARIO,
+        keyword=SCENARIO_KEYWORD,
+        line=line,
+        name=SCENARIO_NAME,
+        identifier=f"synthetic-scenario-{line}",
+        steps=[
+            new_step(
+                keyword="Given",
+                line=DEFAULT_STEP_LINE,
+                name=STEP_NAME,
+                matched=False,
+                match={},
+                result={"status": DRY_RUN_RECORDED_STATUS},
+            )
+        ],
+    )
+
+
 def _feature_at(
     path: str,
     elements: Sequence[JsonDict],
@@ -379,7 +534,7 @@ def _feature(
     return _feature_at(_feature_path(filename), elements, line=line)
 
 
-def _result_set(*features: JsonDict) -> ResultSet:
+def _result_set(*features: JsonDict, dry_run: bool = False) -> ResultSet:
     """Wrap ``features`` in a merged result document.
 
     ``metadata`` is passed explicitly rather than left to
@@ -387,9 +542,12 @@ def _result_set(*features: JsonDict) -> ResultSet:
     on the host it was built on.
 
     :param features: Feature objects, in source order.
+    :param dry_run: Whether the document describes a dry run, which is the
+        flag the writer reads to grade a step by its match state instead of by
+        the status behave recorded.
     :returns: The result set.
     """
-    return new_result_set(metadata={}, features=list(features))
+    return new_result_set(metadata={}, dry_run=dry_run, features=list(features))
 
 
 def _run(spec: RunSpec) -> ResultSet:
@@ -468,6 +626,34 @@ def _assert_manifest_shape(lines: Sequence[str]) -> None:
         assert separator, f"no line number in manifest entry: {line}"
         assert head, f"no feature path in manifest entry: {line}"
         assert tail.isdigit() and int(tail) > 0, line
+        for fragment in NEVER_IN_A_SELECTED_PATH:
+            assert fragment not in head, f"{fragment!r} in a selected path: {line}"
+
+
+def _assert_names_the_source_and_the_position(
+    error: rerun_report.RerunManifestError, *, number: int
+) -> None:
+    """Assert a refusal is locatable and carries none of the refused entry.
+
+    The two halves of the diagnostic contract, applied wherever a line is
+    refused:
+
+    * it names the source and the entry's one-based position, because the AAP
+      0.4.1 exit table reports the problem on stderr and exits ``0``, so the
+      message is the only thing an operator has to find the entry by;
+    * it is data-free -- the manifest is untrusted machine input and this text
+      is recorded verbatim by Jenkins, so reproducing the entry is how a
+      tampered file forges a console record or leaks its payload (CWE-117,
+      CWE-532).  The per-case absence of the refused text is asserted by the
+      tests that own each shape, since only they know which part of their
+      input was data.
+
+    :param error: The refusal the parser raised.
+    :param number: The one-based position the message must carry.
+    """
+    message = str(error)
+    assert SOURCE_LABEL in message, message
+    assert f"line {number}" in message, message
 
 
 def _line_numbers_of(line: str) -> list[int]:
@@ -540,9 +726,10 @@ def golden_result_set(golden_entry: rerun_report.RerunEntry) -> ResultSet:
             golden_entry.path,
             [
                 _background(),
-                # Expected IN the manifest: a literal ``failed`` step, which
-                # both today's rule and the widened failure vocabulary the
-                # review mandates treat as a failure.
+                # Expected IN the manifest: a literal ``failed`` step, the one
+                # spelling the baseline's own run carries.  The rest of the
+                # failure vocabulary is exercised where it is the subject, by
+                # test_every_failure_status_selects_the_scenario.
                 _scenario(first, statuses=(PASSED, FAILED, SKIPPED)),
                 _background(),
                 # Expected OUT: nothing here is ``failed``.
@@ -802,6 +989,53 @@ def test_the_failure_vocabulary_is_exactly_the_measured_one() -> None:
     assert not rerun_report.is_failure_status(None)
 
 
+def test_the_manifests_failure_rule_is_the_shared_models_rule() -> None:
+    """The manifest and the report surfaces grade one status once.
+
+    ``is_failure_status`` no longer compares against a private vocabulary: it
+    asks :func:`app.reporting.aggregation.is_failure_token`, which
+    canonicalises the recorded name through the shared status table and tests
+    membership of the complement of Cucumber's ``Status.isOk()``.
+    :data:`FAILURE_STATUSES` therefore *states* the membership and no longer
+    decides it, and this test holds the two to each other over every name
+    either side knows -- the seven Cucumber statuses, the ten behave-only
+    aliases, this module's three redundant spellings, a blank and an invented
+    token -- so a change on either side fails here instead of silently making
+    ``rerun.txt`` disagree with ``cucumber.json`` and with both HTML
+    artifacts.  Were this to fail, one run would be graded twice: a scenario
+    the report calls a failure would not be offered for retry, or one it calls
+    a pass would be retried.
+    """
+    vocabulary = sorted(
+        {
+            *aggregation.KNOWN_STATUSES,
+            *aggregation.STATUS_ALIASES,
+            *rerun_report.FAILURE_STATUSES,
+            *rerun_report.STATUS_SPELLINGS,
+            aggregation.UNKNOWN_STATUS,
+            "",
+            "no-such-status",
+        }
+    )
+
+    for status in vocabulary:
+        stated = rerun_report.normalize_status(status) in rerun_report.FAILURE_STATUSES
+        assert rerun_report.is_failure_status(status) is stated, status
+        assert rerun_report.is_failure_status(status) is (
+            aggregation.is_failure_token(status)
+        ), status
+    # The set is exactly the recorded names whose canonical token is a failure.
+    assert {
+        status
+        for status in vocabulary
+        if aggregation.canonical_status(status) in aggregation.FAILURE_TOKENS
+    } >= rerun_report.FAILURE_STATUSES
+    # ``normalize_status`` keeps its spelling-only contract: it folds a name,
+    # never an outcome, and answers ``""`` for a node that carries none.
+    assert rerun_report.normalize_status("  HOOK_ERROR ") == "hook_error"
+    assert rerun_report.normalize_status(None) == ""
+
+
 @pytest.mark.parametrize("status", sorted(FAILING_STATUSES))
 def test_every_failure_status_selects_the_scenario(status: str) -> None:
     """Each member of the vocabulary really does reach the manifest.
@@ -855,6 +1089,63 @@ def test_a_redundant_status_spelling_is_folded_before_the_rule_applies(
     )
 
     assert rerun_report.build_rerun_lines(result_set) == expected
+
+
+def test_a_dry_run_selects_the_scenario_whose_step_resolved_to_nothing() -> None:
+    """The measured ``--dry-run`` rule, which behave's own statuses cannot give.
+
+    Measured against Cucumber-JVM 7.2.3 (``io.cucumber.core.cli.Main`` with
+    the ``rerun:`` and ``json:`` plugins): under ``dryRun`` a **matched** step
+    is reported ``passed`` and an **unmatched** one ``undefined`` with an empty
+    ``match``, and the rerun formatter then records the scenario holding the
+    undefined step and no other.  behave instead records ``untested`` for
+    every step of a dry run, so a writer that read the recorded status alone
+    produced an **empty** manifest for a run with unresolved step definitions
+    -- measured in this port before the rule was shared: one dry run wrote
+    nineteen ``passed`` steps into ``cucumber.json`` while the manifest
+    selected nothing.
+
+    Both halves are asserted from one document, so the rule cannot be
+    satisfied by selecting everything: the scenario whose steps all matched is
+    absent, and the one holding the unmatched step is present with its own
+    line.  Were this to fail, ``run-tests --dry-run --rerun`` would offer
+    nothing to retry for a suite whose step definitions do not resolve.
+    """
+    resolved_line = 12
+    unresolved_line = 24
+    result_set = _result_set(
+        _feature(
+            SALES_FEATURE,
+            [
+                _scenario(resolved_line, statuses=(DRY_RUN_RECORDED_STATUS,)),
+                _dry_run_unmatched_scenario(unresolved_line),
+            ],
+        ),
+        dry_run=True,
+    )
+
+    lines = rerun_report.build_rerun_lines(result_set)
+
+    assert lines == [
+        f"{paths.FILE_URI_SCHEME}{_feature_path(SALES_FEATURE)}"
+        f"{rerun_report.LINE_SEPARATOR}{unresolved_line}"
+    ]
+    _assert_manifest_shape(lines)
+    assert str(resolved_line) not in _line_numbers_as_text(lines[0])
+    # And the same document read as an ordinary run selects nothing at all:
+    # ``untested`` is not a failure, which is what keeps every scenario of a
+    # dry run out of the manifest when its definitions do resolve.
+    assert rerun_report.build_rerun_lines(
+        _result_set(
+            _feature(
+                SALES_FEATURE,
+                [
+                    _scenario(resolved_line, statuses=(DRY_RUN_RECORDED_STATUS,)),
+                    _dry_run_unmatched_scenario(unresolved_line),
+                ],
+            )
+        )
+    ) == []
 
 
 def test_a_feature_without_failures_contributes_no_line_at_all() -> None:
@@ -1105,9 +1396,11 @@ def test_an_unusable_scenario_line_is_logged_and_omitted(
     losing the other three artifacts with it -- or emit a line that selects
     nothing.
 
-    A *fractional* line is deliberately not among these cases; see
-    :func:`test_a_fractional_scenario_line_never_selects_another_elements_line`
-    for what is asserted about it and why.
+    A *fractional* line is not among these cases: it coerces to a positive
+    integer and is therefore emitted rather than skipped.  See
+    :func:`test_a_fractional_scenario_line_is_truncated_and_never_rounded` for
+    what that settles and why the collector's own integer check is what keeps
+    such a value out of a real run.
     """
     element = _scenario(9, statuses=(FAILED,))
     element["line"] = bad_line
@@ -1121,44 +1414,43 @@ def test_an_unusable_scenario_line_is_logged_and_omitted(
     assert caplog.records[-1].levelno == logging.WARNING
 
 
-def test_a_fractional_scenario_line_is_dropped_or_rendered_truthfully() -> None:
-    """A fractional line is either refused or truncated -- never rounded.
+def test_a_fractional_scenario_line_is_truncated_and_never_rounded() -> None:
+    """A fractional line truncates to ``int(line)``, and that is the contract.
 
     ``app/reporting/rerun_report.py`` coerces an element's ``line`` with
-    ``int()``, so a fractional ``9.5`` becomes ``9``: a positive integer, and
-    therefore emitted rather than skipped.  Whether it should instead be
-    refused belongs to that module's owner, whose input-validation findings
-    move malformed values from tolerated to rejected, so this module pins
-    neither outcome -- only one of them is in the tree today and both are
-    defensible.
+    ``int()``, so ``9.5`` becomes ``9``: a positive integer, and therefore
+    emitted rather than skipped.  Truncation is the settled outcome rather than
+    one of two, because the *other* route into the writer is closed:
+    ``app/reporting/events.py`` validates an element's ``line`` with an
+    integer check that rejects a ``float`` outright, so a fractional value
+    cannot arrive from a loaded result document at all.  What remains is a
+    document built in process -- this test, or a caller holding the builders --
+    and for that the coercion is what happens, so it is what is asserted.
 
-    What is asserted is the whole of what both settlements share: the
-    selection is either empty, or exactly ``int(line)``.  A value rounded *up*
-    would be the dangerous outcome, because ``10`` is a line the document never
-    carried and may well be another scenario's -- the manifest would then retry
-    a scenario that passed while leaving the one that failed unretried, which
-    is worse than a short manifest.
+    Truncation, not rounding, is the property worth pinning of the two: ``10``
+    is a line the document never carried and may well be another scenario's, so
+    a value rounded *up* would retry a scenario that passed while leaving the
+    one that failed unretried -- worse than a short manifest.
 
-    One hazard is recorded here rather than asserted, because no assertion can
-    hold under both settlements: truncation can *coincide* with a neighbouring
-    element's line, and while it does, that neighbour is what a rerun selects.
-    That is a property of the coercion in the module under test, not of this
-    manifest format, and refusing a fractional line is what removes it.
+    One hazard of the coercion is recorded rather than asserted, because it is
+    a consequence of truncation and not a separate behaviour: where a
+    neighbouring element genuinely sits at the truncated line, a fractional
+    value selects **that neighbour**, indistinguishably from a manifest that
+    named it.  Nothing downstream can detect it, which is why the integer check
+    in the collector -- and not an assertion here -- is what keeps such a value
+    out of a real run.
     """
     failing = _scenario(9, statuses=(FAILED,))
     failing["line"] = 9.5
     result_set = _result_set(_feature(CRM_FEATURE, [failing]))
 
-    lines = rerun_report.build_rerun_lines(result_set)
+    (line,) = rerun_report.build_rerun_lines(result_set)
 
-    selected = _line_numbers_of(lines[0]) if lines else []
-    assert selected in ([], [9]), (
-        "a fractional element line produced a selection that is neither empty "
-        f"nor the truncation of it: {selected}"
-    )
-    assert 10 not in selected, (
-        "a fractional line was rounded up to a line the document never carried"
-    )
+    assert _line_numbers_of(line) == [9]
+    assert rerun_report.parse_rerun_text(
+        rerun_report.build_rerun_text(result_set), source=SOURCE_LABEL
+    ) == [rerun_report.RerunEntry(path=_feature_path(CRM_FEATURE), lines=(9,))]
+    _assert_manifest_shape([line])
 
 
 def test_a_feature_uri_supplies_the_path_when_path_is_absent(
@@ -1562,7 +1854,7 @@ def _write_undecodable(root: Path) -> Path:
     ("prepare", "expected_cause"),
     [
         (lambda root: root / "absent.txt", FileNotFoundError),
-        (lambda root: root, IsADirectoryError),
+        (lambda root: root, paths.ArtifactPathError),
         (lambda root: _write_undecodable(root), UnicodeDecodeError),
     ],
     ids=["absent", "directory", "invalid-utf-8"],
@@ -1576,6 +1868,15 @@ def test_an_unreadable_manifest_raises_with_the_cause_chained(
     the diagnosis available for the log without letting the raw exception reach
     the caller.  Were this to fail, ``--rerun`` against a deleted or corrupted
     manifest would crash instead of reporting and exiting ``0``.
+
+    The three causes are the three distinct ways the read can fail, and the
+    middle one is a *refusal* rather than a fault: a directory where the
+    manifest should be is refused by ``app/utils/paths.py``'s no-follow reader,
+    which raises ``ArtifactPathError`` -- an ``OSError`` subclass -- for every
+    entry that is not a regular file with a single name.  Pinning that type
+    rather than ``IsADirectoryError`` is pinning *where* the refusal comes
+    from: a plain ``open()`` would report the platform's errno, and this read
+    never reaches one.
     """
     source = prepare(tmp_artifact_root)
 
@@ -1681,7 +1982,14 @@ def test_a_default_read_drops_an_entry_no_feature_file_backs(
         f"{_feature_path(CRM_FEATURE)}:9"
     ]
     warnings = [record.getMessage() for record in caplog.records]
-    assert any(SALES_FEATURE in message for message in warnings), warnings
+    # The drop is reported by the entry's one-based position in the manifest,
+    # and the manifest's own path text is not reproduced: an entry is
+    # untrusted machine input and this record is written to stderr and kept
+    # verbatim by a CI console, so the position is the provenance a diagnostic
+    # carries (CWE-532, CWE-117).  Position 2 is the Sales entry, the second
+    # of the two the manifest holds.
+    assert any("Dropping entry 2" in message for message in warnings), warnings
+    assert not any(SALES_FEATURE in message for message in warnings), warnings
 
     # The lexical tier alone still accepts it: the grammar is satisfied, and it
     # is the filesystem that refuses it.  Asserting both is what distinguishes
@@ -1699,86 +2007,186 @@ def test_a_default_read_drops_an_entry_no_feature_file_backs(
     [
         BEHAVE_RERUN_HEADER,
         "# a hand-written annotation",
-        "#",
+        rerun_report.COMMENT_PREFIX,
         "   # indented comment",
     ],
     ids=["behave-header", "annotation", "bare-marker", "indented"],
 )
-def test_a_comment_line_never_becomes_a_selection(line: str) -> None:
-    """Integrity property, asserted so that it holds either way.
+def test_a_comment_line_is_refused_and_selects_nothing(line: str) -> None:
+    """A comment is rejected through the one error channel, not skipped.
 
-    The module's docstring today says the parser *tolerates* a comment so that
-    a hand-annotated file, or one left by behave's own rerun formatter, can
-    still be read; a review finding wants such a line *rejected* instead.  Both
-    are acceptable outcomes and the property that matters is the same under
-    each: a comment never turns into a feature location.  Were this to fail,
-    behave's header would be handed to a runner as a path -- selecting nothing
-    at best, and an unintended file at worst.
+    The grammar has no comment.  This writer emits none, and the one thing that
+    realistically produces one is behave's own rerun formatter, whose
+    ``# -- RERUN:`` header means the *remaining* lines are in behave's
+    ungrouped, unprefixed form -- so a parser that skipped the header would go
+    on to read the rest of that file as this format and select a scenario set
+    nobody asked for.  Rejecting the line refuses the whole document instead,
+    which is why the valid entry below is also not returned: one error channel,
+    reported on stderr, and the run still exits ``0`` per the AAP 0.4.1 exit
+    table.
+
+    The offending line is placed **second** so the position in the message is
+    the line's own and not the constant ``1`` every single-line case would
+    produce.  Were this to fail, behave's header would be handed to a runner as
+    a path -- selecting nothing at best, and an unintended file at worst.
     """
     good = f"{paths.FILE_URI_SCHEME}{_feature_path(CRM_FEATURE)}:9"
 
-    try:
-        entries = rerun_report.parse_rerun_lines([line, good], source="mixed")
-    except rerun_report.RerunManifestError as error:
-        # Rejection is the other acceptable outcome, and it is pinned as
-        # tightly as acceptance: the error has to name the source and the text
-        # it refused, because the exit table reports this on stderr and an
-        # operator has to be able to find the line.
-        assert "mixed" in str(error)
-        assert line.strip() in str(error) or repr(line.strip()) in str(error)
-        return
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_lines([good, line], source=SOURCE_LABEL)
 
-    # Acceptance, pinned exactly: the comment contributes nothing at all, and
-    # the only selection is the one the valid line asked for.
-    for entry in entries:
-        for fragment in NEVER_IN_A_SELECTED_PATH:
-            assert fragment not in entry.path
-    assert [entry.path for entry in entries] == [_feature_path(CRM_FEATURE)]
-    assert [entry.lines for entry in entries] == [(9,)]
+    _assert_names_the_source_and_the_position(raised.value, number=2)
 
 
 @pytest.mark.parametrize(
     "line",
     [
-        "/etc/passwd:9",
-        "file:/etc/passwd:9",
-        "file:../../etc/passwd:9",
-        "file:./Crm.feature:9",
-        "C:\\Windows\\win.ini:9",
+        BEHAVE_RERUN_HEADER,
+        "# a hand-written annotation",
+        "   # indented comment",
+        f"# {paths.FILE_URI_SCHEME}/etc/shadow:9",
     ],
-    ids=["absolute", "absolute-scheme", "traversal", "dot-slash", "windows"],
+    ids=["behave-header", "annotation", "indented", "commented-out-entry"],
 )
-def test_a_non_contract_path_never_invents_a_selection(line: str) -> None:
-    """Integrity property for path shapes the parser may start rejecting.
+def test_a_refused_comment_is_not_reproduced_in_the_diagnostic(
+    line: str,
+) -> None:
+    """The refusal says *that* it was a comment, never what the comment said.
 
-    Acceptance of a line without the ``file:`` prefix, of an absolute path or
-    of a ``..`` component is deliberately *not* pinned here -- a review finding
-    moves those from tolerated to rejected.  What is pinned is what neither
-    behaviour may violate: the parser either rejects the line through its one
-    error channel, or it returns only locations spelled out in the input, never
-    a path it composed itself.  Were this to fail, a damaged manifest could
-    steer a rerun at a file the run never touched.
+    A security property rather than a style one, and the reason it is asserted
+    separately from the rejection above: this message is written to stderr and
+    recorded verbatim in a Jenkins console log, and the manifest is untrusted
+    machine input.  Echoing the refused bytes is how a tampered file forges a
+    console record or exfiltrates its payload into one (CWE-117, CWE-532).  An
+    operator locates the entry by the position the message *does* carry.
+
+    Every case here carries data beyond the comment marker itself -- the
+    marker is the module's own fixed vocabulary and naturally appears in the
+    message -- so the absence asserted is the absence of attacker-controlled
+    text.  Were this to fail, a manifest line could write anything it liked
+    into a CI record.
     """
-    try:
-        entries = rerun_report.parse_rerun_lines([line], source="hostile")
-    except rerun_report.RerunManifestError as error:
-        # Rejection, pinned: one error channel, naming the source, so the
-        # command-line surface can report it and still exit 0 per the exit
-        # table.
-        assert "hostile" in str(error)
-        return
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_lines([line], source=SOURCE_LABEL)
 
-    # Acceptance, pinned: the parser is transparent and never creative.  Every
-    # path and every line number it returns is spelled out in the input, and
-    # the addressable form it hands a runner reproduces the input rather than
-    # composing a new location.
-    for entry in entries:
-        assert entry.path in line
-        for number in entry.lines:
-            assert str(number) in line
-        for location in entry.locations:
-            assert location.rsplit(rerun_report.LINE_SEPARATOR, 1)[0] in line
-            assert paths.FILE_URI_SCHEME not in location
+    message = str(raised.value)
+    payload = line.strip().removeprefix(rerun_report.COMMENT_PREFIX).strip()
+    assert payload, "this case carries no data whose absence could be asserted"
+    assert payload not in message
+    assert line.strip() not in message
+
+
+#: The path shapes the grammar refuses, each with the part of it that is
+#: **data** -- the fragment a diagnostic must not reproduce.  The first five
+#: are the shapes a hostile or foreign manifest actually takes; the rest walk
+#: the remaining refusals of the lexical tier, so that every branch of the
+#: accepted-entry rule is exercised from the parser's own entry point rather
+#: than only through the validator.
+#:
+#: Composed from ``paths.FILE_URI_SCHEME`` rather than typed out, for the
+#: reason :func:`test_this_module_names_no_feature_directory_prefix` states.
+NON_CONTRACT_LINES: Final[tuple[tuple[str, str, str], ...]] = (
+    ("no-scheme-absolute", "/etc/passwd:9", "/etc/passwd"),
+    ("absolute", f"{paths.FILE_URI_SCHEME}/etc/passwd:9", "/etc/passwd"),
+    ("traversal", f"{paths.FILE_URI_SCHEME}../../etc/passwd:9", "etc/passwd"),
+    (
+        "dot-slash",
+        f"{paths.FILE_URI_SCHEME}.{paths.NORMALIZED_FEATURES_PREFIX[-1]}"
+        f"{CRM_FEATURE}:9",
+        CRM_FEATURE,
+    ),
+    ("windows", "C:\\Windows\\win.ini:9", "Windows"),
+    (
+        "hidden-component",
+        f"{paths.FILE_URI_SCHEME}{_feature_path('.' + CRM_FEATURE)}:9",
+        CRM_FEATURE,
+    ),
+    (
+        "nested",
+        f"{paths.FILE_URI_SCHEME}{_feature_path('deeper')}"
+        f"{paths.NORMALIZED_FEATURES_PREFIX[-1]}{CRM_FEATURE}:9",
+        "deeper",
+    ),
+    (
+        "doubled-separator",
+        f"{paths.FILE_URI_SCHEME}{paths.NORMALIZED_FEATURES_PREFIX}"
+        f"{paths.NORMALIZED_FEATURES_PREFIX[-1]}{CRM_FEATURE}:9",
+        CRM_FEATURE,
+    ),
+    (
+        "padded-component",
+        f"{paths.FILE_URI_SCHEME}{_feature_path(' ' + CRM_FEATURE)}:9",
+        CRM_FEATURE,
+    ),
+    (
+        "not-gherkin",
+        f"{paths.FILE_URI_SCHEME}{_feature_path('secrets.txt')}:9",
+        "secrets.txt",
+    ),
+    # A name that is nothing but the suffix is refused as a *hidden* component,
+    # since the suffix begins with a dot -- the earlier of the two rules that
+    # would each refuse it, and the one the message therefore names.
+    (
+        "suffix-only-name",
+        f"{paths.FILE_URI_SCHEME}{_feature_path(rerun_report.FEATURE_SUFFIX)}:9",
+        rerun_report.FEATURE_SUFFIX,
+    ),
+    (
+        "backslash",
+        f"{paths.FILE_URI_SCHEME}{_feature_path('C')}\\{CRM_FEATURE}:9",
+        CRM_FEATURE,
+    ),
+    (
+        "control-character",
+        f"{paths.FILE_URI_SCHEME}{_feature_path('Bell\a')}:9",
+        "Bell",
+    ),
+    (
+        "line-terminator",
+        f"{paths.FILE_URI_SCHEME}{_feature_path('Split\u2028' + CRM_FEATURE)}:9",
+        "Split",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("line", "payload"),
+    [(line, payload) for _, line, payload in NON_CONTRACT_LINES],
+    ids=[case_id for case_id, _, _ in NON_CONTRACT_LINES],
+)
+def test_a_non_contract_path_is_refused_and_never_echoed(
+    line: str, payload: str
+) -> None:
+    """A path outside the grammar is rejected, and nothing else is returned.
+
+    The accepted entry is exactly the scheme, one Gherkin file directly inside
+    the features directory, and one or more line numbers; every other shape is
+    refused through ``RerunManifestError``.  That is not tidiness: ``--rerun``
+    appends these locations to the engine's argv, so an entry naming an
+    absolute path or a ``..`` component would direct execution at Gherkin
+    outside the authoritative feature tree (CWE-22).  Refusal is also
+    *whole-document*, which is why no entry list is returned to inspect -- and
+    why the sibling assertions about a *stale but well-formed* entry, which is
+    dropped rather than raised on, live in
+    :func:`test_a_default_read_drops_an_entry_no_feature_file_backs`.
+
+    The diagnostic is asserted at the same time, because both halves of it are
+    load-bearing: it locates the entry by source and position, and it
+    reproduces no part of the refused path.  The ``payload`` of each case is
+    the fragment that is *data* -- the path, or the component that provoked the
+    refusal -- so its absence is the absence of attacker-controlled text and
+    not merely of a punctuation mark the message may legitimately name.
+
+    Were this to fail, a damaged manifest could steer a rerun at a file the run
+    never touched, or write its own text into a CI console record.
+    """
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_lines([line], source=SOURCE_LABEL)
+
+    _assert_names_the_source_and_the_position(raised.value, number=1)
+    message = str(raised.value)
+    assert payload not in message
+    assert line not in message
 
 
 def test_the_round_trip_selects_exactly_the_scenarios_that_failed(
@@ -1812,39 +2220,101 @@ def test_the_round_trip_selects_exactly_the_scenarios_that_failed(
 def test_the_round_trip_of_a_background_only_failure(
     tmp_artifact_root: Path,
 ) -> None:
-    """Observed behaviour, recorded rather than assumed.
+    """The whole chain for a Background-only failure, against a JVM baseline.
 
-    When the only failing step lies in a Background occurrence, this port's
-    writer rolls the failure up into the scenario that immediately follows it
-    and the manifest selects **that scenario's** line; the round trip therefore
-    returns exactly one location per scenario preceded by a failed Background.
-    That is what was measured here, and it is what this test pins.
+    **The baseline, measured.** Cucumber-JVM 7.2.3 (``io.cucumber.core.cli.Main``
+    with the ``rerun:`` and ``json:`` plugins) was run over a feature whose
+    Background step fails and whose two following scenarios hold steps that
+    would pass.  It wrote the manifest as :data:`JVM_BACKGROUND_ONLY_MANIFEST`
+    -- the two **scenario** lines, grouped on one line for the feature, and the
+    Background's own line absent -- while its JSON carried the Background
+    element with the failed step (result keys
+    :data:`JVM_FAILED_STEP_RESULT_KEYS`) and each scenario's own steps as
+    ``skipped`` with result keys exactly :data:`JVM_SKIPPED_STEP_RESULT_KEYS`,
+    no ``duration`` among them, and **no element carrying a status field at
+    all** (:data:`JVM_ELEMENT_STATUS_KEY_ABSENT`).
 
-    The wider parity question is noted and deliberately not asserted: the port
-    and Cucumber-JVM may differ in how a failed Background surfaces in a
-    scenario's rolled-up *status* elsewhere in the pipeline, and no live JVM run
-    was available to settle it.  Were this test to fail, a background failure
-    would either be unretryable or would select a Background's own line, which
-    is not an addressable test case.
+    So the element *shape* is settled and this port already emits it: what the
+    parity question was really about is every **derived** reading of that
+    scenario, and this test asserts all four of them from one document --
+
+    1. the events document as built: the Background's step ``failed``, the
+       scenario's own steps ``skipped``;
+    2. the JSON this port emits, against the shape above
+       (``app/reporting/cucumber_json.py`` is imported **read-only**);
+    3. the rolled-up scenario reading -- ``effective_status`` and
+       ``effective_verdict`` on the element, and the summary counting that
+       scenario as **failed** rather than as skipped;
+    4. the manifest, which selects the scenario's line and never the
+       Background's, and round-trips through the parser to the same location.
+
+    Were this to fail, one Background failure would be graded differently
+    depending on which artifact a reader opened -- the disagreement this chain
+    exists to rule out -- or a background failure would be unretryable, or the
+    manifest would name a Background's line, which is not an addressable test
+    case.
     """
+    blocked_line = 9
+    passing_line = 16
     result_set = _result_set(
         _feature(
             CRM_FEATURE,
             [
-                _background(statuses=(FAILED,)),
-                _scenario(9, statuses=(SKIPPED, SKIPPED)),
+                _failed_background_occurrence(),
+                _scenario(blocked_line, statuses=(SKIPPED, SKIPPED)),
                 _background(statuses=(PASSED,)),
-                _scenario(16, statuses=(PASSED,)),
+                _scenario(passing_line, statuses=(PASSED,)),
             ],
         )
     )
 
+    # 1. The document as the collector builds it: no element carries a status,
+    #    and the failure is recorded where it happened.
+    occurrence, blocked = result_set["features"][0]["elements"][:2]
+    assert occurrence["steps"][0]["result"]["status"] == FAILED
+    assert [step["result"]["status"] for step in blocked["steps"]] == [
+        SKIPPED,
+        SKIPPED,
+    ]
+    assert JVM_ELEMENT_STATUS_KEY_ABSENT not in blocked
+
+    # 2. The JSON artifact, in the JVM's measured shape.
+    emitted = cucumber_json.build_cucumber_json(result_set)
+    emitted_background, emitted_blocked = emitted[0]["elements"][:2]
+    assert set(emitted_background["steps"][0]["result"]) == (
+        JVM_FAILED_STEP_RESULT_KEYS
+    )
+    assert emitted_background["steps"][0]["result"]["status"] == FAILED
+    for step in emitted_blocked["steps"]:
+        assert tuple(step["result"]) == JVM_SKIPPED_STEP_RESULT_KEYS
+        assert step["result"]["status"] == SKIPPED
+    for element in emitted[0]["elements"]:
+        assert JVM_ELEMENT_STATUS_KEY_ABSENT not in element
+
+    # 3. The rolled-up scenario reading, from the shared model.
+    decorated = aggregation.decorate_feature(result_set["features"][0])
+    rolled_up = decorated["elements"][1]
+    assert rolled_up[aggregation.EFFECTIVE_STATUS_KEY] == FAILED
+    assert rolled_up[aggregation.EFFECTIVE_VERDICT_KEY] == aggregation.VERDICT_FAILED
+    assert rolled_up["status"] == SKIPPED, "the element's own reading is unchanged"
+    summary = aggregation.build_summary([decorated])
+    assert summary["scenarios"]["by_status"] == {FAILED: 1, PASSED: 1}
+
+    # 4. The manifest, and the round trip back out of it.
     written = rerun_report.write_rerun_txt(result_set, base=tmp_artifact_root)
+    text = written.read_text(encoding="utf-8")
 
     assert rerun_report.rerun_locations(written) == [
-        f"{_feature_path(CRM_FEATURE)}:9"
+        f"{_feature_path(CRM_FEATURE)}{rerun_report.LINE_SEPARATOR}{blocked_line}"
     ]
-    assert str(BACKGROUND_LINE) not in written.read_text(encoding="utf-8")
+    assert str(BACKGROUND_LINE) not in text
+    assert str(passing_line) not in text
+    # The grammar the JVM's own manifest demonstrates: one ``file:``-prefixed
+    # line for the feature, carrying scenario lines and nothing else.
+    assert JVM_BACKGROUND_ONLY_MANIFEST.startswith(paths.FILE_URI_SCHEME)
+    assert text.startswith(paths.FILE_URI_SCHEME)
+    assert text.count(rerun_report.LINE_ENDING) == 1
+    _assert_manifest_shape(text.splitlines())
 
 
 def test_the_round_trip_needs_no_file_at_all() -> None:
@@ -2115,11 +2585,16 @@ def test_the_module_surface_is_addressable_and_complete() -> None:
     import rather than any assertion in this module.
 
     The surface is grouped by what each name is for, because the module now
-    publishes three rules rather than one: the grammar's tokens and its two
+    publishes four rules rather than one: the grammar's tokens and its two
     directions, the failure vocabulary stated once so the writer and any
-    consumer compare the same set, and the two tiers of the confinement, which
-    are public because ``app/services/test_run_service.py`` holds single
-    locations as well as whole manifests.
+    consumer compare the same set, the two tiers of the confinement -- public
+    because ``app/services/test_run_service.py`` holds single locations as well
+    as whole manifests, and because a caller about to *read* a feature needs
+    the verified object rather than a name to reopen -- and the bounds, which
+    are published so a caller can state the same figures rather than guess
+    them: a manifest is machine input an earlier run wrote, and a tampered one
+    is bounded in bytes, lines, distinct features, path length and feature
+    size rather than trusted.
     """
     grammar = {
         "COMMENT_PREFIX",
@@ -2148,10 +2623,21 @@ def test_the_module_surface_is_addressable_and_complete() -> None:
     }
     confinement = {
         "FORBIDDEN_PATH_CHARACTERS",
+        "VerifiedFeature",
+        "list_verified_features",
+        "read_verified_feature",
         "resolve_feature_path",
         "validate_feature_path",
+        "verify_feature_identity",
     }
-    expected = grammar | vocabulary | confinement
+    bounds = {
+        "MAX_FEATURE_BYTES",
+        "MAX_FEATURE_PATH_CHARACTERS",
+        "MAX_MANIFEST_BYTES",
+        "MAX_MANIFEST_ENTRIES",
+        "MAX_MANIFEST_LINES",
+    }
+    expected = grammar | vocabulary | confinement | bounds
 
     assert set(rerun_report.__all__) == expected
     assert len(rerun_report.__all__) == len(set(rerun_report.__all__))
@@ -2163,6 +2649,16 @@ def test_the_module_surface_is_addressable_and_complete() -> None:
     assert rerun_report.FAILED_STATUS == "failed"
     assert rerun_report.FEATURE_SUFFIX == ".feature"
     assert issubclass(rerun_report.RerunManifestError, RuntimeError)
+
+    # Every published bound is a usable positive count.  A bound that arrived
+    # as ``None`` or ``0`` would refuse every manifest ever written, and a
+    # ``bool`` -- an ``int`` subclass -- would refuse everything but a
+    # single-byte one; what each bound *is* is asserted by behaviour in
+    # section 7 rather than by repeating its figure here.
+    for name in sorted(bounds):
+        bound = getattr(rerun_report, name)
+        assert isinstance(bound, int) and not isinstance(bound, bool), name
+        assert bound > 0, name
 
 
 def test_iter_failed_scenarios_pairs_each_failure_with_its_feature() -> None:
@@ -2200,3 +2696,1660 @@ def test_iter_failed_scenarios_pairs_each_failure_with_its_feature() -> None:
     assert all(
         element["type"] == ELEMENT_TYPE_SCENARIO for _, element in pairs
     )
+
+
+# =========================================================================== #
+# Section 7 -- the write authority: what the bytes travel through to reach disk
+#
+# Section 5 asserts *where* the manifest goes; this section asserts *how* it
+# gets there.  The writer no longer prepares the parent directory and then
+# names the pathname a second time to a builtin ``open``: between those two
+# steps a symbolic or hard link put in the manifest's place redirected the
+# write, and the truncation the open performed destroyed the target before any
+# check could refuse it (CWE-367/CWE-59).  Every write now goes through
+# ``app.utils.paths.open_artifact_write``, which creates and verifies each
+# owned directory component under a *held* directory descriptor, opens the
+# final entry relative to that descriptor with ``O_NOFOLLOW``, and truncates
+# only once the descriptor is known to hold a lone regular file.
+#
+# Each hostile case below asserts *two* things: that the write was refused,
+# and that the file outside the artifact root is byte-for-byte as it was.  An
+# exception raised after the outside inode had already been emptied would
+# satisfy ``pytest.raises`` and still be exactly the defect.
+#
+# The manifest's own byte contract is unchanged and is asserted where it
+# already was: ``test_written_file_equals_the_golden_manifest_byte_for_byte``
+# compares what reaches disk with the committed baseline.
+# =========================================================================== #
+
+#: Whether this platform can create a symbolic link.  The redirection cases
+#: need a real one and there is no honest way to fake it; a platform without
+#: symbolic links cannot be attacked through one either, so skipping is the
+#: truthful outcome rather than a gap.
+SYMLINKS_AVAILABLE: Final[bool] = hasattr(os, "symlink")
+
+#: Whether this platform can create a hard link.  A destination that *is* a
+#: file elsewhere is refused for its link count, and that destination cannot be
+#: prepared where :func:`os.link` is absent.
+HARD_LINKS_AVAILABLE: Final[bool] = hasattr(os, "link")
+
+#: Whether POSIX permission bits carry meaning here.  Windows expresses
+#: permissions as ACLs, where the owner-only creation policy has nothing to
+#: apply and nothing to assert.
+MODES_ENFORCED: Final[bool] = hasattr(os, "fchmod")
+
+#: Name of the file planted *outside* the artifact root for a hostile link to
+#: point at.  The manifest names the scenarios that failed, so redirecting this
+#: writer writes the run's failure record into someone else's file as well as
+#: destroying that file's content.
+OUTSIDE_NAME: Final[str] = "outside.txt"
+
+#: Content of that file: distinctive enough that finding it anywhere else -- or
+#: finding it gone, or emptied -- is unambiguous.
+OUTSIDE_CONTENT: Final[bytes] = b"kept\n"
+
+
+def _plant_outside_file(directory: Path) -> Path:
+    """Create the file a hostile link points at, outside the artifact root.
+
+    :param directory: A temporary directory that is **not** the artifact root
+        -- pytest's ``tmp_path``, of which the root is a subdirectory.
+    :returns: The path of the planted file.
+    """
+    outside = directory / OUTSIDE_NAME
+    outside.write_bytes(OUTSIDE_CONTENT)
+    return outside
+
+
+def _permission_bits(path: Path) -> int:
+    """The permission bits of ``path``, without its file type.
+
+    :param path: Entry to inspect.
+    :returns: ``st_mode`` masked to the twelve permission and special bits.
+    """
+    return path.stat().st_mode & 0o7777
+
+
+def _assert_owner_only(path: Path) -> None:
+    """Assert that nothing but the owner can reach ``path``.
+
+    The group and other bits are asserted absent rather than the whole mode
+    asserted equal to ``0o700``: a set-group-id build directory keeps that bit
+    -- it grants the group nothing once the access bits are gone -- and the
+    policy is about access, not about one exact integer.
+
+    :param path: Entry to check.
+    """
+    bits = _permission_bits(path)
+    assert bits & paths.ARTIFACT_MODE_MASK == 0, (
+        f"{path} is reachable by the group or by others: {oct(bits)}"
+    )
+    assert bits & 0o700, f"{path} is not reachable by its owner: {oct(bits)}"
+
+
+@pytest.mark.skipif(
+    not MODES_ENFORCED,
+    reason="this platform expresses permissions as ACLs, so the policy does not apply",
+)
+def test_the_written_manifest_and_the_directory_above_it_are_owner_only(
+    tmp_artifact_root: Path,
+) -> None:
+    """The manifest is created ``0o600`` beneath an owner-only ``target/``.
+
+    The file names the scenarios that failed, which is run evidence, and the
+    ambient ``0o644`` under an ambient ``0o755`` the review measured hands it
+    to every local account (CWE-732/CWE-359).  The directory is asserted as
+    well as the file: a world-readable build-output directory discloses which
+    artifacts a run produced even where their contents are tight.  Were this to
+    fail, a shared build agent would publish one run's failures to the next
+    tenant of the workspace.
+    """
+    result_set = _run([(CRM_FEATURE, [(9, FAILED), (24, FAILED)])])
+
+    written = rerun_report.write_rerun_txt(result_set, base=tmp_artifact_root)
+
+    assert _permission_bits(written) == paths.ARTIFACT_FILE_MODE
+    _assert_owner_only(written)
+    _assert_owner_only(paths.target_root(tmp_artifact_root))
+
+
+@pytest.mark.skipif(
+    not MODES_ENFORCED,
+    reason="this platform expresses permissions as ACLs, so the policy does not apply",
+)
+def test_a_permissive_manifest_from_an_earlier_run_is_tightened_on_rewrite(
+    tmp_artifact_root: Path,
+) -> None:
+    """``--no-clean`` over a permissive manifest does not keep its bits.
+
+    The case a creation mode cannot reach: the mode argument applies only to a
+    file the open *creates*, so a run rewriting the manifest an earlier run
+    left behind would inherit whatever that run's umask produced.  The
+    tightening is made through the descriptor the write holds and before the
+    truncation, so the bits are gone before the new content exists.  Were this
+    to fail, the ``--no-clean`` path would silently keep publishing the failure
+    record of every run after the first.
+    """
+    written = rerun_report.write_rerun_txt(
+        _run([(CRM_FEATURE, [(9, FAILED)])]), base=tmp_artifact_root
+    )
+    os.chmod(written, 0o644)
+    os.chmod(paths.target_root(tmp_artifact_root), 0o755)
+    second = _run([(NOTES_FEATURE, [(7, FAILED)])])
+
+    rewritten = rerun_report.write_rerun_txt(second, base=tmp_artifact_root)
+
+    assert rewritten == written
+    assert _permission_bits(written) == paths.ARTIFACT_FILE_MODE
+    _assert_owner_only(paths.target_root(tmp_artifact_root))
+    assert written.read_bytes() == rerun_report.build_rerun_text(second).encode(
+        "utf-8"
+    )
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create a symbolic link to be redirected through",
+)
+def test_a_symlinked_destination_is_refused_and_the_outside_file_survives(
+    prepared_artifact_root: Path, tmp_path: Path
+) -> None:
+    """A link standing where the manifest goes is refused, target untouched.
+
+    The deterministic case from the security review: with the manifest's name
+    occupied by a symbolic link to a writable file outside the artifact root, a
+    builtin ``open`` follows it and truncates that file before it returns a
+    stream.  The refusal alone is not the property -- the outside file's bytes
+    are asserted afterwards, because the finding is the overwrite and not the
+    exception.  Were this to fail, a run would empty an arbitrary file the
+    account can write and record its failures there.
+    """
+    outside = _plant_outside_file(tmp_path)
+    destination = paths.rerun_txt_path(prepared_artifact_root)
+    os.symlink(outside, destination)
+    result_set = _run([(CRM_FEATURE, [(9, FAILED)])])
+
+    with pytest.raises(paths.ArtifactPathError) as refusal:
+        rerun_report.write_rerun_txt(result_set, base=prepared_artifact_root)
+
+    # An OSError subclass, so the writer's documented contract and the AAP
+    # 0.4.1 writer-failure exit class are unchanged by the refusal.
+    assert isinstance(refusal.value, OSError)
+    assert outside.read_bytes() == OUTSIDE_CONTENT
+    assert destination.is_symlink()
+
+
+@pytest.mark.skipif(
+    not HARD_LINKS_AVAILABLE,
+    reason="this platform cannot create a hard link, so that destination cannot exist",
+)
+def test_a_hard_linked_destination_is_refused_and_the_outside_file_survives(
+    prepared_artifact_root: Path, tmp_path: Path
+) -> None:
+    """A destination that *is* a file elsewhere is refused for its link count.
+
+    The case no symbolic-link check can see: nothing in the path is a link, the
+    entry is an ordinary regular file, and writing it in place would overwrite
+    the outside inode it shares.  A ``--no-clean`` run over a tree someone else
+    prepared is exactly how the manifest's name comes to carry a second link.
+    Were this to fail, the write would land in a file outside the artifact root
+    with no link anywhere for a link check to find.
+    """
+    outside = _plant_outside_file(tmp_path)
+    destination = paths.rerun_txt_path(prepared_artifact_root)
+    os.link(outside, destination)
+    result_set = _run([(CRM_FEATURE, [(9, FAILED)])])
+
+    with pytest.raises(paths.ArtifactPathError) as refusal:
+        rerun_report.write_rerun_txt(result_set, base=prepared_artifact_root)
+
+    assert isinstance(refusal.value, OSError)
+    assert outside.read_bytes() == OUTSIDE_CONTENT
+    assert destination.read_bytes() == OUTSIDE_CONTENT
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create a symbolic link to be redirected through",
+)
+def test_a_symlinked_build_output_directory_is_refused_with_nothing_written(
+    tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """A linked ``target/`` writes nothing into the directory it points at.
+
+    The parent half of the same race: a component of the path, rather than the
+    final entry, is the link.  A verification that releases its descriptor
+    before the write cannot refuse this at all -- the manifest lands wherever
+    the link points -- so the opener refuses the component as it descends, and
+    the directory it pointed at is asserted still empty.  Were this to fail, a
+    junction or link planted on the build-output directory would relocate the
+    whole artifact set.
+    """
+    outside_directory = tmp_path / "outside-tree"
+    outside_directory.mkdir()
+    os.symlink(outside_directory, paths.target_root(tmp_artifact_root))
+    result_set = _run([(CRM_FEATURE, [(9, FAILED)])])
+
+    with pytest.raises(paths.ArtifactPathError) as refusal:
+        rerun_report.write_rerun_txt(result_set, base=tmp_artifact_root)
+
+    assert isinstance(refusal.value, OSError)
+    assert list(outside_directory.iterdir()) == []
+
+
+@pytest.mark.skipif(
+    not HARD_LINKS_AVAILABLE,
+    reason="this platform cannot create a hard link, so that destination cannot exist",
+)
+def test_a_refused_rewrite_leaves_the_previous_manifest_whole(
+    tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """Nothing is emptied before the destination has been established.
+
+    The ordering property behind the whole route: ``open(..., "w")`` truncates
+    as part of the open, so by the time any check could refuse something the
+    previous manifest is already gone.  The opener leaves ``O_TRUNC`` out,
+    verifies the descriptor it obtained and truncates last, so a refused write
+    costs the run nothing -- and ``--rerun`` still reads the manifest the last
+    successful run published.  Were this to fail, a refusal would replace a
+    usable failure record with an empty file.
+    """
+    first = _run([(CRM_FEATURE, [(9, FAILED), (24, FAILED)])])
+    written = rerun_report.write_rerun_txt(first, base=tmp_artifact_root)
+    published = written.read_bytes()
+    # A second link to the manifest, from outside the root: the entry stays an
+    # ordinary regular file, so only its link count reveals that writing it
+    # would also write somewhere else.
+    outside = tmp_path / OUTSIDE_NAME
+    os.link(written, outside)
+
+    with pytest.raises(paths.ArtifactPathError):
+        rerun_report.write_rerun_txt(
+            _run([(NOTES_FEATURE, [(7, FAILED)])]), base=tmp_artifact_root
+        )
+
+    assert written.read_bytes() == published
+    assert rerun_report.parse_rerun_text(
+        published.decode("utf-8"), source="published"
+    ) == [rerun_report.RerunEntry(path=_feature_path(CRM_FEATURE), lines=(9, 24))]
+    assert outside.read_bytes() == published
+
+
+def test_the_writer_reaches_disk_only_through_the_path_authority(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One write route, named once, carrying the manifest's byte contract.
+
+    Asserted two ways, because each catches what the other cannot.  The source
+    of the function is read to show that the builtin opener, and the
+    check-then-open pair it belonged to, are simply absent -- a hardened writer
+    API with no consumer protects nothing.  The call is then intercepted to
+    show that the destination handed to the authority is the one
+    ``paths.rerun_txt_path`` resolved, with ``utf-8`` and ``LINE_ENDING``
+    passed explicitly rather than left to the opener's defaults: the manifest's
+    bytes are machine input to a second runner and must not start depending on
+    a default changing elsewhere.  Were this to fail, the write would have
+    drifted back onto a pathname the opener never verified.
+    """
+    body = inspect.getsource(rerun_report.write_rerun_txt).replace(
+        rerun_report.write_rerun_txt.__doc__ or "", ""
+    )
+    assert "open_artifact_write(" in body
+    assert "open(" not in body
+    assert "ensure_parent" not in body
+
+    calls: list[tuple[Any, dict[str, Any]]] = []
+
+    def recording(destination: Any, **options: Any) -> Any:
+        calls.append((destination, options))
+        return paths.open_artifact_write(destination, **options)
+
+    monkeypatch.setattr(
+        "app.reporting.rerun_report.open_artifact_write", recording
+    )
+    result_set = _run([(CRM_FEATURE, [(9, FAILED)])])
+
+    written = rerun_report.write_rerun_txt(result_set, base=tmp_artifact_root)
+
+    assert calls == [
+        (
+            paths.rerun_txt_path(tmp_artifact_root),
+            {"encoding": "utf-8", "newline": rerun_report.LINE_ENDING},
+        )
+    ]
+    assert written.read_bytes() == rerun_report.build_rerun_text(
+        result_set
+    ).encode("utf-8")
+
+# Section 8 -- the bounded verified read, and the verified feature resolution
+#
+# Everything above reads the manifest as *text*.  This section reads it as a
+# **file**, which is a different problem: the manifest sits at a well-known
+# location inside a CI workspace, anything with local write access can put
+# something else there, and whatever it holds is what a second run executes
+# (``FailedTestRunner.java:11``).  So the read is no-follow, single-link,
+# regular-file-only and bounded, and every entry it returns has been opened and
+# checked as an object rather than resolved as a name.
+#
+# The two hazards these tests exist for, both of them measurable only through
+# the filesystem:
+#
+# * a *link* -- at the manifest's own location, at the features root, or at an
+#   entry -- lets contents from outside the workspace choose the scenarios that
+#   execute (CWE-59, CWE-22);
+# * a *swap between the check and the use* lets an approved file be replaced by
+#   another before the engine opens it (CWE-367), which is why the
+#   verified-read surface hands back the content and the identity it read
+#   rather than a path to reopen.
+#
+# The bounds are asserted from both sides -- one input at the bound is
+# accepted, one input past it is refused -- because a bound asserted only from
+# the refusing side would still pass if it had been tightened to zero.
+# =========================================================================== #
+
+#: Whether this platform can create a named pipe.  POSIX-only; the AAP requires
+#: Windows as well (AAP 0.8), and a case that cannot be set up there is skipped
+#: rather than failed.
+HAS_NAMED_PIPES: Final[bool] = hasattr(os, "mkfifo")
+
+#: Whether this platform can create a hard link.
+HAS_HARD_LINKS: Final[bool] = hasattr(os, "link")
+
+#: Whether a wall-clock deadline can be imposed on a call in this process.
+#: ``SIGALRM`` is POSIX-only, which is the same platform set as the named pipe
+#: the deadline exists to guard.
+HAS_REFUSAL_DEADLINE: Final[bool] = hasattr(signal, "SIGALRM") and hasattr(
+    signal, "setitimer"
+)
+
+#: Seconds a refusal is allowed to take.  Generous by three orders of
+#: magnitude -- every refusal here is one ``open`` and one ``fstat`` -- because
+#: the number is not a performance assertion: it is the difference between a
+#: regression that *fails* and one that hangs the suite until the CI job is
+#: killed, which is what opening a named pipe without ``O_NONBLOCK`` does.
+REFUSAL_DEADLINE_SECONDS: Final[float] = 15.0
+
+#: Body of the file a hostile manifest, or a linked features root, points at.
+#: Distinct from :data:`GHERKIN_STANDIN` so that a test can assert this text
+#: never reaches a caller.
+OUTSIDE_GHERKIN: Final[str] = "Feature: scenarios this run never selected\n"
+
+
+@contextmanager
+def _refusal_deadline(seconds: float = REFUSAL_DEADLINE_SECONDS) -> Iterator[None]:
+    """Fail the call inside rather than let it block for ever.
+
+    Used for the named-pipe cases.  Opening a FIFO for reading blocks until a
+    writer appears, so a reader that lost its ``O_NONBLOCK`` would not produce
+    a wrong answer -- it would produce *no* answer, and a test asserting only
+    the exception type would hang instead of failing.  The deadline converts
+    that into a ``TimeoutError`` the test reports.
+
+    The previous handler and any timer already running are restored, so nothing
+    leaks into the next test.
+
+    Where the platform has no ``SIGALRM`` -- Windows, which the AAP also
+    requires (AAP 0.8) -- the body runs unguarded, and every case whose *hazard*
+    is blocking is skipped there by :data:`HAS_REFUSAL_DEADLINE` instead.  That
+    keeps this a guard rather than a second skip condition each caller has to
+    repeat.
+
+    :param seconds: The deadline.
+    :yields: Nothing; the guarded call runs in the body.
+    :raises TimeoutError: If the body has not returned within ``seconds``.
+    """
+    if not HAS_REFUSAL_DEADLINE:
+        yield
+        return
+
+    def _expire(signal_number: int, frame: Any) -> None:
+        raise TimeoutError(
+            f"the call did not return within {seconds}s, so it blocked rather "
+            "than refusing its input"
+        )
+
+    previous_handler = signal.signal(signal.SIGALRM, _expire)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def _symlink_or_skip(source: Path, destination: Path) -> None:
+    """Create a symbolic link, or skip the test where that is not permitted.
+
+    Windows can create one only with a privilege an unelevated agent does not
+    hold, and the AAP requires the suite to run there (AAP 0.8).  A skip is the
+    honest outcome: the case cannot be *set up*, which is different from the
+    behaviour being absent, and the production code's refusal of a link is
+    asserted on every platform that can plant one.
+
+    :param source: What the link points at.
+    :param destination: Where the link is created.
+    """
+    try:
+        os.symlink(source, destination)
+    except (AttributeError, NotImplementedError, OSError) as error:
+        pytest.skip(f"this platform cannot create a symbolic link: {error!r}")
+
+
+def _features_root(root: Path) -> Path:
+    """Create and return the features directory beneath ``root``.
+
+    The location comes from ``app/utils/paths.py``, never from a literal, for
+    the reason :func:`test_this_module_names_no_feature_directory_prefix`
+    states.
+
+    :param root: A temporary checkout root.
+    :returns: The existing features directory.
+    """
+    directory = paths.features_dir(root)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory
+
+
+def _write_feature(
+    root: Path, filename: str, body: str = GHERKIN_STANDIN
+) -> Path:
+    """Write one stand-in feature file into ``root``'s features directory.
+
+    :param root: A temporary checkout root.
+    :param filename: The feature file's name.
+    :param body: Its contents.
+    :returns: The path written.
+    """
+    location = _features_root(root) / filename
+    location.write_text(body, encoding="utf-8")
+    return location
+
+
+def _manifest_path(root: Path) -> Path:
+    """Return the manifest's own location beneath ``root``, parent created.
+
+    The location and the parent both come from ``app/utils/paths.py``: the
+    accessor the writer and the reader share, and the port's own
+    parent-creating helper, so the fixture cannot drift from the production
+    layout.
+
+    :param root: A temporary checkout root.
+    :returns: The manifest's location; its parent directory exists.
+    """
+    manifest = paths.rerun_txt_path(root)
+    paths.ensure_parent(manifest)
+    return manifest
+
+
+def _entry_line(filename: str, line: int) -> str:
+    """Return one well-formed manifest line for ``filename``.
+
+    :param filename: A feature file's name.
+    :param line: The failing scenario's line number.
+    :returns: The line, terminator included.
+    """
+    return (
+        f"{paths.FILE_URI_SCHEME}{_feature_path(filename)}"
+        f"{rerun_report.LINE_SEPARATOR}{line}{rerun_report.LINE_ENDING}"
+    )
+
+
+def test_a_linked_manifest_is_refused_and_its_target_selects_nothing(
+    tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """A symbolic link at the manifest's location is refused, not followed.
+
+    The manifest is machine input at a known path inside a CI workspace, so a
+    link planted there is how contents from outside the workspace choose the
+    scenarios a rerun executes (CWE-59).  The link here points at a file whose
+    entry is *entirely well formed* and whose feature really exists in the
+    tree, so nothing about the grammar or the confinement would have refused
+    it: the read is what refuses, before the first byte reaches the parser.
+
+    Were this to fail, ``--rerun`` would execute a scenario set chosen by
+    whoever could write one file next to the workspace.
+    """
+    outside = tmp_path / "outside-manifest.txt"
+    outside.write_text(_entry_line(CONTACT_FEATURE, 19), encoding="utf-8")
+    _write_feature(tmp_artifact_root, CONTACT_FEATURE)
+    manifest = _manifest_path(tmp_artifact_root)
+    _symlink_or_skip(outside, manifest)
+
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_file(base=tmp_artifact_root)
+
+    # The refusal comes from the path authority's no-follow reader, and the
+    # cause is chained so a log keeps the diagnosis.
+    assert isinstance(raised.value.__cause__, paths.ArtifactPathError)
+    message = str(raised.value)
+    assert str(manifest) in message
+    # Nothing of what the link pointed at is disclosed: not its contents, and
+    # not the feature it would have selected.
+    assert CONTACT_FEATURE not in message
+    with pytest.raises(rerun_report.RerunManifestError):
+        rerun_report.rerun_locations(base=tmp_artifact_root)
+    # And the link's target is left exactly as it was -- a read, refused, is
+    # not a write.
+    assert outside.read_text(encoding="utf-8") == _entry_line(
+        CONTACT_FEATURE, 19
+    )
+
+
+@pytest.mark.skipif(
+    not (HAS_NAMED_PIPES and HAS_REFUSAL_DEADLINE),
+    reason="this platform has no named pipes, or no deadline to guard them with",
+)
+def test_a_named_pipe_manifest_is_refused_rather_than_blocking(
+    tmp_artifact_root: Path,
+) -> None:
+    """A FIFO at the manifest's location returns a refusal, not a hang.
+
+    The denial-of-service half of the same hazard: a named pipe opened for
+    reading blocks until a writer appears, so a manifest replaced by one would
+    stall the command indefinitely -- before any check could refuse it and with
+    no diagnostic at all (CWE-400).  The path authority opens with
+    ``O_NONBLOCK`` for exactly this, and the descriptor's ``fstat`` then refuses
+    the entry as non-regular.
+
+    The deadline is what makes this a *test* rather than a hazard of its own:
+    a regression fails inside :func:`_refusal_deadline` instead of hanging the
+    suite until CI kills the job.
+    """
+    manifest = _manifest_path(tmp_artifact_root)
+    os.mkfifo(manifest)
+
+    with _refusal_deadline():
+        with pytest.raises(rerun_report.RerunManifestError) as raised:
+            rerun_report.parse_rerun_file(base=tmp_artifact_root)
+
+    assert isinstance(raised.value.__cause__, paths.ArtifactPathError)
+    assert str(manifest) in str(raised.value)
+
+
+def test_a_manifest_one_byte_over_the_byte_bound_is_refused(
+    tmp_artifact_root: Path,
+) -> None:
+    """``MAX_MANIFEST_BYTES`` is enforced before the grammar is consulted.
+
+    A tampered or foreign file at the manifest's location can be arbitrarily
+    large, and reading it whole to discover that is the defect: at most the
+    bound plus one byte is taken in, and one byte past the bound is a refusal
+    (CWE-400).  Asserted from both sides, because a bound that had been
+    tightened to nothing would still refuse the over-sized file.
+
+    The padding is whitespace, which the grammar tolerates, so the refusal can
+    only be the byte bound -- and the entry that precedes it is backed by a
+    real feature file, so the accepted case returns a genuine selection rather
+    than an empty list.
+    """
+    _write_feature(tmp_artifact_root, CRM_FEATURE)
+    entry = _entry_line(CRM_FEATURE, 9).encode("utf-8")
+    padding = rerun_report.MAX_MANIFEST_BYTES - len(entry) - 1
+    at_bound = entry + b" " * padding + rerun_report.LINE_ENDING.encode("utf-8")
+    assert len(at_bound) == rerun_report.MAX_MANIFEST_BYTES
+    manifest = _manifest_path(tmp_artifact_root)
+
+    manifest.write_bytes(at_bound)
+    assert rerun_report.parse_rerun_file(base=tmp_artifact_root) == [
+        rerun_report.RerunEntry(path=_feature_path(CRM_FEATURE), lines=(9,))
+    ]
+
+    manifest.write_bytes(at_bound + b" ")
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_file(base=tmp_artifact_root)
+
+    message = str(raised.value)
+    assert str(rerun_report.MAX_MANIFEST_BYTES) in message
+    assert str(manifest) in message
+
+
+def test_a_manifest_with_more_lines_than_the_bound_is_refused(
+    tmp_artifact_root: Path,
+) -> None:
+    """``MAX_MANIFEST_LINES`` bounds the work a tampered file can demand.
+
+    The byte bound alone would still admit thousands of minimal entries, each
+    costing a validation pass and an entry object, so the line count is stated
+    as a number of its own rather than left to follow from the bytes.  The file
+    built here stays *well under* the byte bound, which is what makes the line
+    bound the thing being measured; every line is the same valid entry, so the
+    accepted case merges to exactly one selection and the refused case differs
+    from it by one line and nothing else.
+    """
+    _write_feature(tmp_artifact_root, CRM_FEATURE)
+    entry = _entry_line(CRM_FEATURE, 9)
+    at_bound = entry * rerun_report.MAX_MANIFEST_LINES
+    assert len(at_bound.encode("utf-8")) < rerun_report.MAX_MANIFEST_BYTES
+    manifest = _manifest_path(tmp_artifact_root)
+
+    manifest.write_text(at_bound, encoding="utf-8")
+    assert rerun_report.parse_rerun_file(base=tmp_artifact_root) == [
+        rerun_report.RerunEntry(path=_feature_path(CRM_FEATURE), lines=(9,))
+    ]
+
+    manifest.write_text(at_bound + entry, encoding="utf-8")
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_file(base=tmp_artifact_root)
+
+    message = str(raised.value)
+    assert str(rerun_report.MAX_MANIFEST_LINES) in message
+    assert str(manifest) in message
+
+
+def test_a_manifest_naming_more_features_than_the_bound_is_refused(
+    tmp_artifact_root: Path,
+) -> None:
+    """``MAX_MANIFEST_ENTRIES`` bounds the fan-out of a rerun.
+
+    One entry per distinct feature file, and the lexical tier confines every
+    entry to one flat directory, so this is the number of feature files a
+    manifest may direct a rerun at: this repository has ten (AAP 0.4.1), and a
+    file naming more than the bound describes a tree that does not exist.
+
+    The accepted case is read with the filesystem tier switched off, because a
+    bound's worth of distinct names cannot all be backed by real files without
+    the test writing a feature tree this repository does not have; the bound is
+    a property of the *grammar* pass, which runs before any confinement, and
+    the refused case goes through the production read to show that it is
+    reached there too.
+    """
+    names = [
+        f"Fanout{index}{rerun_report.FEATURE_SUFFIX}"
+        for index in range(rerun_report.MAX_MANIFEST_ENTRIES + 1)
+    ]
+    at_bound = "".join(_entry_line(name, 9) for name in names[:-1])
+    assert len(at_bound.encode("utf-8")) < rerun_report.MAX_MANIFEST_BYTES
+    manifest = _manifest_path(tmp_artifact_root)
+
+    manifest.write_text(at_bound, encoding="utf-8")
+    accepted = rerun_report.parse_rerun_file(manifest, confine=False)
+    assert len(accepted) == rerun_report.MAX_MANIFEST_ENTRIES
+    assert [entry.path for entry in accepted] == [
+        _feature_path(name) for name in names[:-1]
+    ]
+
+    manifest.write_text(at_bound + _entry_line(names[-1], 9), encoding="utf-8")
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_file(base=tmp_artifact_root)
+
+    message = str(raised.value)
+    assert str(rerun_report.MAX_MANIFEST_ENTRIES) in message
+    assert str(manifest) in message
+
+
+def test_a_feature_path_longer_than_the_bound_is_refused(
+    tmp_artifact_root: Path,
+) -> None:
+    """``MAX_FEATURE_PATH_CHARACTERS`` bounds one entry's path.
+
+    An entry can satisfy every other rule of the grammar and still be megabytes
+    long, and the cost of that is paid twice: once by the validator walking it
+    and once by the diagnostic that would otherwise interpolate it (CWE-400,
+    CWE-532).  With the bound in place every accepted path -- and therefore
+    every message that mentions one -- is bounded by construction.
+
+    The accepted case is asserted in memory rather than through a file, because
+    a name at the bound exceeds what any filesystem this port runs on will
+    accept as a filename: the bound is deliberately above ``NAME_MAX``, so a
+    path at it can be *parsed* but could never name a file, which is the whole
+    reason anything longer is refused rather than looked for.
+    """
+    filler = "x" * (
+        rerun_report.MAX_FEATURE_PATH_CHARACTERS
+        - len(paths.NORMALIZED_FEATURES_PREFIX)
+        - len(rerun_report.FEATURE_SUFFIX)
+    )
+    at_bound = _feature_path(f"{filler}{rerun_report.FEATURE_SUFFIX}")
+    assert len(at_bound) == rerun_report.MAX_FEATURE_PATH_CHARACTERS
+
+    assert rerun_report.parse_rerun_lines(
+        [f"{paths.FILE_URI_SCHEME}{at_bound}{rerun_report.LINE_SEPARATOR}9"],
+        source=SOURCE_LABEL,
+    ) == [rerun_report.RerunEntry(path=at_bound, lines=(9,))]
+
+    over_bound = _feature_path(f"x{filler}{rerun_report.FEATURE_SUFFIX}")
+    assert len(over_bound) == rerun_report.MAX_FEATURE_PATH_CHARACTERS + 1
+    manifest = _manifest_path(tmp_artifact_root)
+    manifest.write_text(
+        f"{paths.FILE_URI_SCHEME}{over_bound}"
+        f"{rerun_report.LINE_SEPARATOR}9{rerun_report.LINE_ENDING}",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_file(base=tmp_artifact_root)
+
+    message = str(raised.value)
+    assert str(rerun_report.MAX_FEATURE_PATH_CHARACTERS) in message
+    assert f"line {1}" in message
+    # The over-long path is not reproduced -- which is the point of bounding it.
+    assert over_bound not in message
+    assert filler not in message
+
+
+def test_read_verified_feature_returns_the_object_it_checked(
+    tmp_artifact_root: Path,
+) -> None:
+    """The verified read hands back content and identity, not a name.
+
+    This is the whole point of the surface: a caller about to parse a feature
+    -- ``app/services/test_run_service.py``, which expands outlines and
+    evaluates tags -- receives the bytes that were read **from the descriptor
+    that was checked**, so its decision is a fact about the approved object
+    rather than about whatever the name resolved to a moment later (CWE-367).
+    The path it also carries is the spelling every artifact uses, so no caller
+    rebuilds it.
+
+    Were this to fail, a caller would be back to reopening a name, which is the
+    check-then-reopen sequence this tier exists to remove.
+    """
+    body = "Feature: the only content that may reach a caller\n"
+    location = _write_feature(tmp_artifact_root, CRM_FEATURE, body=body)
+
+    feature = rerun_report.read_verified_feature(
+        _feature_path(CRM_FEATURE), base=tmp_artifact_root
+    )
+
+    assert feature is not None
+    assert feature.text == body
+    assert feature.path == _feature_path(CRM_FEATURE)
+    assert feature.location == location
+    # The identity is more than device-and-inode: an inode number alone is
+    # recycled by the filesystem, which is the swap
+    # test_verify_feature_identity_refuses_a_replaced_entry demonstrates.
+    assert len(feature.identity) > 2
+    assert all(isinstance(member, int) for member in feature.identity)
+    assert rerun_report.verify_feature_identity(
+        feature.path, feature.identity, base=tmp_artifact_root
+    )
+
+
+def test_an_unvalidatable_path_is_refused_before_any_filesystem_call(
+    tmp_artifact_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The lexical tier runs first, and a refusal there is reported, not raised.
+
+    Every entry point of the filesystem tier applies
+    ``validate_feature_path`` before it touches the filesystem, and turns its
+    typed error into the tolerated outcome the AAP 0.4.1 exit table describes:
+    ``None`` or ``False``, with the reason on the module logger that
+    ``app/logging_config.py`` routes to stderr.  Were this to fail, a caller
+    holding one hostile location would get an exception where the exit table
+    promises a report -- or, worse, a filesystem call made on an unvalidated
+    name.
+    """
+    _write_feature(tmp_artifact_root, CRM_FEATURE)
+    outside = f"..{paths.NORMALIZED_FEATURES_PREFIX[-1]}{CRM_FEATURE}"
+
+    with caplog.at_level(logging.WARNING, logger=rerun_report.logger.name):
+        assert (
+            rerun_report.read_verified_feature(outside, base=tmp_artifact_root)
+            is None
+        )
+        assert (
+            rerun_report.resolve_feature_path(outside, base=tmp_artifact_root)
+            is None
+        )
+        assert not rerun_report.verify_feature_identity(
+            outside, (0,), base=tmp_artifact_root
+        )
+        assert (
+            rerun_report.read_verified_feature(None, base=tmp_artifact_root)
+            is None
+        )
+
+    assert len(caplog.records) == 4
+    for record in caplog.records:
+        assert record.levelno == logging.WARNING
+
+
+def test_a_linked_features_root_is_refused_by_every_entry_point(
+    tmp_artifact_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The trust anchor is opened no-follow, so a link in its place is refused.
+
+    The defect a pathname check cannot fix: resolving the features directory
+    *follows* a link standing where it should be, and the linked-to directory
+    then becomes the anchor every entry is judged inside -- so an entry naming
+    one Gherkin file in the authoritative tree resolves to someone else's
+    scenarios and passes every test of the grammar (CWE-22).  All four entry
+    points refuse it, because all four reach the same no-follow open of the
+    root, and a default manifest read therefore drops the entry rather than
+    handing its locations to the engine.
+
+    Were this to fail, one symbolic link would redirect an entire rerun.
+    """
+    elsewhere = tmp_path / "somebody-elses-features"
+    elsewhere.mkdir()
+    (elsewhere / CRM_FEATURE).write_text(OUTSIDE_GHERKIN, encoding="utf-8")
+    _symlink_or_skip(elsewhere, paths.features_dir(tmp_artifact_root))
+    entry = _feature_path(CRM_FEATURE)
+
+    with caplog.at_level(logging.WARNING, logger=rerun_report.logger.name):
+        assert (
+            rerun_report.read_verified_feature(entry, base=tmp_artifact_root)
+            is None
+        )
+        assert (
+            rerun_report.resolve_feature_path(entry, base=tmp_artifact_root)
+            is None
+        )
+        assert not rerun_report.verify_feature_identity(
+            entry, (0,), base=tmp_artifact_root
+        )
+        listed, problems = rerun_report.list_verified_features(
+            tmp_artifact_root
+        )
+
+    assert listed == []
+    assert len(problems) == 1
+    assert paths.FEATURES_DIR_NAME in problems[0]
+    # The outside scenarios never reach a caller through any of them.
+    for record in caplog.records:
+        assert OUTSIDE_GHERKIN.strip() not in record.getMessage()
+
+    manifest = _manifest_path(tmp_artifact_root)
+    manifest.write_text(_entry_line(CRM_FEATURE, 9), encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger=rerun_report.logger.name):
+        assert rerun_report.parse_rerun_file(base=tmp_artifact_root) == []
+        assert rerun_report.rerun_locations(base=tmp_artifact_root) == []
+    # The line was never malformed -- the lexical tier still accepts it -- so
+    # what refused it is the filesystem tier and nothing else.
+    assert rerun_report.parse_rerun_file(manifest, confine=False) == [
+        rerun_report.RerunEntry(path=entry, lines=(9,))
+    ]
+
+
+def test_a_linked_entry_is_refused_by_every_entry_point(
+    tmp_artifact_root: Path, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A link *inside* the features directory is refused on the descriptor.
+
+    The same hazard one level down, and the one a "is it under the features
+    directory?" check misses entirely: the entry is inside the tree, and what
+    it points at is not.  The entry is opened ``O_NOFOLLOW`` relative to the
+    verified root, so the link is refused rather than followed, and the
+    manifest entry naming it is dropped with a diagnostic instead of being
+    handed to the engine.
+    """
+    outside = tmp_path / "outside.feature"
+    outside.write_text(OUTSIDE_GHERKIN, encoding="utf-8")
+    _features_root(tmp_artifact_root)
+    _symlink_or_skip(outside, paths.features_dir(tmp_artifact_root) / CRM_FEATURE)
+    entry = _feature_path(CRM_FEATURE)
+
+    with caplog.at_level(logging.WARNING, logger=rerun_report.logger.name):
+        assert (
+            rerun_report.read_verified_feature(entry, base=tmp_artifact_root)
+            is None
+        )
+        assert (
+            rerun_report.resolve_feature_path(entry, base=tmp_artifact_root)
+            is None
+        )
+        listed, problems = rerun_report.list_verified_features(
+            tmp_artifact_root
+        )
+
+    assert listed == []
+    assert any(CRM_FEATURE in problem for problem in problems), problems
+    for record in caplog.records:
+        assert OUTSIDE_GHERKIN.strip() not in record.getMessage()
+
+    manifest = _manifest_path(tmp_artifact_root)
+    manifest.write_text(_entry_line(CRM_FEATURE, 9), encoding="utf-8")
+    assert rerun_report.parse_rerun_file(base=tmp_artifact_root) == []
+
+
+@pytest.mark.skipif(
+    not HAS_HARD_LINKS, reason="this platform cannot create a hard link"
+)
+def test_a_hard_linked_entry_is_refused(
+    tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """An entry that is also a file elsewhere is refused by its link count.
+
+    The case no symbolic-link check can see: a hard link has no link object to
+    examine -- the entry *is* the outside file, under a second name -- so the
+    only evidence is ``st_nlink``, read from the descriptor that was opened.
+    The port's own ten features are regular files with one name each, so
+    nothing legitimate is refused by this rule.
+    """
+    outside = tmp_path / "outside.feature"
+    outside.write_text(OUTSIDE_GHERKIN, encoding="utf-8")
+    _features_root(tmp_artifact_root)
+    os.link(outside, paths.features_dir(tmp_artifact_root) / CRM_FEATURE)
+    entry = _feature_path(CRM_FEATURE)
+
+    assert (
+        rerun_report.read_verified_feature(entry, base=tmp_artifact_root)
+        is None
+    )
+    assert (
+        rerun_report.resolve_feature_path(entry, base=tmp_artifact_root) is None
+    )
+    listed, problems = rerun_report.list_verified_features(tmp_artifact_root)
+    assert listed == []
+    assert any(CRM_FEATURE in problem for problem in problems), problems
+
+    manifest = _manifest_path(tmp_artifact_root)
+    manifest.write_text(_entry_line(CRM_FEATURE, 9), encoding="utf-8")
+    assert rerun_report.parse_rerun_file(base=tmp_artifact_root) == []
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        lambda location: location.mkdir(),
+        pytest.param(
+            lambda location: os.mkfifo(location),
+            marks=pytest.mark.skipif(
+                not (HAS_NAMED_PIPES and HAS_REFUSAL_DEADLINE),
+                reason=(
+                    "this platform has no named pipes, or no deadline to "
+                    "guard them with"
+                ),
+            ),
+        ),
+    ],
+    ids=["directory", "named-pipe"],
+)
+def test_a_non_regular_entry_is_refused(
+    plant: Any, tmp_artifact_root: Path
+) -> None:
+    """Only a regular file is Gherkin a runner could execute.
+
+    A directory and a named pipe both satisfy "an entry of that name exists
+    inside the features directory", and neither is a feature: the pipe would
+    additionally *block* the selection pass on open, which is why the open
+    carries ``O_NONBLOCK`` and why the deadline guards this case too (CWE-400).
+    The refusal is on the descriptor's ``fstat``, so it holds for a device node
+    and anything else the filesystem can offer under a feature's name.
+    """
+    _features_root(tmp_artifact_root)
+    plant(paths.features_dir(tmp_artifact_root) / CRM_FEATURE)
+    entry = _feature_path(CRM_FEATURE)
+
+    with _refusal_deadline():
+        assert (
+            rerun_report.read_verified_feature(entry, base=tmp_artifact_root)
+            is None
+        )
+        assert (
+            rerun_report.resolve_feature_path(entry, base=tmp_artifact_root)
+            is None
+        )
+        listed, problems = rerun_report.list_verified_features(
+            tmp_artifact_root
+        )
+
+    # A non-regular entry is not a *refused feature* but a directory member
+    # that is not a feature at all, so it is absent from the accepted list
+    # rather than named as a problem; with nothing else in the directory, the
+    # empty-tree problem is what is reported.
+    assert listed == []
+    assert len(problems) == 1
+    assert rerun_report.FEATURE_SUFFIX in problems[0]
+
+
+def test_verify_feature_identity_refuses_a_replaced_entry(
+    tmp_artifact_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The hand-off check: the same name, a different object, refused.
+
+    The engine runs in another process and opens the feature **by name**,
+    because the AAP pins that spelling into the JSON ``uri`` and into this
+    manifest (deviation 1, AAP 0.4.2), so a descriptor cannot be handed over
+    and one window stays open by contract.  This is what closes as much of it
+    as the contract allows: the identity is re-established immediately before
+    the hand-off, so an entry swapped after selection is refused and named
+    instead of silently executed.
+
+    Both swaps are asserted because the second is the one an inode number alone
+    would miss: the file is unlinked and recreated, which the filesystem
+    routinely answers with the **same inode number**, and then overwritten in
+    place at the same size -- so ``(st_dev, st_ino)`` compares equal and only
+    the rest of the identity tuple can tell the objects apart.
+    """
+    location = _write_feature(tmp_artifact_root, CRM_FEATURE)
+    feature = rerun_report.read_verified_feature(
+        _feature_path(CRM_FEATURE), base=tmp_artifact_root
+    )
+    assert feature is not None
+    assert rerun_report.verify_feature_identity(
+        feature.path, feature.identity, base=tmp_artifact_root
+    )
+
+    # Swap one: unlinked and recreated with different contents.  The inode
+    # number is commonly recycled here, which is exactly why the identity
+    # carries the size and the timestamps as well.
+    os.unlink(location)
+    location.write_text(OUTSIDE_GHERKIN, encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger=rerun_report.logger.name):
+        assert not rerun_report.verify_feature_identity(
+            feature.path, feature.identity, base=tmp_artifact_root
+        )
+    assert caplog.records
+    assert all(
+        OUTSIDE_GHERKIN.strip() not in record.getMessage()
+        for record in caplog.records
+    )
+
+    # Swap two: the same inode and the same size, contents replaced in place.
+    # The timestamp is moved on explicitly rather than by waiting, because a
+    # filesystem's timestamp granularity is coarser than two consecutive
+    # writes and a sleep would make this assertion a race.
+    replaced = _write_feature(tmp_artifact_root, CONTACT_FEATURE)
+    before = rerun_report.read_verified_feature(
+        _feature_path(CONTACT_FEATURE), base=tmp_artifact_root
+    )
+    assert before is not None
+    with open(replaced, "r+b") as handle:
+        handle.write(b"F" * len(GHERKIN_STANDIN.encode("utf-8")))
+    information = os.stat(replaced)
+    os.utime(
+        replaced,
+        ns=(information.st_atime_ns, information.st_mtime_ns + 10**9),
+    )
+    assert os.stat(replaced).st_size == information.st_size
+    assert not rerun_report.verify_feature_identity(
+        before.path, before.identity, base=tmp_artifact_root
+    )
+
+
+def test_list_verified_features_is_canonically_ordered_and_reports_refusals(
+    tmp_artifact_root: Path, tmp_path: Path
+) -> None:
+    """The enumeration half: sorted, verified, and honest about what it dropped.
+
+    A directory listing is as re-resolvable as a manifest entry, so every entry
+    is examined relative to the verified root descriptor with links refused.
+    The order is the run's **canonical feature order** -- ascending by
+    repository-relative path -- imposed here rather than left to the
+    filesystem, because the sharding and the merge in
+    ``app/services/test_run_service.py`` both key on it: a listing that came
+    back in directory order would make a merged result set depend on the order
+    files happened to be created in.
+
+    The refusals are returned rather than raised, per the AAP 0.4.1 exit table:
+    fewer scenarios and status ``0``, with the problem reported.
+    """
+    # Created in deliberately non-alphabetical order, so a pass-through of the
+    # filesystem's own order would show.
+    for filename in (SESSION_FEATURE, CRM_FEATURE, NOTES_FEATURE):
+        _write_feature(tmp_artifact_root, filename)
+    # A file that is not Gherkin is not a feature and is not a problem either.
+    (paths.features_dir(tmp_artifact_root) / "README.txt").write_text(
+        GHERKIN_STANDIN, encoding="utf-8"
+    )
+    outside = tmp_path / "outside.feature"
+    outside.write_text(OUTSIDE_GHERKIN, encoding="utf-8")
+    _symlink_or_skip(
+        outside, paths.features_dir(tmp_artifact_root) / SALES_FEATURE
+    )
+
+    listed, problems = rerun_report.list_verified_features(tmp_artifact_root)
+
+    assert listed == sorted(
+        _feature_path(filename)
+        for filename in (SESSION_FEATURE, CRM_FEATURE, NOTES_FEATURE)
+    )
+    assert len(problems) == 1
+    assert SALES_FEATURE in problems[0]
+    assert OUTSIDE_GHERKIN.strip() not in problems[0]
+    # Every accepted path is one the grammar accepts, which is what makes the
+    # listing usable as a rerun location's path without a second check.
+    for path in listed:
+        assert rerun_report.validate_feature_path(path) == path
+
+
+def test_an_absent_or_empty_features_directory_is_reported_not_raised(
+    tmp_artifact_root: Path,
+) -> None:
+    """No features is a reported condition, never an exception.
+
+    A checkout with no features directory, or an empty one, yields no
+    scenarios; the AAP 0.4.1 exit table keeps that at status ``0`` with the
+    problem named, so the caller receives an empty list and a problem rather
+    than an ``OSError``.  Were this to fail, a run in a partially prepared
+    workspace would crash instead of reporting.
+    """
+    absent_listed, absent_problems = rerun_report.list_verified_features(
+        tmp_artifact_root
+    )
+    assert absent_listed == []
+    assert len(absent_problems) == 1
+    assert paths.FEATURES_DIR_NAME in absent_problems[0]
+
+    _features_root(tmp_artifact_root)
+    empty_listed, empty_problems = rerun_report.list_verified_features(
+        tmp_artifact_root
+    )
+    assert empty_listed == []
+    assert len(empty_problems) == 1
+    assert rerun_report.FEATURE_SUFFIX in empty_problems[0]
+
+
+def test_a_feature_file_beyond_the_byte_bound_is_refused(
+    tmp_artifact_root: Path,
+) -> None:
+    """``MAX_FEATURE_BYTES`` bounds what one entry can cost the selection pass.
+
+    The ten features in this repository total under twenty kilobytes, so a
+    file past the bound is not one of them -- and reading it whole to find that
+    out is what the bound prevents (CWE-400).  One byte over is a refusal, and
+    a refusal is the tolerated outcome: reported, not raised.  Asserted from
+    both sides, so that a bound tightened to nothing would fail here rather
+    than silently refuse every feature in the suite.
+    """
+    at_bound = "F" * rerun_report.MAX_FEATURE_BYTES
+    _write_feature(tmp_artifact_root, CRM_FEATURE, body=at_bound)
+
+    accepted = rerun_report.read_verified_feature(
+        _feature_path(CRM_FEATURE), base=tmp_artifact_root
+    )
+    assert accepted is not None
+    assert accepted.text == at_bound
+
+    _write_feature(
+        tmp_artifact_root,
+        CRM_FEATURE,
+        body=f"{at_bound}F",
+    )
+
+    assert (
+        rerun_report.read_verified_feature(
+            _feature_path(CRM_FEATURE), base=tmp_artifact_root
+        )
+        is None
+    )
+    # The entry is still *resolvable* -- it is a regular, single-linked file --
+    # so what the bound refuses is the read, which is where the cost is.
+    assert (
+        rerun_report.resolve_feature_path(
+            _feature_path(CRM_FEATURE), base=tmp_artifact_root
+        )
+        is not None
+    )
+
+
+def test_a_feature_file_that_is_not_utf_8_is_refused(
+    tmp_artifact_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Undecodable contents are refused with a position and nothing else.
+
+    A feature file is Gherkin, which is text; bytes that are not UTF-8 are not
+    a feature this port can execute, and guessing an encoding would hand the
+    engine a different document from the one on disk.  The diagnostic carries
+    the byte offset -- enough to locate the damage -- and none of the bytes.
+    """
+    location = _write_feature(tmp_artifact_root, CRM_FEATURE)
+    location.write_bytes(GHERKIN_STANDIN.encode("utf-8") + b"\xff\xfe")
+
+    with caplog.at_level(logging.WARNING, logger=rerun_report.logger.name):
+        assert (
+            rerun_report.read_verified_feature(
+                _feature_path(CRM_FEATURE), base=tmp_artifact_root
+            )
+            is None
+        )
+
+    assert caplog.records
+    assert str(len(GHERKIN_STANDIN.encode("utf-8"))) in caplog.records[
+        -1
+    ].getMessage()
+
+
+def test_a_listed_name_the_grammar_refuses_is_reported_not_accepted(
+    tmp_artifact_root: Path,
+) -> None:
+    """The listing applies the grammar too, so its output needs no second check.
+
+    A directory can hold a name the manifest grammar would never accept -- a
+    hidden file whose name is nothing but the suffix, say -- and the listing is
+    handed on as rerun locations, so it validates every name it accepts and
+    reports the rest.  Were this to fail, ``list_verified_features`` would be a
+    second, weaker statement of the accepted-entry rule.
+    """
+    _write_feature(tmp_artifact_root, CRM_FEATURE)
+    _write_feature(tmp_artifact_root, rerun_report.FEATURE_SUFFIX)
+
+    listed, problems = rerun_report.list_verified_features(tmp_artifact_root)
+
+    assert listed == [_feature_path(CRM_FEATURE)]
+    assert len(problems) == 1
+    assert rerun_report.FEATURE_SUFFIX in problems[0]
+
+
+def test_the_portable_branch_verifies_by_identity_instead(
+    tmp_artifact_root: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Where there is no descriptor-relative open, the checks still hold.
+
+    ``O_NOFOLLOW`` and ``dir_fd`` are POSIX-only and the AAP requires Windows
+    as well (AAP 0.8), so the module carries a portable branch: the links are
+    refused lexically and the descriptor is then confirmed, by ``lstat``
+    identity, to hold the object the name reported -- which is what closes the
+    window the lexical check on its own would leave.  Asserting it here is the
+    only way it is exercised on a POSIX host, and an untested platform branch
+    is a platform where the confinement is a claim rather than a behaviour.
+
+    The refusals must be the *same* refusals: a linked features root, a linked
+    entry and a non-regular entry, each rejected, and a genuine feature still
+    accepted and still read from the descriptor that was checked.
+    """
+    monkeypatch.setattr(rerun_report, "_DESCRIPTOR_RELATIVE", False)
+    _write_feature(tmp_artifact_root, CRM_FEATURE)
+    entry = _feature_path(CRM_FEATURE)
+
+    # A genuine feature is still accepted, read and listed.
+    feature = rerun_report.read_verified_feature(entry, base=tmp_artifact_root)
+    assert feature is not None
+    assert feature.text == GHERKIN_STANDIN
+    assert rerun_report.verify_feature_identity(
+        entry, feature.identity, base=tmp_artifact_root
+    )
+    assert rerun_report.list_verified_features(tmp_artifact_root) == (
+        [entry],
+        [],
+    )
+
+    # The linked features root is refused lexically on this branch, which is
+    # the stand-in for the no-follow open it cannot perform.
+    elsewhere = tmp_path / "somebody-elses-features"
+    elsewhere.mkdir()
+    (elsewhere / CRM_FEATURE).write_text(OUTSIDE_GHERKIN, encoding="utf-8")
+    linked_root = tmp_path / "linked-checkout"
+    linked_root.mkdir()
+    _symlink_or_skip(elsewhere, paths.features_dir(linked_root))
+    assert rerun_report.read_verified_feature(entry, base=linked_root) is None
+    assert rerun_report.resolve_feature_path(entry, base=linked_root) is None
+    listed, problems = rerun_report.list_verified_features(linked_root)
+    assert listed == []
+    assert len(problems) == 1
+    assert paths.FEATURES_DIR_NAME in problems[0]
+
+    # A linked entry is refused, and so is a non-regular one.
+    outside = tmp_path / "outside.feature"
+    outside.write_text(OUTSIDE_GHERKIN, encoding="utf-8")
+    location = paths.features_dir(tmp_artifact_root) / CRM_FEATURE
+    os.unlink(location)
+    _symlink_or_skip(outside, location)
+    assert (
+        rerun_report.read_verified_feature(entry, base=tmp_artifact_root)
+        is None
+    )
+    assert (
+        rerun_report.resolve_feature_path(entry, base=tmp_artifact_root) is None
+    )
+
+    os.unlink(location)
+    location.mkdir()
+    assert (
+        rerun_report.resolve_feature_path(entry, base=tmp_artifact_root) is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("segment", "case"),
+    [
+        ("0", "zero"),
+        ("-9", "negative"),
+        ("9" * (rerun_report.MAX_LINE_NUMBER_DIGITS + 1), "oversized-digits"),
+        ("٩", "non-ascii-digit"),
+        ("9 9", "embedded-space"),
+        ("9_9", "underscore-grouped"),
+        ("0x9", "hexadecimal"),
+    ],
+)
+def test_a_segment_that_is_not_a_line_number_is_refused(
+    segment: str, case: str
+) -> None:
+    """Only a plain positive ASCII integer is a scenario line number.
+
+    The narrowness is deliberate and it is what keeps the parser's error
+    channel typed: a segment that is not a line number is how the parser
+    recognises where the path ends, so every case here becomes *part of the
+    path* and is then refused by the grammar -- the colon it still carries is
+    forbidden in a path, and the digit-run bound is what keeps ``int()`` away
+    from CPython's conversion limit, which raises a bare ``ValueError`` no
+    caller of this module is expecting.
+
+    Were this to fail, ``--rerun`` would either resolve a location the document
+    never carried or exit with a traceback instead of a report.
+    """
+    line = (
+        f"{paths.FILE_URI_SCHEME}{_feature_path(CRM_FEATURE)}"
+        f"{rerun_report.LINE_SEPARATOR}{segment}"
+    )
+
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_lines([line], source=SOURCE_LABEL)
+
+    _assert_names_the_source_and_the_position(raised.value, number=1)
+    assert not isinstance(raised.value, (ValueError, OSError)), case
+    assert segment not in str(raised.value), case
+
+
+@pytest.mark.parametrize(
+    "source",
+    [9, None, object()],
+    ids=["integer", "none", "object"],
+)
+def test_a_lines_argument_that_is_not_an_iterable_is_refused(
+    source: Any,
+) -> None:
+    """The container's type is checked before its elements'.
+
+    ``parse_rerun_file`` accepts an iterable of lines so the round trip needs
+    no file, which means the container is caller-supplied and can be anything.
+    Nothing untyped may escape this module -- the AAP 0.4.1 exit table has the
+    command *recognise* a manifest problem rather than classify an exception --
+    so a non-iterable is the same typed error as a malformed line.
+    """
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_lines(source, source=SOURCE_LABEL)
+
+    assert not isinstance(raised.value, (ValueError, TypeError))
+    assert SOURCE_LABEL in str(raised.value)
+    assert type(source).__name__ in str(raised.value)
+
+
+def test_whole_text_handed_to_the_line_parser_is_refused_with_a_hint() -> None:
+    """A string is an iterable of characters, and that mistake is caught.
+
+    Iterating a manifest's whole text one character at a time would report a
+    nonsensical position for a nonsensical entry, so the string case is refused
+    by name and pointed at the function that does take whole text.  Were this
+    to fail, a caller's slip would surface as a parse error about line 47 of a
+    one-line file.
+    """
+    text = _entry_line(CRM_FEATURE, 9)
+
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_lines(text, source=SOURCE_LABEL)
+
+    assert "parse_rerun_text" in str(raised.value)
+    # The correct call is accepted, which is what makes the hint actionable.
+    assert rerun_report.parse_rerun_text(text, source=SOURCE_LABEL) == [
+        rerun_report.RerunEntry(path=_feature_path(CRM_FEATURE), lines=(9,))
+    ]
+
+
+def test_a_manifest_path_that_cannot_be_used_is_the_same_typed_error() -> None:
+    """An unusable *path* is refused like unusable contents, and stays typed.
+
+    The path is part of the contract, not just the bytes behind it: a value
+    carrying an embedded NUL survives ``Path()`` and then reaches ``os.open``
+    as a bare ``ValueError``, which is not an ``OSError`` and would otherwise
+    escape as a traceback the AAP 0.4.1 exit table has no row for.  It is
+    converted here instead; the message names the *class* of failure and the
+    original is chained, so the diagnosis survives for a log.  A value that is
+    not a path at all takes the other branch and is refused by
+    :func:`test_a_lines_argument_that_is_not_an_iterable_is_refused`.
+
+    What the message does carry is the location it was asked for -- the
+    caller's own argument, as every message in this module carries the source
+    it is talking about.  That is not the manifest's contents, which is what
+    the data-free rule is about, and in production the location is never
+    caller-supplied at all: ``--rerun`` resolves it from
+    ``app/utils/paths.py``.
+    """
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.parse_rerun_file(f"{CRM_FEATURE}\x00")
+
+    assert not isinstance(raised.value, (ValueError, TypeError, OSError))
+    assert isinstance(raised.value.__cause__, ValueError)
+    assert ValueError.__name__ in str(raised.value)
+
+
+def test_the_writer_refuses_a_worker_supplied_path_outside_the_grammar(
+    tmp_artifact_root: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The writer is held to the same grammar, and it is the harder half.
+
+    The internal result document is assembled by worker processes, so a
+    feature's ``path`` is worker-controlled input reaching a line-oriented
+    artifact: a path carrying a terminator would emit a **second, forged
+    entry** naming a feature that never failed, and a colon-bearing one
+    fabricates a line number (CWE-93/CWE-117).  Both are refused before
+    serialisation, and the refusal *propagates* -- it is the writer-failure
+    exit class of the AAP 0.4.1 table, not a test outcome -- because silently
+    dropping the entry would lose a real failure and emitting it would forge a
+    location.
+
+    Were this to fail, a worker could choose what a rerun executes.
+    """
+    forged = f"{_feature_path(CRM_FEATURE)}{rerun_report.LINE_ENDING}{_feature_path(SALES_FEATURE)}"
+    result_set = _result_set(
+        _feature_at(forged, [_scenario(9, statuses=(FAILED,))])
+    )
+
+    with caplog.at_level(logging.ERROR, logger=rerun_report.logger.name):
+        with pytest.raises(rerun_report.RerunManifestError):
+            rerun_report.write_rerun_txt(result_set, base=tmp_artifact_root)
+
+    assert caplog.records
+    assert caplog.records[-1].levelno == logging.ERROR
+    # Nothing was written: a forged entry never reaches the artifact, and a
+    # partial manifest is not published in its place.
+    assert not paths.rerun_txt_path(tmp_artifact_root).exists()
+
+
+@pytest.mark.parametrize(
+    ("source", "number", "expected"),
+    [
+        (SOURCE_LABEL, 7, f"{SOURCE_LABEL}: line 7: "),
+        (SOURCE_LABEL, None, f"{SOURCE_LABEL}: "),
+        (None, 7, "line 7: "),
+        (None, None, ""),
+    ],
+    ids=["source-and-position", "source-only", "position-only", "neither"],
+)
+def test_a_refusal_names_whatever_the_caller_could_tell_it(
+    source: str | None, number: int | None, expected: str
+) -> None:
+    """The locating half of the diagnostic, in all four combinations.
+
+    One validator serves both directions of the round trip, and they know
+    different things: the parser knows the file and the entry's position, the
+    writer knows neither -- so the prefix is built from what is available and
+    reads correctly with any part of it missing.  The position is what an
+    operator finds the entry by, given that the rest of the message
+    deliberately reproduces none of it, so a prefix that silently dropped it
+    would leave a refusal unlocatable.
+    """
+    with pytest.raises(rerun_report.RerunManifestError) as raised:
+        rerun_report.validate_feature_path(
+            f"..{paths.NORMALIZED_FEATURES_PREFIX[-1]}{CRM_FEATURE}",
+            source=source,
+            number=number,
+        )
+
+    assert str(raised.value).startswith(expected)
+    assert CRM_FEATURE not in str(raised.value)
+
+
+def test_a_features_directory_that_cannot_be_listed_is_reported(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An I/O failure while enumerating is reported, never raised.
+
+    The listing feeds the sharding, and a workspace whose permissions or mount
+    have gone wrong is not a test outcome: per the AAP 0.4.1 exit table the run
+    reports the problem and stays at status ``0`` with fewer scenarios, so no
+    ``OSError`` may escape this function.  The message names the ``errno``
+    symbol rather than the exception, whose text carries the path the call was
+    made with.
+
+    The failure is injected because it cannot be provoked otherwise on a CI
+    agent that owns its own workspace -- and injecting it is the only way the
+    handler is ever executed.
+    """
+    _write_feature(tmp_artifact_root, CRM_FEATURE)
+
+    def _refuse(*arguments: Any, **keywords: Any) -> list[str]:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "listdir", _refuse)
+
+    listed, problems = rerun_report.list_verified_features(tmp_artifact_root)
+
+    assert listed == []
+    assert len(problems) == 1
+    assert "EACCES" in problems[0]
+
+
+def test_an_entry_that_cannot_be_examined_is_reported_and_skipped(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One unexaminable entry costs its own scenarios and no others.
+
+    The same tolerance per entry rather than per directory: an entry the
+    operating system will not answer for is named and skipped, and the features
+    beside it are still enumerated, because discarding a whole listing for one
+    bad entry would drop every other feature's scenarios with it.
+    """
+    _write_feature(tmp_artifact_root, CRM_FEATURE)
+    _write_feature(tmp_artifact_root, SALES_FEATURE)
+    genuine_stat = os.stat
+
+    def _refuse_one(path: Any, **keywords: Any) -> os.stat_result:
+        if path == SALES_FEATURE or Path(str(path)).name == SALES_FEATURE:
+            raise PermissionError(13, "Permission denied")
+        return genuine_stat(path, **keywords)
+
+    monkeypatch.setattr(os, "stat", _refuse_one)
+
+    listed, problems = rerun_report.list_verified_features(tmp_artifact_root)
+
+    assert listed == [_feature_path(CRM_FEATURE)]
+    assert len(problems) == 1
+    assert SALES_FEATURE in problems[0]
+    assert "EACCES" in problems[0]
+
+
+# =========================================================================== #
+# Section 9 - what a refusal costs, and the platform branch it takes
+#
+# Two properties of the *refusal path* rather than of any single refusal.  A
+# planted entry is refused once per call and a manifest may name many, so the
+# cost of refusing has to be constant; and the portable branch - the one a
+# Windows checkout takes, which AAP 0.8 puts in the support matrix - has to
+# refuse the reparse points that platform offers, not only the symbolic links
+# a POSIX host can plant.
+# =========================================================================== #
+
+
+def _next_descriptor() -> int:
+    """Return the descriptor number a fresh open would be given.
+
+    A leak detector that needs no ``/proc``: the platform hands out the lowest
+    free descriptor, so the number a throwaway open receives rises by exactly
+    the number of descriptors that are still held.
+
+    :returns: The descriptor number, already closed again.
+    """
+    handle = os.open(os.devnull, os.O_RDONLY)
+    os.close(handle)
+    return handle
+
+
+@pytest.mark.parametrize(
+    "reader",
+    [
+        lambda entry, root: rerun_report.read_verified_feature(entry, base=root),
+        lambda entry, root: rerun_report.resolve_feature_path(entry, base=root),
+        lambda entry, root: rerun_report.verify_feature_identity(
+            entry, (0, 0, 0, 0, 0), base=root
+        ),
+    ],
+    ids=["read", "resolve", "verify-identity"],
+)
+def test_a_refused_entry_costs_no_descriptor(
+    reader: Any, tmp_artifact_root: Path
+) -> None:
+    """Refusing an entry holds nothing open (CWE-772).
+
+    The refusal happens *after* the entry is opened -- that is the whole design:
+    what is checked is the descriptor, not the name -- so every refusal has a
+    descriptor to dispose of, and a planted entry is refused on every call.  A
+    directory named like a feature is refused for its ``fstat`` and is the
+    cheapest case to repeat; forty repetitions of it held forty descriptors
+    open before ownership was made conditional on the check passing, which
+    exhausts the process limit and breaks the reads that follow.
+
+    Measured by the descriptor number a throwaway open is given, which rises
+    by exactly the number still held, so the assertion is on the *quantity*
+    leaked rather than on a platform's table of open files.
+    """
+    _features_root(tmp_artifact_root)
+    (paths.features_dir(tmp_artifact_root) / CRM_FEATURE).mkdir()
+    entry = _feature_path(CRM_FEATURE)
+
+    # One call first: the verified open imports nothing and caches nothing, but
+    # measuring after it removes any first-call allocation from the comparison.
+    assert not reader(entry, tmp_artifact_root)
+    before = _next_descriptor()
+    for _ in range(40):
+        assert not reader(entry, tmp_artifact_root)
+
+    assert _next_descriptor() == before
+
+
+def test_the_portable_branch_refuses_a_reparse_point(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A junction is refused where ``O_NOFOLLOW`` is unavailable.
+
+    The portable branch is what a Windows checkout takes, and there a
+    **junction** redirects a directory exactly as a symbolic link does while
+    ``Path.is_symlink()`` reports ``False`` for it: only the symlink reparse
+    tag satisfies that test, and a junction carries the mount-point tag.  A
+    features root replaced by a junction would therefore have passed a
+    symlink-only check and become the anchor every entry is resolved against,
+    which is the one thing that branch exists to prevent.
+
+    Windows is not this host, so the platform's answer is what is simulated --
+    an ``lstat`` result carrying a non-zero ``st_reparse_tag``, which is how
+    CPython reports any reparse point -- while the code under test is the real
+    branch, selected by turning the descriptor-relative capability off.  What
+    is asserted is the refusal, not the simulation: every entry point refuses,
+    and the listing reports the anchor rather than enumerating through it.
+    """
+    _write_feature(tmp_artifact_root, CRM_FEATURE)
+    entry = _feature_path(CRM_FEATURE)
+    monkeypatch.setattr(rerun_report, "_DESCRIPTOR_RELATIVE", False)
+
+    # The features root -- and only it -- reports itself as a reparse point.
+    root = paths.features_dir(tmp_artifact_root)
+    genuine_lstat = os.lstat
+
+    class _ReparsePoint:
+        """An ``lstat`` result that carries Windows' reparse tag."""
+
+        def __init__(self, source: os.stat_result) -> None:
+            self.st_mode = source.st_mode
+            self.st_dev = source.st_dev
+            self.st_ino = source.st_ino
+            self.st_nlink = source.st_nlink
+            self.st_size = source.st_size
+            self.st_mtime_ns = source.st_mtime_ns
+            self.st_ctime_ns = source.st_ctime_ns
+            self.st_reparse_tag = 0xA0000003
+
+    def _tagged(path: Any, **keywords: Any) -> Any:
+        result = genuine_lstat(path, **keywords)
+        if Path(str(path)) == root:
+            return _ReparsePoint(result)
+        return result
+
+    monkeypatch.setattr(os, "lstat", _tagged)
+
+    assert rerun_report.read_verified_feature(entry, base=tmp_artifact_root) is None
+    assert rerun_report.resolve_feature_path(entry, base=tmp_artifact_root) is None
+    listed, problems = rerun_report.list_verified_features(tmp_artifact_root)
+    assert listed == []
+    assert len(problems) == 1
+    assert paths.FEATURES_DIR_NAME in problems[0]
+    assert "reparse" in problems[0]

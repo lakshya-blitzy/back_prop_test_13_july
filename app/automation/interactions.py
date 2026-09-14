@@ -1,133 +1,42 @@
 r"""Keyboard and action-chain helpers - the port's only home for ``Keys`` and ``Actions``.
 
-The Python port of the ``org.openqa.selenium.Keys`` and
-``org.openqa.selenium.interactions.Actions`` usage of exactly three Java step
-classes - ``Crm.java``, ``Notes.java`` and ``Sales.java`` - at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240``, which AAP 0.2.1 holds as
-REFERENCE and this port never modifies.  ``pom.xml:36-40`` supplied those two
-Java types through ``selenium-java`` 3.141.59; ``selenium`` 4.48.0 (AAP 0.5.1,
-exact pin) supplies :class:`~selenium.webdriver.common.keys.Keys` and
-:class:`~selenium.webdriver.common.action_chains.ActionChains` here.
+``Keys`` and ``ActionChains`` are *"reached only through
+``app/automation/interactions.py``"* (AAP 0.5.2), and AAP 0.4.2 makes
+``app/automation`` the only package importing ``selenium``.  :func:`press_keys`
+supplies key constants by *name*; :func:`action_chain` hands back a builder.
 
-AAP 0.5.2 makes this module their sole home in the whole port - both are
-*"reached only through ``app/automation/interactions.py``"* - and AAP 0.4.2
-makes ``app/automation`` the only package that imports ``selenium`` at all.
-Two public helpers, and nothing else:
-
-* :func:`press_keys` supplies the key constants a step needs by *name*.
-* :func:`action_chain` hands back a fresh builder per use site.
-
-Who imports what, and why this set must not grow
-------------------------------------------------
-AAP 0.4.2 fixes the import sites precisely - *"``press_keys`` in
-``crm_steps``, ``notes_steps`` and ``sales_steps``; ``action_chain`` in
-``crm_steps`` and ``notes_steps``"* - and that table is the whole demand on
-this module:
-
-============================================  =============================
-Consumer                                      Imports from here
-============================================  =============================
-``features/steps/crm_steps.py``               ``press_keys``,
-                                              ``action_chain``
-``features/steps/notes_steps.py``             ``press_keys``,
-                                              ``action_chain``
-``features/steps/sales_steps.py``             ``press_keys`` only
-``features/steps/contacts_steps.py``          **nothing**
-the other six step modules                    **nothing**
-============================================  =============================
-
-That asymmetry is measured behaviour, not a convention: ``Crm.java:9-10`` and
+AAP 0.4.2 fixes the consumers exactly: ``press_keys`` in ``crm_steps``,
+``notes_steps`` and ``sales_steps``; ``action_chain`` in ``crm_steps`` and
+``notes_steps``.  The asymmetry is measured - ``Crm.java:9-10`` and
 ``Notes.java:9-10`` import both Java types, ``Sales.java:9`` imports ``Keys``
-alone, and ``Contacts.java`` imports neither - so ``contacts_steps.py``
-importing anything from here would be a divergence.
+alone, ``Contacts.java`` neither - so ``contacts_steps`` importing from here
+would be a divergence, and no helper no call site invokes is added.
 
-**Do not generalize.**  There is no ``scroll_to``, ``drag_and_drop``,
-``hover``, ``double_click``, ``right_click``, ``select_all`` or
-``clear_and_type``, and no convenience wrapper that no call site invokes.
-Every unused helper would be dead code that also drags down the 80 % coverage
-gate AAP 0.5.1 sets for this package.  Should a Java call site ever turn out
-to need an operation these two cannot express, the instruction is to add
-*one* helper for exactly that operation, name it ``<verb>_<object>``, export
-it from the barrel and record why - nothing speculative.
+``Keys.ENTER`` is the only member the suite names, at nine call sites in two
+shapes: ``sendKeys("New Tag", Keys.ENTER)`` (``Notes.java:35``),
+``sendKeys(name + Keys.ENTER)`` (``Sales.java:68``) and the same call carrying
+each site's own literal at ``Crm.java:36``, ``:40``, ``:76``, ``:78``, ``:80``,
+``:138`` and ``:141``.  Selenium's ``keys_to_typing`` flattens both shapes into
+one character stream, so :func:`press_keys` makes a single keyboard call.
 
-Every ``Keys`` and ``Actions`` site in the source, and what covers it
---------------------------------------------------------------------
-``Keys.ENTER`` is the only member the suite ever names, at nine call sites in
-two shapes, and both shapes are one :func:`press_keys` call:
+``Actions`` appears twice, ``Crm.java:108-115`` and ``Notes.java:78-79``, each
+building ``clickAndHold(...).pause(2000).moveToElement(...).pause(2000)
+.release().perform()``.  Those five operations are ``ActionChains``' own
+methods, so :func:`action_chain` supplies the builder and the step body
+reproduces the chain - minding that Python has no ``build()`` and that its
+``pause`` counts seconds where Java's counts milliseconds.
 
-``Notes.java:35`` - ``notesP.tagsN.sendKeys("New Tag", Keys.ENTER)``
-    ports to ``press_keys(page.tags_n, "ENTER", text="New Tag")``.
-``Sales.java:68`` - ``salesp.searchBar.sendKeys(name + Keys.ENTER)``
-    ports to ``press_keys(page.search_bar, "ENTER", text=name)``.
-``Crm.java:36``, ``:40``, ``:76``, ``:78``, ``:80``, ``:138``, ``:141``
-    the same call, each carrying that site's own literal - ``"test"``,
-    ``"8"``, the outline's opportunity, revenue and probability values,
-    ``"Test"`` and ``"aa"``.
+``Keys`` itself is deliberately not re-exported: AAP 0.4.1's barrel surface
+names ``press_keys`` and ``action_chain`` instead, and typing a literal never
+needed a Selenium import - only *naming* a key constant did.  Handing out an
+``ActionChains`` *instance* breaks nothing, the AAP 0.4.2 invariant being
+import-level and textual as ``tests/test_steps_registration.py`` checks it; the
+*class* is what must not leave, and a facade would break step-body parity.
 
-The two Java shapes differ only on the page, not on the wire: selenium's
-``keys_to_typing`` flattens every argument into one character list, so the
-argument pair ``(literal, Keys.ENTER)`` and the concatenated string
-``literal + Keys.ENTER`` produce an identical character stream.  That
-measurement is why one call carrying the whole sequence is the faithful port
-of both, and why :func:`press_keys` never splits them across two calls.
-
-``Actions`` appears twice - ``Crm.java:108-115`` and ``Notes.java:78-79`` -
-each building ``clickAndHold(...).pause(2000).moveToElement(...)
-.pause(2000).release().perform()`` over ``new Actions(Driver.getDriver())``.
-Those five operations are ``ActionChains``' own methods, so :func:`action_chain`
-supplies the builder and the step body reproduces the chain verbatim.
-
-Two notes for the step modules, because both are parity traps
--------------------------------------------------------------
-* **There is no ``build()``.**  Java 8 ``Actions`` code often ends
-  ``.build().perform()``; the Python ``ActionChains`` has no separate build
-  step - measured: ``hasattr(ActionChains, "build")`` is ``False`` - and
-  ``.perform()`` alone is the equivalent.  Do not go looking for it.
-* **``pause`` changed units.**  Java's ``Actions.pause(2000)`` is
-  *milliseconds*; ``ActionChains.pause(seconds)`` is *seconds*.  The two
-  ``pause(2000)`` calls in each Java chain port to ``pause(2)``, and a literal
-  transcription would stall a scenario for over half an hour.
-
-Why ``Keys`` is deliberately not exported, which is the reason this module exists
---------------------------------------------------------------------------------
-AAP 0.4.1 lists the barrel's export surface as ``get_driver``,
-``quit_driver``, the wait helpers, ``press_keys``, ``action_chain`` and
-``By`` - no ``Keys``.  What makes that workable: typing literal text never
-needed a Selenium import, since a literal string handed to an element's own
-``send_keys`` method names no Selenium symbol at the call site.  Only
-*naming* a key constant did.  So this module keeps the
-import and hands out the constants by name, and :func:`press_keys` exists for
-precisely that.  If a later change tempts anyone to re-export ``Keys``, this
-paragraph is the argument against it.
-
-Why returning an ``ActionChains`` is not a leak, since it looks like one
------------------------------------------------------------------------
-AAP 0.4.2's invariant is textual and import-level: *"``selenium`` is imported
-only inside ``app/automation``; ``tests/test_steps_registration.py`` asserts
-no module under ``features/steps/`` imports it."*  A step module that receives
-an ``ActionChains`` instance from :func:`action_chain` holds a Selenium object
-without importing Selenium, and the AAP names ``action_chain`` in the export
-list precisely so that works.  Wrapping the chain in a facade would break the
-one thing the per-module parity tests check - that a ported step body
-reproduces its Java chain verbatim, in the same order - so it is not wrapped.
-
-What this module deliberately does not do
------------------------------------------
-* **It adds no interaction of its own.**  No ``clear()``, no click before
-  typing, no wait for visibility and no retry.  Those are call-site decisions
-  the Java step bodies make explicitly, and the per-module parity tests assert
-  *"the same keyboard keys or action-chain sequence"*; a helper that inserted
-  a step of its own would break that by construction.
-* **It never validates a driver.**  ``app/automation/driver.py``'s
-  :func:`~app.automation.driver.get_driver` returns ``None`` when the
-  configured browser name matches neither branch it constructs, and AAP 0.4.1
-  rules that such a run *"fails at first driver use, as today"*.  So a
-  ``None`` session is passed straight through to the interaction that needs
-  it, and the failure surfaces there rather than here.
-* **It owns no state.**  No cached element, no cached chain and no module
-  global beyond the key-name lookup table below, which is derived from
-  ``Keys`` itself and never mutated.  The one ``ActionChains`` rule that
-  matters is stated at :func:`action_chain`: a fresh builder every call.
+This module adds no interaction of its own - no ``clear()``, click, wait or
+retry, each being a call-site decision the Java bodies make - never validates a
+driver, ``None`` passing straight through per AAP 0.4.1, and owns no state
+beyond the key-name table below, derived from ``Keys`` and never mutated.
 """
 
 from selenium.webdriver.common.keys import Keys
@@ -150,9 +59,6 @@ _KEY_NAMES: frozenset[str] = frozenset(
     name for name in vars(Keys) if not name.startswith("_")
 )
 
-#: The valid names, sorted, ready to be quoted into the error message a
-#: misuse raises.  Built once for the same reason as :data:`_KEY_NAMES`: the
-#: message stays correct if the pinned Selenium ever changes the member set.
 _KEY_NAMES_LISTED: str = ", ".join(sorted(_KEY_NAMES))
 
 
@@ -235,57 +141,29 @@ def press_keys(
 ) -> None:
     """Type an optional literal followed by named keys, in one keyboard call.
 
-    The port of the suite's nine ``Keys`` call sites, which occur in two Java
-    shapes that this one signature covers:
-
-    .. code-block:: java
-
-        // Notes.java:35 - literal and key as two arguments
-        notesP.tagsN.sendKeys("New Tag", Keys.ENTER);
-        // Sales.java:68 - literal and key concatenated into one argument
-        salesp.searchBar.sendKeys(name + Keys.ENTER);
-
-    .. code-block:: python
-
-        press_keys(page.tags_n, "ENTER", text="New Tag")
-        press_keys(page.search_bar, "ENTER", text=name)
-
-    Both Java shapes reach the browser as one character stream, because
-    selenium's ``keys_to_typing`` flattens every argument into a single list -
-    so the port makes exactly **one** keyboard call carrying
-    ``(text, *keys)``.  Splitting it in two would change the call granularity
-    the browser sees for no gain.
+    The port of the suite's nine ``Keys`` call sites, whose two Java shapes this
+    signature covers: ``sendKeys("New Tag", Keys.ENTER)`` (``Notes.java:35``)
+    and ``sendKeys(name + Keys.ENTER)`` (``Sales.java:68``) both become
+    ``press_keys(page.tags_n, "ENTER", text="New Tag")``.  Both reach the
+    browser as one character stream - selenium's ``keys_to_typing`` flattens
+    every argument into one list - so this makes exactly **one** keyboard call
+    carrying ``(text, *keys)``.
 
     :param target: The element to type into - an already-resolved
         ``WebElement``, or a ``(By.X, "value")`` locator pair this helper
         resolves with ``find_element``.
     :param key_names: ``Keys`` member names as strings, in the order they are
-        to be typed.  Resolved case-insensitively; see :func:`_resolve_key`.
-        Literal characters do **not** belong here - ``"a"`` names no member
-        and is rejected - they belong in *text*.
-    :param text: A literal string typed *before* the resolved keys, inside the
-        same call.  Keyword-only, and optional: omit it to send keys alone.
-    :param driver: Keyword-only test seam.  ``None`` - the value every step
-        module uses, none of them passing this - takes the session from
-        :func:`~app.automation.driver.get_driver`, and then only when *target*
-        is a locator pair.
+        typed and never reordered, resolved case-insensitively.  Literal
+        characters name no member and are rejected; they belong in *text*.
+    :param text: A literal typed *before* the keys, inside the same call.
+        Keyword-only; an empty string is a supplied literal, not a missing one.
+    :param driver: Keyword-only test seam, consulted only when *target* is a
+        locator pair; ``None`` takes this worker's session.
     :returns: ``None``, because Java's ``sendKeys`` returns void.
-    :raises ValueError: When no *text* and no *key_names* are supplied, which
-        is a misuse rather than a request to type nothing, or when a name in
-        *key_names* is not a ``Keys`` member.  Neither case touches the
-        browser: both are raised before *target* is resolved.
-
-    Order is preserved exactly as passed - never sorted, deduplicated or
-    reordered - since ``Keys.CONTROL`` before a character is not the same
-    input as the reverse.  And this helper adds nothing of its own: no
-    ``clear()``, no click first, no wait for visibility and no retry, because
-    the Java step bodies make each of those decisions explicitly at their own
-    call sites and the parity tests compare the resulting sequence.
+    :raises ValueError: When neither *text* nor *key_names* is supplied, which
+        is a misuse rather than a request to type nothing, or when a name is no
+        ``Keys`` member.  Neither case touches the browser.
     """
-    # Both misuse checks run first, so a malformed call costs no element
-    # lookup, starts no browser interaction and leaves no partial input in the
-    # page.  An empty call is rejected rather than turned into a no-op
-    # keyboard call, which would silently pass a broken step.
     if text is None and not key_names:
         raise ValueError(
             "press_keys() needs something to type: pass at least one Keys "
@@ -301,48 +179,33 @@ def press_keys(
 
     element = _resolve_target(target, driver)
 
-    # The single keyboard call of this module, and the whole of its effect.
     element.send_keys(*sequence)
 
 
 def action_chain(driver: object | None = None) -> ActionChains:
     """Return a fresh action builder bound to this worker's session.
 
-    The port of ``new Actions(Driver.getDriver())`` - ``Crm.java:108`` and
-    ``Notes.java:78`` - which both classes evaluate anew inside the step
-    method that uses it.  The caller chains and performs:
-
-    .. code-block:: python
-
-        (
-            action_chain()
-            .click_and_hold(page.progress_pipeline)
-            .pause(2)
-            .move_to_element(page.progress_pipeline_2)
-            .pause(2)
-            .release()
-            .perform()
-        )
-
-    :param driver: Keyword-friendly test seam. ``None`` - the value every step
-        module uses - takes the session from
-        :func:`~app.automation.driver.get_driver`.
-    :returns: A new :class:`~selenium.webdriver.common.action_chains.ActionChains`
-        over the resolved session, with nothing queued on it.
+    The port of ``new Actions(Driver.getDriver())`` (``Crm.java:108``,
+    ``Notes.java:78``), which both classes evaluate anew inside the step method
+    that uses it.  The caller chains and performs; two traps while transcribing
+    a Java chain: the Python builder has no ``build()`` step, so ``.perform()``
+    alone stands in for ``.build().perform()``, and its ``pause`` counts
+    *seconds* where Java's counts milliseconds, so ``pause(2000)`` becomes
+    ``pause(2)``.
 
     **A new builder every call, never a cached one.**  An ``ActionChains``
     accumulates queued actions until ``perform()`` flushes them, so a shared
-    instance would replay an earlier step's actions inside a later step - a
-    failure that would look like a flaky browser rather than a bug here.
-    Returning a fresh object per call is also exactly what the Java code does,
-    a builder per use site.
+    instance would replay an earlier step's actions inside a later one - a
+    failure that would look like a flaky browser rather than a bug here.  A
+    builder per use site is also what the Java code does, and ``perform()`` is
+    deliberately not called here: the ported step bodies reproduce their Java
+    chain verbatim, and that chain ends in the caller.
 
-    ``perform()`` is deliberately **not** called here: the ported step bodies
-    must be free to reproduce their Java chain verbatim, in the same order,
-    and that chain ends in the caller.  The Python builder has no ``build()``
-    step either, so ``.perform()`` alone stands in for Java's
-    ``.build().perform()``.  Mind the units while transcribing - Java's
-    ``pause`` takes milliseconds, this one takes seconds.
+    :param driver: Keyword-friendly test seam.  ``None`` - what every step
+        module passes - takes the session from
+        :func:`~app.automation.driver.get_driver`.
+    :returns: A new ``ActionChains`` over the resolved session, with nothing
+        queued on it.
     """
     # May be None when the configured browser name matches neither branch
     # driver.py constructs; it is passed through untouched so the failure

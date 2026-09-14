@@ -1,17 +1,20 @@
-"""behave step definitions for the Odoo Employees module.
+"""behave step definitions for the Odoo Employees module - the port of
+``com.testinium.step_definitions.EmployeeStage``, one function per Java
+method, in source order, under the Java method's own name.
 
-The Python port of the Java class
-``com.testinium.step_definitions.EmployeeStage`` at reference commit
-``47e9d697e4a9a85da889f94a846fdf47af28a240``, one Python function per Java
-method, in the source's own order.  That class **is** the specification of
-every body below: each statement here corresponds to exactly one statement
-there, and the Java line is cited beside it, so a reader can diff the two side
-by side without leaving this file.
+Registration is ``@step`` throughout, never a keyword decorator (AAP 0.5.2,
+deviation 7): Cucumber-JVM matches a step by its text alone, behave by
+effective step type.  ``Session.java:12`` declares the shared precondition
+``@When`` while six Backgrounds invoke it as ``Given``, and three step classes
+import ``io.cucumber.java.en.And``, for which behave has no decorator.
 
-The twelve definitions
-----------------------
-Every phrase is byte-exact, copied from its Java annotation.  ``AAP`` below
-refers to the Agent Action Plan; ``:NN`` to a line of ``EmployeeStage.java``.
+``EmployeeStage.java:13-14`` builds the page object and the wait as fields at
+glue construction, and neither becomes module-level state here for reasons of
+lifetime rather than sharing: each worker process imports this module into its
+own address space, but an object built at import would predate the scenario's
+session and outlive it, since ``features/environment.py`` opens a driver in
+``before_scenario`` and quits it in ``after_scenario``.  So :func:`_page`
+builds one per call, and each wait takes its timeout per call site.
 
 ===  =====  ===============================================================
  #   Java   Phrase, and what the body does
@@ -128,8 +131,8 @@ Instead:
 and the three title reads, exactly where the Java wrote
 ``Driver.getDriver()``.
 
-Configuration: three of the six keys, read at five sites
---------------------------------------------------------
+Configuration: five of the six keys, read at eleven sites
+---------------------------------------------------------
 This is the port's heaviest configuration consumer, and every read goes
 through ``app/config.py``:
 
@@ -139,6 +142,8 @@ Key                     Accessor           Java line(s)    Used by
 ``web.table.url``       get_web_table_url  :18             #1
 ``url``                 get_url            :24, :60, :93   #2, #7, #11
 ``EmplTitle``           get_empl_title     :31             #3
+``username``            get_username       :25, :61, :94   #2, #7, #11
+``password``            get_password       :25, :61, :94   #2, #7, #11
 ======================  =================  ==============  ===============
 
 ``url`` is read **three times, at three separate call sites**, because
@@ -147,7 +152,24 @@ Java lines.  It is deliberately not hoisted into a module constant or a shared
 local: hoisting would collapse three reads into one and change what a
 mid-run edit of the properties file could affect.
 
-**None is guarded, and that is the behaviour.**  All three accessors return
+``username`` and ``password`` are read the same way, once per ``login()`` call
+site, and they are here rather than in the page object for two reasons that
+point the same way.  ``EmployeeP.java:60-61`` typed two account literals into
+the page; review finding SEC2-F17 (CWE-798/200) established that AAP 0.8's
+test-data note sanctions those values in **the Gherkin Examples tables** and
+nowhere else, so they cannot stay in Python source.  AAP 0.4.2's frozen rule
+then decides where the replacement read lives: *"Page objects import
+``app.automation`` for the current driver, nothing else"*, and the same section
+already lists this module as an ``app.config`` consumer.  So the step reads the
+two properties and passes them to ``EmployeePage.login(input_login,
+input_pass)`` - the two-argument shape ``EmployeeP.java:65-69`` declares.  No
+configuration key was added: both are among the six AAP 0.4.1 inventories and
+``session_steps`` already reads them for the shared precondition.  The one
+parity cost is stated where it happens: the Java overload discards its two
+arguments and this port honours them, which is the smallest departure that
+leaves the page object free of configuration.
+
+**None is unguarded, and that is the behaviour.**  All five accessors return
 ``str | None``, and a key the properties file does not define reads as
 ``None`` - AAP 0.4.1: *"a missing key returns null so failures surface at the
 point of use"*.  So this module adds no check, no default, no fallback, no
@@ -155,6 +177,19 @@ validation and no error message of its own: a ``None`` travels into
 ``driver.get(...)`` or ``wait_title_is(...)`` and fails there, which is
 exactly where the Java fails.  Nor is any key added - the surface is six keys,
 and AAP 0.6 in particular adds none for the browser's language or region.
+
+**A destination that is set, however, is checked before it is returned.**  The
+two URL accessors hold a present value to the navigation policy documented in
+``app/config.py`` and raise :class:`ValueError` out of the accessor when it
+falls outside it - a ``file:`` or ``data:`` URL, a host carrying user
+information or a control character, the cloud instance-metadata address - so
+the three navigations below are reached only with a destination the policy
+permits, or with the ``None`` of an unset key.  The check therefore costs this
+module nothing: no import, no branch and no statement of its own, and the
+failure still lands in the step that reads the key.  It also runs three times
+for ``url``, once per call site, for the same reason the three reads are not
+hoisted: each navigation is judged by what the configuration holds when it
+happens.  ``EmplTitle`` is not a destination and is returned unchecked.
 
 Two title sources, deliberately not unified
 -------------------------------------------
@@ -237,8 +272,9 @@ What ``tests/test_steps_employee.py`` asserts
 Stated here so the suite can be implemented faithfully.  It drives all twelve
 against a stubbed driver and checks, per definition, the same observable
 operations in the same order: the navigation targets **and the accessor each
-one came from**, the three no-argument ``login()`` calls each immediately
-after that step's ``get(...)``, the locators (against ``EmployeePage``'s own
+one came from**, the three ``login()`` calls - each immediately after that
+step's ``get(...)``, each passing the ``username`` and ``password`` properties
+in that order - the locators (against ``EmployeePage``'s own
 declarations), the wait shape, its target and the timeout ``3`` at all six
 sites, the literals ``"Employees - Odoo"``, ``"Departments - Odoo"``,
 ``"New - Odoo"`` and ``"Sterling"``, the four message-less assertion subjects,
@@ -253,39 +289,22 @@ from time import sleep
 from behave import step
 
 from app.automation import wait_title_is, wait_visible_element
-from app.config import get_empl_title, get_url, get_web_table_url
+from app.config import (
+    get_empl_title,
+    get_password,
+    get_url,
+    get_username,
+    get_web_table_url,
+)
 from app.pages import EmployeePage
 
 
 def _page(context) -> EmployeePage:
-    """Build this scenario's page object around the live session.
-
-    :param context: behave's ``Context``.  Only ``context.driver`` is read -
-        the session ``features/environment.py``'s ``before_scenario``
-        published for the scenario now running.
-    :returns: A fresh :class:`~app.pages.employee_page.EmployeePage` bound to
-        that session.
-
-    The stand-in for ``EmployeeStage.java:13``'s ``employeePage`` field, which
-    moves out of glue construction and into each step for the reason the
-    module docstring gives.  Constructing one is free: it stores the driver
-    and does nothing else, so no element is located and no session is created,
-    configured or quit here.  Every locator on the returned object resolves
-    lazily, at the moment it is used, which is what ``PageFactory``'s proxies
-    did in the Java.
-
-    ``context.driver`` is passed through exactly as published, ``None``
-    included: ``Driver.java:29-42`` switches on the ``browser`` property with
-    no default branch, so an unrecognised value yields no session and the
-    failure has to surface at the first use rather than here.
-    """
     return EmployeePage(context.driver)
 
 
-# ---------------------------------------------------------------------------
-# 1 - EmployeeStage.java:16-20.  The orphan: registered, and invoked by no
-#     feature file in the suite.  See "The orphan" in the module docstring.
-# ---------------------------------------------------------------------------
+# EmployeeStage.java:16-20, the orphan: registered here, invoked by no feature
+# file, and left uncalled because parity is with the class.
 @step("User is on upgenix login page")
 def user_is_on_upgenix_login_page(context) -> None:
     """Navigate to the sign-in page named by ``web.table.url``.
@@ -295,20 +314,19 @@ def user_is_on_upgenix_login_page(context) -> None:
 
     Two statements, from ``EmployeeStage.java:18-19``.  The local variable is
     kept because the Java keeps one, and ``None`` reaches ``get()`` unguarded
-    when the key is undefined.
+    when the key is undefined; a ``web.table.url`` set outside the accessor's
+    navigation policy raises out of the read instead, so the local is never
+    bound and ``get()`` is never called.
 
     The phrase is byte-exact and says ``upgenix login page``, without the
     "the" that ``LoginSD.java:19``'s ``User is on the upgenix login page``
     carries.  The two are separate registrations and neither resolves the
     other's text; the near-duplication is the source's and is preserved.
     """
-    url = get_web_table_url()  # :18 - ConfigurationReader.getProperty
-    context.driver.get(url)  # :19
+    url = get_web_table_url()
+    context.driver.get(url)
 
 
-# ---------------------------------------------------------------------------
-# 2 - EmployeeStage.java:22-26
-# ---------------------------------------------------------------------------
 @step("User is on the dashboard")
 def user_is_on_the_dashboard(context) -> None:
     """Navigate to the Employee module and sign in.
@@ -318,113 +336,73 @@ def user_is_on_the_dashboard(context) -> None:
 
     ``:24`` navigates to the ``url`` property - a different page from
     ``web.table.url`` - and ``:25`` signs in through the page object's own
-    ``login()``, with no arguments, exactly as the Java calls it.  That
-    method sends the two credentials ``EmployeeP.java:60-61`` hard-codes and
-    clicks the button; its three operations are not reimplemented here.
+    ``login()``.  The two credentials are read here, from the ``username`` and
+    ``password`` properties, and handed to it: ``EmployeeP.java:60-61`` typed
+    them as literals, review finding SEC2-F17 took them out of Python source,
+    and AAP 0.4.2 keeps a page object free of configuration (module docstring).
+    ``login()`` types what it is given and clicks the button; its three
+    operations are not reimplemented here.
+
+    The read of ``url`` is the first of the three, and the accessor holds a
+    configured destination to its navigation policy before returning it: a
+    value outside that policy raises here, before the navigation and therefore
+    before the sign-in.
     """
     context.driver.get(get_url())  # :24
-    _page(context).login()  # :25
+    # The two credentials are read HERE, not in the page object: AAP 0.4.2
+    # gives page objects `app.automation` and nothing else, and names this
+    # module among `app.config`'s consumers. They are read rather than typed as
+    # literals because review finding SEC2-F17 (CWE-798/200) removed those two
+    # account literals from `EmployeeP.java:60-61`'s port. Read at the call
+    # site, never hoisted or cached, for the reason the module docstring gives.
+    _page(context).login(get_username(), get_password())  # :25
 
 
-# ---------------------------------------------------------------------------
-# 3 - EmployeeStage.java:28-33.  Waits on the CONFIGURED title, asserts the
-#     HARD-CODED one; see "Two title sources" in the module docstring.
-# ---------------------------------------------------------------------------
+# EmployeeStage.java:28-33 waits on the configured ``EmplTitle`` (:31), then
+# asserts the hard-coded "Employees - Odoo" (:32).
 @step("User clicks Employees stage")
 def user_clicks_employees_stage(context) -> None:
     """Open the Employees stage and confirm the page title.
 
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-    :raises AssertionError: When the page title is not
-        ``"Employees - Odoo"``, message-less exactly as ``:32`` is.
-    :raises TimeoutException: When the title has not become the configured
-        ``EmplTitle`` within 3 seconds.  Propagated uncaught, as in the Java.
-
-    Three statements, ``:30`` to ``:32``.  The wait's expected title is the
-    configured ``EmplTitle`` while the assertion's is the literal below - two
-    sources, unchanged.
+    The two title sources are the source's own inconsistency and are kept:
+    unifying them would change which value governs the step.  The
+    listed-employees step uses the literal for both (``:87``, ``:88``).
     """
-    _page(context).empl_stage.click()  # :30
-    wait_title_is(get_empl_title(), 3)  # :31 - titleIs(getProperty("EmplTitle"))
-    assert context.driver.title == "Employees - Odoo"  # :32
+    _page(context).empl_stage.click()
+    wait_title_is(get_empl_title(), 3)
+    assert context.driver.title == "Employees - Odoo"
 
 
-# ---------------------------------------------------------------------------
-# 4 - EmployeeStage.java:35-43.  Three click/wait pairs, each waiting on the
-#     element it has just clicked.
-# ---------------------------------------------------------------------------
 @step("User clicks Challenges stage")
 def user_clicks_challenges_stage(context) -> None:
-    """Walk Badges, then Challenges, then Goals History.
-
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-    :raises TimeoutException: When any of the three elements is not visible
-        within 3 seconds.  Propagated uncaught.
-
-    Six statements, ``:37`` to ``:42``, in strict click-then-wait order.  The
-    page object is built once for the whole body, as the Java field was, so
-    the pairs read as they do there - and because every accessor re-locates
-    on access, each ``click`` and each wait still resolves its element
-    against the live DOM at the moment it runs.
-
-    Each wait is ``visibilityOf`` on the element just clicked, not on the
-    element about to be clicked.  That is what the source does and it is not
-    corrected here.
-    """
     page = _page(context)
-    page.badges_btn.click()  # :37
-    wait_visible_element(page.BADGES_BTN, 3)  # :38
-    page.challenges_btn.click()  # :39
-    wait_visible_element(page.CHALLENGES_BTN, 3)  # :40
-    page.goals_history_btn.click()  # :41
-    wait_visible_element(page.GOALS_HISTORY_BTN, 3)  # :42
+    page.badges_btn.click()
+    wait_visible_element(page.BADGES_BTN, 3)
+    page.challenges_btn.click()
+    wait_visible_element(page.CHALLENGES_BTN, 3)
+    page.goals_history_btn.click()
+    wait_visible_element(page.GOALS_HISTORY_BTN, 3)
 
 
-# ---------------------------------------------------------------------------
-# 5 - EmployeeStage.java:45-49.  The suite's only 7-second sleep, and this
-#     step's only wait of any kind.
-# ---------------------------------------------------------------------------
+# EmployeeStage.java:45-49 carries the suite's only 7-second sleep, and it is
+# this step's only synchronisation of any kind.
 @step("User clicks Departments stage")
 def user_clicks_departments_stage(context) -> None:
     """Open the Departments stage and wait out a fixed 7 seconds.
 
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-
-    Two statements, ``:47`` and ``:48``.  ``Thread.sleep(7000)`` is the whole
-    of this step's synchronization: it builds no explicit wait even though
-    the class has one available, and none is added here.  The delay stays a
-    fixed delay for the reason the module docstring gives.
+    The delay is not converted into an explicit wait, though the class has a
+    wait available: AAP 0.4.1 holds that converting a fixed delay would change
+    timing behaviour and could change outcomes.
     """
-    _page(context).departments_btn.click()  # :47
-    sleep(7)  # :48 - Thread.sleep(7000)
+    _page(context).departments_btn.click()
+    sleep(7)
 
 
-# ---------------------------------------------------------------------------
-# 6 - EmployeeStage.java:50-56.  Its :53-55 are commented out in the source
-#     and are not ported.
-# ---------------------------------------------------------------------------
 @step("User should see the last stage title")
 def user_should_see_the_last_stage_title(context) -> None:
-    """Assert the browser is showing the Departments page.
-
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-    :raises AssertionError: When the page title is not
-        ``"Departments - Odoo"``, message-less exactly as ``:52`` is.
-
-    One statement, ``:52``.  The three lines below it in the source are a
-    commented-out ``assertEquals`` formulation of the same check; they carry
-    no behaviour and are not reproduced.
-    """
-    assert context.driver.title == "Departments - Odoo"  # :52
+    assert context.driver.title == "Departments - Odoo"
 
 
-# ---------------------------------------------------------------------------
-# 7 - EmployeeStage.java:58-64
-# ---------------------------------------------------------------------------
 @step("User is on the employees dashboard")
 def user_is_on_the_employees_dashboard(context) -> None:
     """Navigate to the Employee module, sign in, settle, open the stage.
@@ -433,10 +411,11 @@ def user_is_on_the_employees_dashboard(context) -> None:
     :returns: ``None``.
 
     Four statements, ``:60`` to ``:63``, and the ``url`` property is read
-    here for the second of its three times.  The fixed delay sits between the
-    sign-in and the click, which is where the source puts it; moving it or
-    replacing it with a wait on the stage link would change the timing this
-    step depends on.
+    here for the second of its three times - so the navigation policy behind
+    that accessor is applied a second time, to whatever the configuration
+    holds now.  The fixed delay sits between the sign-in and the click, which
+    is where the source puts it; moving it or replacing it with a wait on the
+    stage link would change the timing this step depends on.
 
     Note the difference from ``#2``: the same navigation and sign-in, then a
     delay and a click.  The source declares both steps and this module keeps
@@ -444,102 +423,34 @@ def user_is_on_the_employees_dashboard(context) -> None:
     """
     page = _page(context)
     context.driver.get(get_url())  # :60
-    page.login()  # :61
+    page.login(get_username(), get_password())  # :61
     sleep(3)  # :62 - Thread.sleep(3000)
     page.empl_stage.click()  # :63
 
 
-# ---------------------------------------------------------------------------
-# 8 - EmployeeStage.java:66-74.  The class's only parameterized step.
-# ---------------------------------------------------------------------------
 @step('User creates new employees "{name}" in the Employees stage')
 def user_creates_new_employees_in_the_employees_stage(context, name: str) -> None:
-    """Create an employee record under the given name.
-
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :param name: The employee's name, taken from the quoted value in the
-        feature step.  ``EmployeeFc.feature`` supplies ``Cristiano Ronaldo``
-        (``:23``) and ``Lionel Messi`` (``:33``) through it, from two
-        ``Examples: Employee's name`` blocks.
-    :returns: ``None``.
-    :raises TimeoutException: When the title has not become
-        ``"New - Odoo"`` within 3 seconds.  Propagated uncaught.
-
-    Six statements, ``:68`` to ``:73``, including **two** of the eight fixed
-    delays: one before the create button is clicked and one between that
-    click and the title wait.  Both positions are the behaviour.
-
-    Cucumber's ``{string}`` placeholder matches the quotation marks around
-    the value and passes the unquoted text; behave's ``parse`` matcher does
-    not, so the quotes are written literally into the pattern around a named
-    field.  The value the step body receives is identical either way.  The
-    pattern is deliberately no wider than this - a bare ``{name}`` would
-    stop matching the quotes and could collide with another phrase.
-
-    ``:72`` is a plain send on the located input, which is why this module
-    needs no keyboard helper.
-    """
     page = _page(context)
-    sleep(3)  # :68 - Thread.sleep(3000)
-    page.create_btn.click()  # :69
-    sleep(3)  # :70 - Thread.sleep(3000)
-    wait_title_is("New - Odoo", 3)  # :71
-    page.employees_name.send_keys(name)  # :72
-    page.saved_message.click()  # :73
+    sleep(3)
+    page.create_btn.click()
+    sleep(3)
+    wait_title_is("New - Odoo", 3)
+    page.employees_name.send_keys(name)
+    page.saved_message.click()
 
 
-# ---------------------------------------------------------------------------
-# 9 - EmployeeStage.java:76-82.  Its :79-81 are commented out in the source
-#     and are not ported.  The function keeps the Java method's own name,
-#     which is shorter than the phrase it registers.
-# ---------------------------------------------------------------------------
 @step("User should see the Employee created message under full profile")
 def user_should_see_the_message_under_full_profile(context) -> None:
-    """Assert the "Employee created" confirmation is on screen.
-
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-    :raises AssertionError: When the confirmation element is not displayed,
-        message-less exactly as ``:78`` is.
-
-    One statement, ``:78``.  The assertion subject is the element's
-    ``is_displayed()``, not its text: the three lines below it in the source
-    read the text and compare it to ``"Employee created"``, but they are
-    commented out and carry no behaviour, so this step asserts visibility
-    alone.
-    """
-    assert _page(context).created_message.is_displayed()  # :78
+    assert _page(context).created_message.is_displayed()
 
 
-# ---------------------------------------------------------------------------
-# 10 - EmployeeStage.java:84-89.  Unlike #3, both the wait and the assertion
-#      take the same hard-coded title.
-# ---------------------------------------------------------------------------
 @step("User should see listed employees in the Employees stage")
 def user_should_see_listed_employees_in_the_employees_stage(context) -> None:
-    """Reopen the Employees stage and confirm the listing page.
-
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-    :raises AssertionError: When the page title is not
-        ``"Employees - Odoo"``, message-less exactly as ``:88`` is.
-    :raises TimeoutException: When the title has not become
-        ``"Employees - Odoo"`` within 3 seconds.  Propagated uncaught.
-
-    Three statements, ``:86`` to ``:88``.  The literal appears twice because
-    the source writes it twice - once for the wait and once for the
-    assertion - and it is the same literal ``#3`` asserts against while
-    waiting on the configured ``EmplTitle`` instead.
-    """
-    _page(context).empl_stage.click()  # :86
-    wait_title_is("Employees - Odoo", 3)  # :87
-    assert context.driver.title == "Employees - Odoo"  # :88
+    _page(context).empl_stage.click()
+    wait_title_is("Employees - Odoo", 3)
+    assert context.driver.title == "Employees - Odoo"
 
 
-# ---------------------------------------------------------------------------
-# 11 - EmployeeStage.java:91-105.  The longest body in the class, and four of
-#      the eight fixed delays.
-# ---------------------------------------------------------------------------
 @step("User edits created employees in the Employees module")
 def user_edits_created_employees_in_the_employees_module(context) -> None:
     """Rename an existing employee record to "Sterling".
@@ -548,7 +459,9 @@ def user_edits_created_employees_in_the_employees_module(context) -> None:
     :returns: ``None``.
 
     Twelve statements, ``:93`` to ``:104``, and the third and last read of
-    the ``url`` property.  The four delays fall between the sign-in and the
+    the ``url`` property - checked against the navigation policy like the
+    other two, on the value the configuration holds at this read.  The four
+    delays fall between the sign-in and the
     stage click, between the stage click and the record selection, between
     the edit click and the field being cleared, and between the new name
     being typed and the record being saved.  Those four positions are the
@@ -563,7 +476,7 @@ def user_edits_created_employees_in_the_employees_module(context) -> None:
     """
     page = _page(context)
     context.driver.get(get_url())  # :93
-    page.login()  # :94
+    page.login(get_username(), get_password())  # :94
     sleep(3)  # :95 - Thread.sleep(3000)
     page.empl_stage.click()  # :96
     sleep(3)  # :97 - Thread.sleep(3000)
@@ -576,21 +489,14 @@ def user_edits_created_employees_in_the_employees_module(context) -> None:
     page.saved_message.click()  # :104
 
 
-# ---------------------------------------------------------------------------
-# 12 - EmployeeStage.java:107-110.  A single click, and no assertion.
-# ---------------------------------------------------------------------------
+# EmployeeStage.java:107-110 is a single click and asserts nothing, so the step
+# can only fail if that click fails.
 @step("User should see the edited name in the Employees module")
 def user_should_see_the_edited_name_in_the_employees_module(context) -> None:
     """Reopen the Employees stage, and check nothing.
 
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-
-    One statement, ``:109``, and it is the whole body.  The phrase says the
-    user "should see the edited name" but the source asserts nothing - it
-    neither reads the title nor looks for the name - so the step can only
-    fail if the click itself fails.  No check is added: inventing one would
-    add a way for the scenario to fail that the source does not have, which
-    is the functional addition AAP 0.1.2 forbids.
+    No check is added for the missing assertion: inventing one would add a way
+    for the scenario to fail that the source does not have, which is the
+    functional addition AAP 0.1.2 forbids.
     """
-    _page(context).empl_stage.click()  # :109
+    _page(context).empl_stage.click()

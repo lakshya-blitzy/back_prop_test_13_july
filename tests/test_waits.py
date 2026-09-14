@@ -1,98 +1,46 @@
 r"""The evidence module for ``app/automation/waits.py`` - explicit waits.
 
-What is under test, and what it is held to
-------------------------------------------
-``app/automation/waits.py`` is the port of the **nine per-class
-``WebDriverWait`` fields** of the Java reference suite at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240``: ``Calendar.java:15`` and
+``waits.py`` ports the nine per-class ``WebDriverWait`` fields of the Java
+reference suite at pinned revision
+``47e9d697e4a9a85da889f94a846fdf47af28a240`` - ``Calendar.java:15`` and
 ``Crm.java:18`` (2 s), ``LoginSD.java:17``, ``LogOutSD.java:13`` and
-``EmployeeStage.java:14`` (3 s), ``Sales.java:17`` (4 s), and
-``Contacts.java:15``, ``Inventory.java:13`` and ``Notes.java:19`` (20 s).
-``Session.java`` constructs no wait at all, and that asymmetry is part of the
-contract rather than an oversight.
+``EmployeeStage.java:14`` (3 s), ``Sales.java:17`` (4 s), ``Contacts.java:15``,
+``Inventory.java:13`` and ``Notes.java:19`` (20 s) - while
+``Session.java:1-19`` constructs none, an asymmetry that is part of the
+contract.  AAP 0.4.1's row requires *"Explicit waits with the timeout supplied
+per call site"* and AAP 0.4.2 fixes the surface the barrel exposes, *"the wait
+helpers from waits.py, each taking an explicit timeout."*
 
-Two AAP statements fix what this module may assert.  AAP 0.4.1's row for the
-file requires *"Explicit waits with the timeout supplied per call site"* and
-enumerates exactly those nine sites and their four timeout values; AAP 0.4.2
-fixes the shape of the surface the package barrel exposes - *"the wait helpers
-from waits.py, each taking an explicit timeout."*  Everything below is one of
-those two sentences made executable, plus the six items the module under test
-records for this file in its own docstring ("What ``tests/test_waits.py``
-asserts").
+Two contracts are pinned here.  **The timeout belongs to the call site**: no
+helper declares a default and the module holds no timeout constant, so each
+ported step module passes its own Java class's number and none can silently
+acquire another's.  **A visibility wait is handed a locator, never an
+element**: the reference's one visibility predicate is
+``ExpectedConditions.visibilityOf`` over a ``PageFactory`` proxy field
+(``Calendar.java:20`` over ``CalendarP.java:16-17``), which re-located its
+element inside the predicate on every poll, so the port waits on
+``visibility_of_element_located`` over the locator and the call site's 2, 3, 4
+or 20 seconds governs the lookup.  An element resolved beforehand would fall
+under the ten-second implicit wait ``driver.py`` sets (``Driver.java:34`` and
+``:40``), leaving the explicit timeout gating nothing; both halves are
+asserted, the predicate by exact name and the upper-case locator constant at
+each of the 42 call sites.
 
-The standing rule: no test here performs a real wait
-----------------------------------------------------
-Not one assertion in this module may depend on elapsed time, and nothing here
-polls, sleeps, launches a browser or touches a network.  Three autouse seams
-enforce that rather than trusting it:
-
-* :fixture:`wait_recorder` replaces ``app.automation.waits.WebDriverWait`` - the
-  name the module imports, which is why the patch lands there and not on
-  ``selenium.webdriver.support.ui`` - with a recorder that answers a programmed
-  value or raises a programmed exception the instant ``until`` is called.  No
-  polling loop exists while it is installed.
-* :fixture:`condition_spy` wraps every predicate factory the
-  ``expected_conditions`` module defines with a recorder that logs the call and
-  returns a :class:`ConditionSentinel`.  The module under test imports that
-  module as ``EC`` and resolves ``EC.<name>`` per call, so patching the module's
-  attributes is visible to it.  A sentinel raises if anything ever *evaluates*
-  it, so an accidental real poll fails loudly instead of quietly waiting.
-* :fixture:`driver_seam` replaces ``app.automation.waits.get_driver``, so no
-  test can reach the real session lifecycle owner.
-
-The module therefore runs in milliseconds, and its runtime is itself part of
-the evidence: a wall-clock cost anywhere near a timeout value would mean one of
-these seams had been bypassed.
-
-``wait_visible_element`` is in flux, and is asserted differently
-----------------------------------------------------------------
-Review finding **F12 (HIGH, Timing Semantic Parity)** requires
-``wait_visible_element`` to take a locator and resolve it *inside* the
-predicate: today every one of the 42 visibility call sites pre-resolves its
-element through a page property under the driver's ten-second implicit wait, so
-the element lookup happens **before** the explicit wait is constructed and the
-intended 2/3/4/20-second polling window is never applied to it.  The corrected
-helper waits on a locator-based visibility condition instead.
-
-So for that one helper this module asserts only what holds under both the
-current and the corrected form - one predicate drawn from the closed pair
-``visibility_of`` / ``visibility_of_element_located``, the locator it was
-handed, the identity of the predicate that reached ``until``, and a single
-resolved element coming back - and never the factory's exact name.  The pair is
-closed rather than a family prefix because the plural visibility predicates
-return a list, and a helper that returned one would break all 42 call sites
-(see :data:`SINGLE_ELEMENT_VISIBILITY_PREDICATES`).  The invariant that
-actually matters, and the one asserted for every locator-taking helper, is that
-**the helper performs no lookup of its own**: the recorder handed to it records
-nothing at all.  The eight settled helpers are pinned to the exact factory
-their surface-table row names.
-
-Reading conventions worth stating once
---------------------------------------
-* ``inspect.signature`` is called **without** ``eval_str``/annotation
-  evaluation.  ``waits.py`` quotes its ``TYPE_CHECKING``-only annotations
-  deliberately (see its docstring, "Those quotation marks are load-bearing"),
-  and resolving them would raise ``NameError`` and destroy the very seam that
-  proves ``timeout`` carries no default.
-* Importing selenium here is legitimate.  The no-selenium-import rule of AAP
-  0.4.2 binds ``features/steps/`` and is asserted by
-  ``tests/test_steps_registration.py``; this module needs the binding's real
-  ``TimeoutException`` to prove an expiry propagates unaltered, and the real
-  ``expected_conditions`` module because it is the spy's subject.
-* The single-construction-site assertion counts **code**, not prose: the module
-  docstring of ``waits.py`` quotes the Java form ``new WebDriverWait(driver,
-  3)`` while explaining that seconds are not milliseconds, so a raw textual
-  count over the whole file is two and would be red for a documented reason.
-  :func:`_code_lines` drops every line inside a string literal before counting,
-  and the authoritative count is an AST one over the port's own sources -
-  ``tests/`` is excluded from that scan because this module names the class in
-  its patch target and its own prose.
+No test here performs a real wait: nothing polls, sleeps, launches a browser or
+touches a network, no assertion depends on elapsed time, and three autouse
+seams - each documented at its own fixture - stand in for ``WebDriverWait``,
+for every ``expected_conditions`` factory and for ``get_driver``.  A wall-clock
+cost anywhere near a timeout value would mean one had been bypassed.  Importing
+selenium is legitimate even so, the no-selenium-import rule of AAP 0.4.2 being
+a rule about ``features/steps/``: the real ``TimeoutException`` and the real
+``expected_conditions`` module are this module's subjects.
 """
 
 from __future__ import annotations
 
 import ast
 import inspect
+import re
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Final, NamedTuple
@@ -129,32 +77,39 @@ HELPER_NAMES: Final[tuple[str, ...]] = (
     "wait_url_contains",
 )
 
-#: The one helper whose predicate is being changed by review finding F12, and
-#: which is therefore asserted against the closed two-member set
-#: :data:`SINGLE_ELEMENT_VISIBILITY_PREDICATES` rather than one exact name.
-IN_FLUX_HELPER: Final[str] = "wait_visible_element"
+#: The one ``expected_conditions`` factory both visibility helpers name, and
+#: the whole of the visibility contract this module pins.  The reference's only
+#: visibility predicate is ``ExpectedConditions.visibilityOf`` applied to a
+#: ``PageFactory`` proxy field - ``Calendar.java:20`` is the shape, and the
+#: ``@FindBy`` field behind it is ``CalendarP.java:16-17`` - and such a proxy
+#: re-located its element *inside* the predicate on every poll.  The port
+#: reproduces that by handing the **locator** to
+#: ``visibility_of_element_located``, so the lookup happens once per poll under
+#: the call site's own 2, 3, 4 or 20 seconds.
+VISIBILITY_PREDICATE: Final[str] = "visibility_of_element_located"
 
-#: The prefix every member of the ``expected_conditions`` visibility family
-#: shares - ``visibility_of``, ``visibility_of_element_located``,
-#: ``visibility_of_all_elements_located``, ``visibility_of_any_elements_located``
-#: - used to locate that family in the binding and so to prove the names below
-#: are real factories.  It is deliberately *not* what :data:`IN_FLUX_HELPER` is
-#: pinned to: the family spans two different return cardinalities, so a prefix
-#: is too wide a target.  See :data:`SINGLE_ELEMENT_VISIBILITY_PREDICATES`.
-VISIBILITY_FAMILY_PREFIX: Final[str] = "visibility_of"
+#: The element-shaped member of the binding's visibility family - the one that
+#: takes an element already resolved - and, being the shortest member, also the
+#: prefix the whole family shares (``visibility_of_element_located``,
+#: ``visibility_of_all_elements_located``,
+#: ``visibility_of_any_elements_located``).  It appears in this module in both
+#: of those roles and in neither as something a helper may do: the family is
+#: located by this prefix so that the factory names asserted below are checked
+#: against real members rather than one wrong string against another, and no
+#: helper of this port may *name* this predicate, because an element resolved
+#: before the wait exists is looked up under the ten-second implicit wait
+#: ``driver.py`` sets (``Driver.java:34`` and ``:40``), leaving the call site's
+#: explicit timeout gating nothing at all.
+ELEMENT_SHAPED_VISIBILITY_PREDICATE: Final[str] = "visibility_of"
 
-#: The closed set of ``expected_conditions`` factories :data:`IN_FLUX_HELPER`
-#: may name - the two visibility predicates that resolve to a **single**
-#: element.  ``visibility_of`` takes an already-resolved element and is the form
-#: the helper calls today; ``visibility_of_element_located`` takes a locator and
-#: resolves it inside the predicate, which is the form review finding F12 moves
-#: the helper to.  The family's plural members -
-#: ``visibility_of_all_elements_located`` and
-#: ``visibility_of_any_elements_located`` - are excluded because they resolve to
-#: a *list* of elements: admitting one would silently change the return
-#: cardinality all 42 visibility call sites depend on.
-SINGLE_ELEMENT_VISIBILITY_PREDICATES: Final[frozenset[str]] = frozenset(
-    {"visibility_of", "visibility_of_element_located"}
+#: The two visibility-family predicates the nine helpers do name: the located
+#: single-element one, and the plural form ``wait_all_visible`` ports.  Asserted
+#: as an exact intersection, which is what refuses both
+#: :data:`ELEMENT_SHAPED_VISIBILITY_PREDICATE` and the "any elements" variant -
+#: the latter resolving to a *list* and so changing what every one of the 42
+#: visibility call sites receives.
+NAMED_VISIBILITY_PREDICATES: Final[frozenset[str]] = frozenset(
+    {VISIBILITY_PREDICATE, "visibility_of_all_elements_located"}
 )
 
 #: The four timeout values the nine Java construction sites declare.  Injected
@@ -183,10 +138,9 @@ EXPECTED_URL_FRAGMENT: Final[str] = "/web#action="
 WAIT_CLASS_NAME: Final[str] = "WebDriverWait"
 
 #: The module under test, as a repository-root-relative POSIX path.  The
-#: source-level tests locate it through this rather than through a line number:
-#: ``waits.py`` is under active change for review finding F12, and a test that
-#: pinned a line would fail on an edit that preserved every behaviour it claims
-#: to protect.
+#: source-level tests locate it through this rather than through a line number,
+#: so that an edit preserving every behaviour they claim to protect - a
+#: docstring rewrite above all - cannot turn them red.
 WAITS_MODULE_PATH: Final[str] = "app/automation/waits.py"
 
 #: Where ``timeout`` sits among a helper's positional parameters.  One for every
@@ -206,11 +160,13 @@ TIMEOUT_POSITION: Final[Mapping[str, int]] = {
 # docstring, and every step module quotes its Java original at length.
 # --------------------------------------------------------------------------- #
 
-#: Wait calls per step module.  The counts are the Java classes' own: ten in
-#: ``Calendar``, eleven in ``Crm``, six in ``EmployeeStage`` (three title waits
-#: and three visibility waits), eight in ``Sales``, three each in ``Contacts``
-#: and ``Notes``, two in ``Inventory``, one each in ``LoginSD`` and
-#: ``LogOutSD``, and none whatever in ``Session``.
+#: Wait calls per step module.  The counts are the Java classes' own
+#: ``wait.until`` sites: ten in ``Calendar.java:20-193``, eleven in
+#: ``Crm.java:24-150``, six in ``EmployeeStage.java:31-87`` (three title waits
+#: and three visibility waits), eight in ``Sales.java:22-83``, three each in
+#: ``Contacts.java:31-82`` and ``Notes.java:29-71``, two in
+#: ``Inventory.java:22-38``, one each in ``LoginSD.java:43`` and
+#: ``LogOutSD.java:18``, and none whatever in ``Session.java:1-19``.
 EXPECTED_WAIT_CALLS: Final[Mapping[str, int]] = {
     "calendar_steps": 10,
     "contacts_steps": 3,
@@ -256,20 +212,64 @@ EXPECTED_TOTAL_WAIT_CALLS: Final[int] = 45
 #: (``EmployeeStage.java:31``, ``:71`` and ``:87``).
 EXPECTED_TITLE_WAIT_CALLS: Final[int] = 3
 
-#: Visibility-family waits - the remainder, and the population review finding
-#: F12 rewrites ("All 42 visibility calls are affected").  Asserted as the
-#: total minus the title waits rather than by helper name, because F12 changes
-#: which visibility helper each site calls while preserving every timeout.
+#: Visibility waits - every remaining call, and the exact count of
+#: ``ExpectedConditions.visibilityOf`` sites in the reference
+#: (``grep -c "visibilityOf(" *.java`` over the nine step classes sums to this
+#: number, and ``visibilityOfElementLocated`` appears in none of them).
+#: Asserted both ways: as the total minus the title waits, and as the number of
+#: calls to :data:`VISIBILITY_HELPER` by name.
 EXPECTED_VISIBILITY_WAIT_CALLS: Final[int] = 42
+
+#: The same population per step module - the ``visibilityOf`` count of each
+#: Java class: 10 in ``Calendar.java:20-193``, 11 in ``Crm.java:24-150``, 8 in
+#: ``Sales.java:22-83``, 3 in ``Contacts.java:31-82``, 3 in
+#: ``EmployeeStage.java:38-42``, 3 in ``Notes.java:29-71``, 2 in
+#: ``Inventory.java:22-38``, 1 in ``LoginSD.java:43``, 1 in
+#: ``LogOutSD.java:18`` and none in ``Session.java:1-19``.  Held as its own map
+#: rather than derived from
+#: :data:`EXPECTED_WAIT_CALLS` minus the title waits, so that a visibility call
+#: turning into a title wait - or into some third helper - fails on the row of
+#: the module it happened in.
+EXPECTED_VISIBILITY_CALLS: Final[Mapping[str, int]] = {
+    "calendar_steps": 10,
+    "contacts_steps": 3,
+    "crm_steps": 11,
+    "employee_steps": 3,
+    "inventory_steps": 2,
+    "login_steps": 1,
+    "logout_steps": 1,
+    "notes_steps": 3,
+    "sales_steps": 8,
+    "session_steps": 0,
+}
+
+#: The shape a visibility call's first argument must have: the name of an
+#: upper-case locator constant, as ``app/pages/*`` declares them
+#: (``CALENDAR_BUTTON``, ``SAVE_BTN``).  The lower-case accessor of the same
+#: page object yields a live element instead, and an element resolved before the
+#: wait is constructed is looked up under the ten-second implicit wait rather
+#: than under the call site's own timeout - so the distinction between the two
+#: spellings is the whole of the wait contract at the call sites, and this
+#: pattern is what tells them apart.
+LOCATOR_CONSTANT_NAME: Final[re.Pattern[str]] = re.compile(r"[A-Z][A-Z0-9_]*")
 
 #: The helper the three title waits use.
 TITLE_HELPER: Final[str] = "wait_title_is"
+
+#: The helper every one of the remaining wait calls uses - the port of
+#: ``ExpectedConditions.visibilityOf``.  The census pins the visibility total to
+#: this name as well as to "the total minus the title waits", so a call site
+#: moving to another visibility helper fails here rather than passing on a
+#: subtraction that happens to come out the same.
+VISIBILITY_HELPER: Final[str] = "wait_visible_element"
 
 #: The only step module that waits on a title.
 TITLE_WAIT_MODULE: Final[str] = "employee_steps"
 
 #: The one step module that calls no wait helper and imports nothing from
-#: ``app.automation`` - the port of ``Session.java``, which declares no wait.
+#: ``app.automation`` - the port of ``Session.java:1-19``, whose nineteen lines
+#: import neither ``WebDriverWait`` nor ``ExpectedConditions`` and construct no
+#: wait field.
 SILENT_STEP_MODULE: Final[str] = "session_steps"
 
 #: The package whose names a step module may import wait helpers from.  Used to
@@ -607,15 +607,15 @@ class HelperSpec(NamedTuple):
     #: Positional arguments the helper takes *ahead* of ``timeout``.
     leading_args: tuple[Any, ...]
 
-    #: The ``expected_conditions`` factory the helper's row names, or ``None``
-    #: for the helper review finding F12 is changing.
-    factory: str | None
+    #: The ``expected_conditions`` factory the helper's row names, pinned by
+    #: exact name for all nine helpers - the two visibility rows included.
+    factory: str
 
     #: The arguments that factory must receive.
     factory_args: tuple[Any, ...]
 
-    #: Whether the helper's subject is a locator, and so whether the no-lookup
-    #: invariant of F12 applies to it.
+    #: Whether the helper's subject is a locator, and so whether the deferred
+    #: locator is asserted as well as the empty driver log.
     takes_locator: bool
 
     @property
@@ -649,13 +649,13 @@ class HelperSpec(NamedTuple):
         return self.helper(*self.leading_args, **kwargs)
 
 
-#: The surface table, in its documented order.  ``wait_visible_element`` carries
-#: ``factory=None`` - see the module docstring's F12 section - and is handed a
-#: locator, which is both what the corrected helper takes and something the
-#: current helper passes through untouched.
+#: The surface table, in its documented order.  The two visibility rows carry
+#: the same factory because the two helpers share one body and one predicate:
+#: ``wait_visible_element`` delegates to ``wait_visible``, so neither can drift
+#: onto :data:`ELEMENT_SHAPED_VISIBILITY_PREDICATE` without the other.
 HELPER_SPECS: Final[tuple[HelperSpec, ...]] = (
-    HelperSpec("wait_visible", (LOCATOR,), "visibility_of_element_located", (LOCATOR,), True),
-    HelperSpec(IN_FLUX_HELPER, (LOCATOR,), None, (LOCATOR,), True),
+    HelperSpec("wait_visible", (LOCATOR,), VISIBILITY_PREDICATE, (LOCATOR,), True),
+    HelperSpec(VISIBILITY_HELPER, (LOCATOR,), VISIBILITY_PREDICATE, (LOCATOR,), True),
     HelperSpec("wait_present", (LOCATOR,), "presence_of_element_located", (LOCATOR,), True),
     HelperSpec("wait_clickable", (LOCATOR,), "element_to_be_clickable", (LOCATOR,), True),
     HelperSpec("wait_invisible", (LOCATOR,), "invisibility_of_element_located", (LOCATOR,), True),
@@ -683,14 +683,10 @@ HELPER_SPECS: Final[tuple[HelperSpec, ...]] = (
     ),
 )
 
-#: The eight helpers whose predicate is settled and is therefore pinned by name.
-SETTLED_SPECS: Final[tuple[HelperSpec, ...]] = tuple(
-    spec for spec in HELPER_SPECS if spec.factory is not None
-)
-
-#: The one in-flux helper's specification.
-IN_FLUX_SPEC: Final[HelperSpec] = next(
-    spec for spec in HELPER_SPECS if spec.name == IN_FLUX_HELPER
+#: The specification of the visibility helper every one of the 42 visibility
+#: call sites uses, fetched by name so that the row and the census agree.
+VISIBILITY_SPEC: Final[HelperSpec] = next(
+    spec for spec in HELPER_SPECS if spec.name == VISIBILITY_HELPER
 )
 
 
@@ -821,6 +817,16 @@ class WaitCallSite(NamedTuple):
     #: The line the call starts on, so a failure is locatable.
     lineno: int
 
+    #: The first argument, unparsed back to source - ``page.CALENDAR_BUTTON``.
+    #: Reported verbatim so a failure names the spelling it objected to.
+    target: str
+
+    #: The attribute the first argument reads, when it reads one at all, and
+    #: ``None`` for any other shape - a bare name, a literal or a call.  This is
+    #: what separates a locator constant from a resolved element: both are
+    #: attributes of a page object, and only the constant's name is upper case.
+    target_attribute: str | None
+
 
 class ModuleCensus(NamedTuple):
     """What one step module's source says about waits."""
@@ -916,6 +922,25 @@ def _timeout_of(node: ast.Call, helper: str, where: str) -> int | float:
     return _numeric_literal(node.args[position], where)
 
 
+def _target_of(node: ast.Call, where: str) -> tuple[str, str | None]:
+    """The first argument of one wait call, as source and as an attribute name.
+
+    The subject is always the first positional argument: every ported call site
+    passes it that way, as its Java original read the field that way.  A
+    keyword spelling would be a call shape the census cannot compare against
+    the others, so it fails here rather than being counted as untargeted.
+
+    :param node: The call node.
+    :param where: Human-readable location, used in the failure message.
+    :returns: The unparsed argument, and the attribute it reads or ``None``.
+    :raises AssertionError: When the call passes no positional subject at all.
+    """
+    assert node.args, f"{where}: the wait call passes no positional subject"
+    subject = node.args[0]
+    attribute = subject.attr if isinstance(subject, ast.Attribute) else None
+    return ast.unparse(subject), attribute
+
+
 def _census_of(path: Path) -> ModuleCensus:
     """Parse one step module and report its wait calls and automation imports.
 
@@ -938,8 +963,16 @@ def _census_of(path: Path) -> ModuleCensus:
             helper = _called_name(node)
             if helper in HELPER_NAMES:
                 where = f"{module}:{node.lineno}"
+                target, attribute = _target_of(node, where)
                 calls.append(
-                    WaitCallSite(module, helper, _timeout_of(node, helper, where), node.lineno)
+                    WaitCallSite(
+                        module,
+                        helper,
+                        _timeout_of(node, helper, where),
+                        node.lineno,
+                        target,
+                        attribute,
+                    )
                 )
 
     calls.sort(key=lambda call: call.lineno)
@@ -1038,22 +1071,32 @@ def test_the_package_barrel_exports_the_same_nine_objects() -> None:
 
 
 def test_every_named_expected_condition_exists_in_the_binding() -> None:
-    """Each factory this module names is a real ``expected_conditions`` factory.
+    """Each factory this module names is real, and the element-shaped one is named by none.
 
-    Without this, a typo in an expected factory name would make the mapping
-    assertions compare one wrong string against another and pass.  The subset
-    check extends that guard to
-    :data:`SINGLE_ELEMENT_VISIBILITY_PREDICATES`: both names the in-flux helper
-    may take are real members of the binding's visibility family, so pinning
-    that helper to them cannot pass on a name selenium does not define.
+    Without the first half, a typo in an expected factory name would make the
+    mapping assertions compare one wrong string against another and pass.  The
+    second half is the visibility contract read from the binding's side: the
+    element-shaped predicate *is* a real factory, so nothing but a deliberate
+    refusal keeps it out of a helper's row, and the intersection states that
+    refusal exactly - the nine helpers name the located single-element
+    predicate and the plural one ``wait_all_visible`` ports, and no other
+    member of the family.
     """
-    for spec in SETTLED_SPECS:
+    for spec in HELPER_SPECS:
         assert spec.factory in PREDICATE_FACTORIES, f"{spec.factory} is not a predicate factory"
 
-    family = {name for name in PREDICATE_FACTORIES if name.startswith(VISIBILITY_FAMILY_PREFIX)}
-    assert "visibility_of" in family
-    assert "visibility_of_element_located" in family
-    assert SINGLE_ELEMENT_VISIBILITY_PREDICATES.issubset(family)
+    family = {
+        name
+        for name in PREDICATE_FACTORIES
+        if name.startswith(ELEMENT_SHAPED_VISIBILITY_PREDICATE)
+    }
+    assert ELEMENT_SHAPED_VISIBILITY_PREDICATE in family
+    assert NAMED_VISIBILITY_PREDICATES < family
+
+    named = {spec.factory for spec in HELPER_SPECS}
+    assert named & family == NAMED_VISIBILITY_PREDICATES, (
+        f"the visibility-family predicates the helpers name are {sorted(named & family)}"
+    )
 
 
 # =========================================================================== #
@@ -1160,9 +1203,9 @@ def test_the_timeout_reaches_the_wait_unchanged(
     """Each helper constructs one wait carrying exactly the number and the driver it was given.
 
     All four Java values are injected into all nine helpers: the module exists
-    so that ``Calendar``'s two seconds can never become ``Contacts``' twenty,
-    and the type assertion is what rules out a conversion or a clamp on the way
-    through.
+    so that ``Calendar.java:15``'s two seconds can never become
+    ``Contacts.java:15``'s twenty, and the type assertion is what rules out a
+    conversion or a clamp on the way through.
 
     :param spec: The helper under assertion.
     :param timeout: One of the four Java timeouts.
@@ -1204,12 +1247,12 @@ def test_a_fractional_timeout_is_passed_through_without_conversion(
 
 
 # =========================================================================== #
-# 4 - The predicate each settled helper names
+# 4 - The predicate each helper names
 # =========================================================================== #
 
 
-@pytest.mark.parametrize("spec", _specs(SETTLED_SPECS))
-def test_each_settled_helper_waits_on_the_condition_its_row_names(
+@pytest.mark.parametrize("spec", _specs(HELPER_SPECS))
+def test_each_helper_waits_on_the_condition_its_row_names(
     spec: HelperSpec,
     wait_recorder: WaitRecorder,
     condition_spy: ConditionSpy,
@@ -1237,43 +1280,31 @@ def test_each_settled_helper_waits_on_the_condition_its_row_names(
 
 
 # =========================================================================== #
-# 5 - ``wait_visible_element``, the one in-flux helper
+# 5 - ``wait_visible_element``, the helper all 42 visibility call sites use
 # =========================================================================== #
 
 
-def test_wait_visible_element_waits_on_a_visibility_condition_over_its_locator(
+def test_wait_visible_element_waits_on_the_located_visibility_predicate(
     wait_recorder: WaitRecorder,
     condition_spy: ConditionSpy,
     stub_driver: StubDriver,
 ) -> None:
-    """The helper builds one single-element visibility predicate from the locator it was handed.
+    """The helper builds ``visibility_of_element_located`` from the locator it was handed.
 
-    The factory's exact name is deliberately **not** pinned to one string.
-    Review finding F12 (HIGH) requires this helper to accept a locator and
-    resolve it inside the predicate, because every caller today pre-resolves its
-    element through a page property under the driver's ten-second implicit wait
-    and therefore never receives the 2/3/4/20-second polling window its Java
-    original intended.  Pinning today's ``visibility_of`` would ship a red test
-    the moment that fix lands, while the contract that matters survives both
-    forms: one visibility predicate, built from the locator, and awaited - with
-    the locator resolved lazily inside it, which
-    :func:`test_no_helper_performs_a_lookup_of_its_own` asserts.
+    Stated on its own, and not only through the row-by-row parametrization,
+    because this one helper carries 42 of the port's 45 wait calls and its
+    predicate is where a parity defect would hide.  The factory is pinned by
+    exact name: the element-shaped ``visibility_of`` takes an element that was
+    resolved before the wait was constructed, so the lookup lands under the
+    ten-second implicit wait ``driver.py`` sets and the call site's 2, 3, 4 or
+    20 seconds gates nothing.  The located form re-runs the lookup inside the
+    predicate on every poll, which is what the ``PageFactory`` proxy the Java
+    original passed did (``Calendar.java:20`` over ``CalendarP.java:16-17``).
 
-    What is pinned instead is :data:`SINGLE_ELEMENT_VISIBILITY_PREDICATES`, a
-    closed set of exactly two names rather than the visibility family:
-    ``visibility_of``, the element-based form the helper calls today, and
-    ``visibility_of_element_located``, the locator-based form F12 moves it to.
-    The family's plural members - ``visibility_of_all_elements_located`` and
-    ``visibility_of_any_elements_located`` - are refused because they resolve to
-    a *list* of elements instead of one element, which would change what every
-    one of the 42 visibility call sites receives from this helper.  A test that
-    accepted the whole family by prefix could not tell those two contracts
-    apart, and so could not fail on a plural predicate.
-
-    The return assertions state the same requirement from the other end: what
-    comes back is the single object the wait resolved, by identity, and is not a
-    sequence of objects - so a plural predicate cannot satisfy this test even
-    were its name somehow admitted.
+    The plural members of the same family are excluded by the same exact name
+    and by the return assertions from the other end: what comes back is the
+    single object the wait resolved, by identity, and is not a sequence - a
+    cardinality all 42 call sites depend on.
 
     :param wait_recorder: The fake wait, programmed to resolve one element.
     :param condition_spy: The predicate spy.
@@ -1282,12 +1313,11 @@ def test_wait_visible_element_waits_on_a_visibility_condition_over_its_locator(
     resolved = ResolvedValue("visible-element")
     wait_recorder.result = resolved
 
-    returned = IN_FLUX_SPEC.invoke(JAVA_TIMEOUTS[0], driver=stub_driver)
+    returned = VISIBILITY_SPEC.invoke(JAVA_TIMEOUTS[0], driver=stub_driver)
 
     call = condition_spy.only
-    assert call.name in SINGLE_ELEMENT_VISIBILITY_PREDICATES, (
-        f"{call.name} is not one of the single-element visibility predicates "
-        f"{sorted(SINGLE_ELEMENT_VISIBILITY_PREDICATES)}"
+    assert call.name == VISIBILITY_PREDICATE, (
+        f"{VISIBILITY_HELPER} named EC.{call.name}, not EC.{VISIBILITY_PREDICATE}"
     )
     assert call.args == (LOCATOR,)
     assert call.kwargs == {}
@@ -1295,12 +1325,12 @@ def test_wait_visible_element_waits_on_a_visibility_condition_over_its_locator(
 
     assert returned is resolved
     assert not isinstance(returned, list | tuple), (
-        f"{IN_FLUX_HELPER} returned {returned!r} - a sequence, not one resolved element"
+        f"{VISIBILITY_HELPER} returned {returned!r} - a sequence, not one resolved element"
     )
 
 
 # =========================================================================== #
-# 6 - The F12 invariant: the helper itself looks nothing up
+# 6 - The invariant behind the locator shape: the helper looks nothing up
 # =========================================================================== #
 
 
@@ -1313,13 +1343,14 @@ def test_no_helper_performs_a_lookup_of_its_own(
 ) -> None:
     """A helper touches the driver for nothing: resolution belongs inside the predicate.
 
-    This is the invariant behind review finding F12.  An element located by the
-    helper is located *before* the wait exists, so it is found under the
-    ten-second implicit wait and the explicit timeout never governs it; an
-    element located inside the predicate is re-tried on every polling interval
-    of the explicit wait, which is the Java behaviour.  The recorder's log being
-    empty is the direct evidence: the helper found nothing, read no title and no
-    URL, and merely built a condition and handed it over.
+    An element located by the helper is located *before* the wait exists, so it
+    is found under the ten-second implicit wait and the explicit timeout never
+    governs it; an element located inside the predicate is re-tried on every
+    polling interval of the explicit wait, which is the Java behaviour
+    (``Calendar.java:20`` waits on a ``@FindBy`` proxy, ``CalendarP.java:16-17``).
+    The recorder's log being empty is the direct evidence: the helper found
+    nothing, read no title and no URL, and merely built a condition and handed
+    it over.
 
     For a locator-taking helper the locator itself is asserted to be what
     reached the predicate, which is the other half of the same statement - the
@@ -1530,12 +1561,11 @@ def test_the_wait_is_constructed_in_exactly_one_place(repo_root: Path) -> None:
 #
 # Parsed with ``ast``.  A regular expression cannot distinguish a call from the
 # Java source the step modules quote in their docstrings - ``calendar_steps``
-# reproduces ``new WebDriverWait(Driver.getDriver(), 2);`` verbatim - so the
-# census would be wrong in both directions.
-#
-# No test below pins which visibility helper a call site uses: review finding
-# F12 rewrites those call sites while preserving every timeout literal, so the
-# literals are the invariant and the helper names are not.
+# reproduces ``new WebDriverWait(Driver.getDriver(), 2);`` verbatim, and two
+# modules quote a ``wait_visible_element`` call of their own in prose - so the
+# census would be wrong in both directions.  Three facts are pinned at every
+# call site: the helper named, the timeout literal passed, and the shape of the
+# subject.
 # =========================================================================== #
 
 
@@ -1556,9 +1586,11 @@ def test_each_step_module_makes_the_wait_calls_its_java_class_made(
 ) -> None:
     """Every step module's wait-call count is its Java class's.
 
-    Ten in ``Calendar``, eleven in ``Crm``, six in ``EmployeeStage``, eight in
-    ``Sales``, three each in ``Contacts`` and ``Notes``, two in ``Inventory``,
-    one each in ``LoginSD`` and ``LogOutSD``, and none in ``Session``.
+    Ten in ``Calendar.java:20-193``, eleven in ``Crm.java:24-150``, six in
+    ``EmployeeStage.java:31-87``, eight in ``Sales.java:22-83``, three each in
+    ``Contacts.java:31-82`` and ``Notes.java:29-71``, two in
+    ``Inventory.java:22-38``, one each in ``LoginSD.java:43`` and
+    ``LogOutSD.java:18``, and none in ``Session.java:1-19``.
 
     :param wait_census: The parsed census.
     """
@@ -1635,9 +1667,10 @@ def test_the_session_module_calls_no_wait_helper(
 ) -> None:
     """``session_steps`` calls no wait helper and imports nothing from ``app.automation``.
 
-    ``Session.java`` constructs no ``WebDriverWait``, so a wait helper reaching
-    that one module would be a divergence rather than a tidy-up.  The absent
-    import is the stronger half: it cannot call what it has not imported.
+    ``Session.java:1-19`` constructs no ``WebDriverWait`` and imports neither
+    that class nor ``ExpectedConditions``, so a wait helper reaching that one
+    module would be a divergence rather than a tidy-up.  The absent import is
+    the stronger half: it cannot call what it has not imported.
 
     :param wait_census: The parsed census.
     """
@@ -1646,16 +1679,64 @@ def test_the_session_module_calls_no_wait_helper(
     assert census.automation_imports == ()
 
 
+def test_every_visibility_call_site_uses_the_located_helper_over_a_locator_constant(
+    wait_census: Mapping[str, ModuleCensus],
+) -> None:
+    """All 42 visibility waits call ``wait_visible_element`` on an upper-case locator constant.
+
+    The call sites' half of the wait contract, and the reason it is asserted
+    from the source rather than from behaviour: the helper takes a locator and
+    resolves it inside ``visibility_of_element_located``, once per poll, under
+    the 2, 3, 4 or 20 seconds its Java class declared.  Pass it the page
+    object's lower-case accessor instead and the element is resolved *before*
+    the wait exists - under the ten-second implicit wait ``driver.py`` sets -
+    so the explicit timeout gates nothing and the parity defect is invisible in
+    behaviour because both spellings still return an element.  The two
+    spellings differ only in case, which is why the attribute's name is what is
+    asserted.
+
+    A bare local, a literal or a call in that position fails as well: the
+    locator constants live on the page objects, and anything else in the
+    subject position is either an element or something this census cannot
+    hold to the contract.
+
+    :param wait_census: The parsed census.
+    """
+    per_module = {
+        name: [call for call in census.calls if call.helper == VISIBILITY_HELPER]
+        for name, census in wait_census.items()
+    }
+
+    assert {name: len(calls) for name, calls in per_module.items()} == dict(
+        EXPECTED_VISIBILITY_CALLS
+    )
+
+    sites = [call for calls in per_module.values() for call in calls]
+    assert len(sites) == EXPECTED_VISIBILITY_WAIT_CALLS
+
+    for call in sites:
+        where = f"{call.module}:{call.lineno}"
+        assert call.target_attribute is not None, (
+            f"{where}: {VISIBILITY_HELPER} was passed {call.target} - not a page locator constant"
+        )
+        assert LOCATOR_CONSTANT_NAME.fullmatch(call.target_attribute), (
+            f"{where}: {VISIBILITY_HELPER} was passed {call.target}, whose attribute "
+            f"{call.target_attribute!r} is not an upper-case locator constant; the "
+            "lower-case accessor resolves the element before the wait is constructed"
+        )
+
+
 def test_the_census_totals_are_forty_five_waits_of_which_forty_two_are_visibility(
     wait_census: Mapping[str, ModuleCensus],
 ) -> None:
     """45 wait calls across the port, 3 on a title and the remaining 42 on visibility.
 
-    The visibility total is computed as "every wait call minus the title waits"
-    rather than by helper name, because review finding F12 changes which
-    visibility helper each of those 42 sites calls - the review's own count,
-    "All 42 visibility calls are affected", is this number - while leaving every
-    timeout literal in place.
+    The visibility total is pinned twice over: as the calls to
+    :data:`VISIBILITY_HELPER` by name, and as every wait call minus the title
+    waits.  Either alone could be satisfied by a call site that moved between
+    the two helpers, and 42 is the reference's own count - the
+    ``ExpectedConditions.visibilityOf`` sites of the nine step classes, none of
+    which uses ``visibilityOfElementLocated``.
 
     :param wait_census: The parsed census.
     """
@@ -1663,7 +1744,14 @@ def test_the_census_totals_are_forty_five_waits_of_which_forty_two_are_visibilit
     titles = sum(
         1 for census in wait_census.values() for call in census.calls if call.helper == TITLE_HELPER
     )
+    visibility = sum(
+        1
+        for census in wait_census.values()
+        for call in census.calls
+        if call.helper == VISIBILITY_HELPER
+    )
 
     assert total == EXPECTED_TOTAL_WAIT_CALLS
     assert titles == EXPECTED_TITLE_WAIT_CALLS
+    assert visibility == EXPECTED_VISIBILITY_WAIT_CALLS
     assert total - titles == EXPECTED_VISIBILITY_WAIT_CALLS

@@ -1,265 +1,67 @@
 {#-
-  ===========================================================================
   pretty/overview_steps.html - the step-implementation statistics page of the
-  generated report tree.
-  ===========================================================================
+  generated report tree, written as the hyphen-named
+  cucumber-html-reports/overview-steps.html. It extends pretty/_layout.html,
+  sets title_suffix and active_page itself, and builds no link or asset
+  reference of its own: every reference the page carries is the layout's, and
+  tree-relative, so the page opens offline.
 
-  One of the six page templates app/reporting/pretty_reports.py renders. It
-  produces cucumber-html-reports/overview-steps.html inside the generated
-  report tree - contract 2 of the port's two HTML artifacts, whose reference
-  output came from me.jvt.cucumber:reporting-plugin 7.2.0 (pom.xml:66-70) over
-  net.masterthought:cucumber-reporting 5.6.1 and velocity-engine-core 2.3.
+  Three things separate it from the other overviews. It has NO CHART, so
+  nothing fills head_extra even though its lead sentence announces a graph -
+  the generator's own mismatch, preserved. It is NOT the grouped statistics
+  table: one header row classed "header" and nothing else, so all six columns
+  sort and pretty/_stats_table.html is neither imported nor used. And it is
+  KEYED ON THE IMPLEMENTATION, one row per distinct step implementation.
 
-  The template is underscore-free but hyphen-named on disk: the file is
-  overview_steps.html and the artifact it writes is overview-steps.html. The
-  two names differ on purpose and neither follows the other.
+  INPUTS, both reached through a guarded default so an absent one renders the
+  empty page rather than raising - all four artifacts are written even when
+  the tag expression selects nothing:
+      features     PRIMARY. The normalised feature list every count here is
+                   derived from.
+      step_stats   OPTIONAL OVERRIDE for a writer that aggregates in Python:
+                   location (required - a blank one drops the entry),
+                   occurrences, passed, total_duration, max_duration and an
+                   optional average_duration, each count defaulting to 0. Used
+                   verbatim when present and non-empty, features unread.
 
-  WHAT MAKES THIS PAGE DIFFERENT FROM THE OTHER THREE OVERVIEWS
-  -------------------------------------------------------------
-  Measured on the reference tree, and each difference is load-bearing:
+  WHICH STEP INSTANCES ARE COUNTED. Hooks never are, structurally rather than
+  by a filter: hook entries live in an element's before and after lists, never
+  among its steps, and only steps are iterated. Background steps ARE counted,
+  once per scenario they precede. A step's status decides how its occurrence is
+  presented and never whether it exists, so a status this port's vocabulary
+  does not recognise counts as an unknown occurrence - which is what keeps this
+  page's own step count equal to the steps_total every statistics table in the
+  tree renders from app/reporting/aggregation.py. The exclusion rule for a step
+  without an implementation, and for an unselected element, is stated at the
+  site that applies it.
 
-    1. NO CHART. overview-features.html carries three canvases and three
-       chart initialisations and overview-tags.html one of each; this page
-       carries none, even though its own lead sentence announces a graph. The
-       mismatch is the generator's and it is preserved: nothing here fills
-       head_extra, so the emitted page holds no canvas element and no chart
-       constructor call anywhere in it.
-    2. NOT THE GROUPED STATISTICS TABLE. The two chart pages group their
-       header into two rows and exclude the grouping row from sorting with
-       the dont-sort class. This page has ONE header row carrying class
-       "header" and NOTHING ELSE, so every one of its six columns is
-       sortable. _stats_table.html is therefore not imported and not used -
-       its structure is a different table.
-    3. KEYED ON THE IMPLEMENTATION, not on a feature or a tag. One row per
-       distinct step implementation, aggregated across the whole run, so a
-       step used by four scenarios is one row with four occurrences.
+  THE ARITHMETIC. occurrences counts the instances, total sums their
+  durations, max is the largest single duration, average is
+  total // occurrences in NANOSECONDS, truncated there rather than in the
+  rendered milliseconds, and ratio is passed over occurrences. An absent or
+  negative duration contributes zero, so no row renders a blank cell. ROW
+  ORDER IS ASCENDING BY IMPLEMENTATION, CASE-SENSITIVELY - the sort default
+  is case-insensitive, so that flag is not decoration. THE FOOTER IS EMITTED,
+  its six cells holding the number of distinct implementations, the total
+  occurrences, the average over all occurrences, THE LARGEST ROW TOTAL rather
+  than the largest single duration, the sum of every duration, and the word
+  Totals - all computed from the rows this page renders.
 
-  THE RENDER CONTEXT - the contract app/reporting/pretty_reports.py renders
-  against. project_name, build_date_display, title_suffix and active_page are
-  the layout's own and are documented there; the last two are set below rather
-  than passed. This page reads ONE input, and accepts it in either of two
-  shapes so that the writer's choice of contract cannot silently empty the
-  table:
+  CLASS VOCABULARY - both stylesheets the layout already loads, nothing
+  invented in either. The generator's own are kept in full; the port's are
+  additive and entirely tqa- prefixed, so they cannot collide. The load-bearing
+  one is tqa-table, whose cell rule brings the overflow-wrap that stops a long
+  dotted path overflowing its column, the generator's stylesheet setting no
+  wrapping at all.
 
-      features       PRIMARY. The normalized result model's feature list -
-                     the same value app/templates/view/overview.html consumes
-                     and the shape tests/fixtures/sample_results.json carries.
-                     Every count on the page is derived from it here.
-
-      step_stats     OPTIONAL OVERRIDE, for a writer that would rather
-                     aggregate in Python. A sequence of mappings, each:
-                         location          the step implementation, required;
-                                           an entry with a blank one is dropped
-                         occurrences       integer, default 0
-                         passed            integer, count of passed
-                                           occurrences, default 0
-                         total_duration    integer nanoseconds, default 0
-                         max_duration      integer nanoseconds, default 0
-                         average_duration  integer nanoseconds, optional -
-                                           derived from the two above when
-                                           absent
-                     When it is present and non-empty it is used verbatim and
-                     features is not read.
-
-  Both are reached through the guarded-default form, so an absent input
-  renders the empty page rather than raising under a strict undefined policy.
-  That matters beyond tidiness: the run's exit contract requires all four
-  artifacts to be written even when the tag expression selects nothing, so
-  "no steps at all" is a real, reachable, must-not-fail input.
-
-  WHICH STEP INSTANCES ARE COUNTED
-  --------------------------------
-  The lead states the generator's own two exclusions and both are reproduced,
-  together with two more the reference data settles:
-
-    - HOOKS ARE NEVER COUNTED, exactly as the lead says. This is structural
-      rather than a filter: hook entries live in an element's own before and
-      after lists in the result model, never among its steps, and only steps
-      are iterated. The port's after-hook is a real registered hook - the Java
-      Hooks class imported the wrong After annotation, so its teardown never
-      ran and the reference result set holds no hook entry at all, and that
-      defect is corrected - so hook entries DO reach this page's input where
-      the reference had none. They stay excluded.
-    - A STEP THAT PROVIDES NO RESULT INFORMATION IS NOT LISTED: no result
-      mapping, an empty one, or one carrying no status. A status the port's
-      vocabulary does not recognise counts as no information either, since
-      status_token - the project's single status authority, which this page
-      reads its statuses through - answers 'unknown' for a blank status and
-      for an unrecognised one alike, and a row cannot report a result it never
-      understood. The aggregation records the full reasoning; the case cannot
-      arise from this port's own writer, which folds an unrecognised data
-      status to "untested".
-    - A STEP WITH NO IMPLEMENTATION IS NOT LISTED. An undefined step carries
-      matched false and an empty match, so it names no implementation; there
-      is no key to aggregate it under and a row with an empty Implementation
-      cell would report nothing. DERIVED, NOT MEASURED - the reference run
-      contains no undefined step - and it follows the lead's own reasoning
-      about steps that provide no information.
-    - AN ELEMENT THE TAG EXPRESSION DID NOT SELECT IS NOT COUNTED. The Java
-      runner never started such a scenario, so it was absent from the JSON the
-      reference tree was generated from and could not have been counted. The
-      port's model carries it with selected false, and dropping it here is
-      what keeps the two in agreement.
-
-  BACKGROUND STEPS ARE COUNTED, once per scenario they precede. Measured: the
-  reference page reports four occurrences of the login step that only a
-  Background declares, against four scenarios. There is no element-type filter
-  in this page for that reason.
-
-  THE ARITHMETIC, RE-DERIVED FROM THE REFERENCE DATA
-  --------------------------------------------------
-  Every rule below was confirmed by aggregating the reference cucumber.json
-  and reproducing all thirteen rows and the footer of the reference page
-  exactly - counts, durations, ratios and row order:
-
-      occurrences  the number of counted step instances.
-      total        the sum of their durations.
-      max          the largest single duration.
-      average      total // occurrences, in NANOSECONDS and truncated there,
-                   not in the rendered milliseconds. The four-occurrence row
-                   totals 6595000000 ns and renders 1.648, which only
-                   1648750000 ns produces; dividing the rendered 6.595 would
-                   give 1.649.
-      ratio        passed occurrences / occurrences, as a percentage.
-
-  A duration that is absent or not a non-negative number contributes nothing
-  to a sum and is not treated as unknown, because the generator read a missing
-  duration as zero: the reference page carries rows whose cells are 0.000 with
-  data-value="0". So every duration cell here receives an integer and a row
-  never renders a blank duration.
-
-  ROW ORDER IS ASCENDING BY IMPLEMENTATION, CASE-SENSITIVELY. Measured: the
-  reference orders userCanVerifyTheInformation before user_click_on_the_crm_-
-  dashboard, which only a case-sensitive comparison produces, since a
-  case-folded one puts the underscore first. The sort filter's default is
-  case-insensitive, so the flag below is not decoration.
-
-  THE FOOTER IS MEASURED AND IS EMITTED. The reference page carries
-  <tfoot class="total"> with six cells; its open and close tags sit outside
-  every merge-conflict region in that file, so both sides of the splice carry
-  it, and _macros.duration_total_cell exists precisely to fill it - its output
-  matches those cells byte for byte. The requirements for this file assert the
-  opposite, that the page has no footer, and that is the one measurable claim
-  in them that the reference contradicts; overview-failures.html, the one
-  overview that genuinely has neither chart nor footer, is the likely source
-  of it. Dropping the row would delete a whole line of reported totals from
-  the artifact, which the parity requirement does not allow, so it is emitted
-  and this note records why. Its six cells, in the reference's own order:
-  the number of distinct implementations, the total occurrences, the average
-  over all occurrences, THE LARGEST ROW TOTAL - not the largest single
-  duration, measured as 38.135 where the largest step was 30.202 - the sum of
-  every duration, and the literal word Totals. All five numbers are computed
-  from the rows this page renders, so the footer cannot disagree with the body
-  above it.
-
-  ONE GENERATOR DEFECT IS NOT REPRODUCED, and this is the only place it could
-  be mistaken for an omission. In the reference, the Max duration cell of a
-  multi-occurrence row carries the AVERAGE on its sort attribute while
-  displaying the maximum - data-value="1648750000" over the text 2.618 - so
-  that column sorts by the wrong number. duration_cell derives the attribute
-  and the text from one argument and cannot emit a mismatched pair, the
-  requirements for this file call for that macro and for every duration cell
-  to carry its own nanosecond count, and a cell whose sort key contradicts its
-  own text is a defect a reader cannot see and cannot diagnose. Each cell
-  therefore carries its own value.
-
-  CLASS VOCABULARY - two stylesheets, both already loaded by the layout, and
-  no name invented in either:
-
-    app/static/vendor/css/cucumber.css, the generator's own, supplies every
-    class measured on the reference page and all of them are kept:
-    stats-table and table-hover on the table, header on the header row,
-    location on the implementation cell - its rule at cucumber.css:181 is what
-    renders these paths monospace - duration on the five duration cells,
-    total on the footer, and the bare status words passed and failed on the
-    ratio cell.
-
-    app/static/css/main.css, the port's own, is loaded last and is entirely
-    prefixed, so adding its names alongside the generator's cannot collide
-    with them. Five are added and each earns its place:
-      tqa-table          on the table. Its cell rule brings overflow-wrap,
-                         which is what stops a long dotted implementation path
-                         overflowing the column on a narrow viewport - the
-                         generator's own stylesheet sets no wrapping at all.
-      tqa-duration       on all five duration cells: tabular numerals, so the
-                         column's digits line up, and monospace.
-      data-report-status on the ratio cell - the project's one status hook,
-                         which its stylesheet reads. Both values this page can
-                         emit, passed and failed, are in its enumeration.
-      tqa-empty          on the no-rows notice.
-      tqa-table-wrap     on the bounded scroll region around the table, which
-                         is what keeps six columns inside a narrow screen -
-                         see the responsive note below for the measurement
-                         that made it necessary. It carries tabindex, a role
-                         and an accessible name, because a region a reader
-                         scrolls has to be reachable by keyboard.
-    Three more were considered and rejected, so the omissions are not
-    oversights: tqa-count and tqa-badge are inline-flex pills and would break
-    a table cell's layout; tqa-header is the page-header region, not a table
-    header row; tqa-page imposes its own box - width, max-width, margin and
-    padding - on markup the Bootstrap grid already lays out.
-
-  WHAT THE RESPONSIVE BEHAVIOUR ACTUALLY IS, measured in a browser on the
-  emitted page rather than assumed, because the next reader will otherwise
-  either doubt it or "fix" it:
-    - At 1440 wide the page does not scroll horizontally at all: the document
-      is exactly the viewport width and every cell's content sits inside its
-      own box.
-    - At 390 wide the six columns do not fit, and WHERE THE OVERFLOW GOES was
-      the defect. Unwrapped, it went to the document: measured at a 390px
-      window, this page's document scrolled to 643px against a 488px
-      viewport, so the whole page - navigation, lead, footer and all - moved
-      sideways and the Ratio column sat off-screen. The table is inside a
-      tqa-table-wrap now, so the constraint lands on that element: the page
-      itself stays at the viewport width and the region scrolls.
-    - An earlier revision left it unwrapped deliberately, on the grounds that
-      the reference has no such container and the Bootstrap grid carries the
-      layout. That reasoning does not survive the measurement above: the grid
-      sets a column width, it does not bound a child's overflow, and whole-
-      page horizontal scrolling with a column off the edge is the reflow
-      failure the plan's responsive requirement exists to prevent. Acceptance
-      of these artifacts is structural, so one wrapper element costs no
-      parity.
-    - Under print emulation all six headers, every body row and the footer row
-      render; the navigation bar and the page footer are dropped and the status
-      tints go transparent, which is the stylesheet's own print behaviour. The
-      wrapper's own print rule drops its overflow constraint and its border,
-      so the table prints at full width rather than cropped to a scroll box.
-  The second correction is tqa-table on the table itself: without it these
-  dotted identifiers are single unbreakable tokens and force their column
-  wider than the page several times over, which is why that class is there
-  too.
-
-  NO PRESENTATION STATE. None of the stylesheet's three boolean hooks and none
-  of the script's three run-time state classes. Their absence is the state a
-  page with no scripting must be in - expanded, visible, closed - and this
-  page has nothing to expand or hide in any case.
-
-  NO BEHAVIOUR HOOK EITHER. The report script's data-report- attributes drive
-  filtering, expansion and the screenshot overlay; this page has no filter
-  control, no collapsible region and no screenshot, so it emits none of them,
-  not even a root attribute - a scope containing nothing to act on. Sorting is
-  the vendored table script's, bound to the table's id by the initialisation
-  the layout owns and emits exactly once. NO INLINE SCRIPT OF ANY KIND
-  BELONGS ON THIS PAGE.
-
-  NO LINK AND NO ASSET REFERENCE IS BUILT HERE. This page emits neither, and
-  no framework URL builder appears in this folder: the tree is written to disk
-  and read from a build workspace over the file protocol, where an application
-  route cannot resolve. Every reference the emitted page carries is the
-  layout's, and every one of those is tree-relative.
-
-  ESCAPING - the engine's own, on every interpolated value, with nothing
-  declared trusted markup. Implementation locations are model text and stay
-  escaped; per the plan's no-renaming rule they are rendered exactly as the
-  model carries them, so a dotted Python path appears as the port's own step
-  module and function and is never prettified into something that looks Java.
-
-  ACCESSIBILITY - the invisible kind only, since it changes nothing rendered:
-  a real thead, tbody and tfoot, scope on every column header, and a caption
-  deliberately not added because the reference has none and one would be
-  visible. The generator's own visible choices - its header colour, its
-  centred cells, its status tints - are left exactly as measured.
+  STATE AND HOOKS. None of report.js's three runtime classes
+  (report-is-collapsed, report-is-filtered-out, report-lightbox-is-open),
+  which that script alone writes and main.css alone reads, and no mutable
+  ARIA mirror: there is nothing here to expand, hide or open, and the table's
+  role and accessible name are static semantics. data-report-status on the
+  ratio cell is classification, and no other data-report-* hook is emitted.
+  Sorting belongs to the vendored table script, which the layout binds to the
+  table's id, so no inline script belongs on this page.
 -#}
 {% extends "pretty/_layout.html" %}
 {% import 'pretty/_macros.html' as fmt %}
@@ -339,6 +141,7 @@
                     'location': location,
                     'occurrences': [occurrences, 0]|max,
                     'passed': [entry.passed|default(0, true)|int(0), 0]|max,
+                    'unknown': [entry.unknown|default(0, true)|int(0), 0]|max,
                     'total_ns': total_ns,
                     'max_ns': [entry.max_duration|default(0, true)|int(0), 0]|max,
                     'average_ns': [given_average|int(0), 0]|max if given_average is not none
@@ -375,28 +178,40 @@
                         status, a blank one, a number, or a word this port's
                         vocabulary does not recognise. -#}
                     {%- set status = status_token(result.status)|string|trim -%}
-                    {#- Both conditions are the lead's own exclusions: no
-                        status is no result information, and no location is no
-                        implementation to aggregate under.
+                    {#- ONE CONDITION, AND IT IS ABOUT THE IMPLEMENTATION AND
+                        NOT ABOUT THE RESULT. A located step is an occurrence
+                        of its implementation whatever its result says; a step
+                        with no location names no implementation, so there is
+                        no key to aggregate it under and no row it could
+                        appear in - the lead's own reasoning, and the only
+                        exclusion this loop applies. The two structural
+                        exclusions above it still hold: a hook is never
+                        counted, because hooks live in an element's before and
+                        after lists and only steps are iterated, and an
+                        unselected element never ran. Background steps ARE
+                        steps and do count, once per scenario they precede.
 
-                        'unknown' IS "NO RESULT INFORMATION", which is the one
-                        decision this normalisation forces and it is taken
-                        deliberately. For well-formed data nothing changes: the
-                        seven tokens pass through and an absent or blank status
-                        is excluded exactly as before. The case that moves is a
-                        status outside the seven, which used to count as an
-                        occurrence it could never count as a pass - so one such
-                        step dragged its row's Ratio below 100% and coloured it
-                        failed, asserting a failure nobody read. Excluding it
-                        instead reports only the steps whose result this port
-                        actually understands, which is what the lead's own
-                        sentence promises. The case is degenerate in any event:
+                        THE STATUS DECIDES HOW AN OCCURRENCE IS PRESENTED,
+                        NEVER WHETHER IT EXISTS, and status_token above is the
+                        only thing that reads it. A status the port's
+                        vocabulary does not recognise - absent, blank, a
+                        number, another tool's word - folds to 'unknown' and
+                        is counted as an unknown occurrence, which the Ratio
+                        cell then reports in the unknown status rather than as
+                        a silent failure. Excluding it here, which is what
+                        this template used to do, made the page's own step
+                        count smaller than the steps_total every statistics
+                        table in this tree renders from
+                        app/reporting/aggregation.py's count_steps - that
+                        function counts such a step towards the total - so the
+                        page disagreed with the numbers printed beside it. The
+                        case stays degenerate, since
                         app/reporting/cucumber_json.py folds an unrecognised
-                        status to "untested" in the DATA, so a token outside
-                        the seven cannot reach this page from the port's own
-                        writer - only from a hand-built or corrupted result
-                        set. -#}
-                    {%- if location and status != 'unknown' -%}
+                        status to "untested" in the DATA and only a hand-built
+                        or corrupted result set reaches this page with one,
+                        but a degenerate input is exactly the input a report
+                        is read for. -#}
+                    {%- if location -%}
                         {%- set duration = result.duration|default(0, true) -%}
                         {%- set nanos = duration|int(0) if (duration is number and duration >= 0) else 0 -%}
                         {%- if location not in buckets -%}
@@ -404,6 +219,7 @@
                                     'location': location,
                                     'occurrences': 0,
                                     'passed': 0,
+                                    'unknown': 0,
                                     'total_ns': 0,
                                     'max_ns': 0
                                 } -%}
@@ -411,14 +227,20 @@
                             {%- set _ = rows.append(fresh) -%}
                         {%- endif -%}
                         {%- set bucket = buckets.get(location) -%}
-                        {#- The binary pass tally, derived from the normalised
-                            token above rather than from a fold of its own.
-                            The two classes this page can emit are passed and
-                            failed, both of which the generator's stylesheet
-                            and the port's status hook already declare. -#}
+                        {#- Two tallies, both read off the normalised token
+                            above rather than off a fold of their own: the
+                            passes, which the Ratio's percentage is, and the
+                            occurrences whose outcome the port could not read,
+                            which is what lets the Ratio cell distinguish "not
+                            every occurrence passed" from "no occurrence
+                            reported anything". They are disjoint by
+                            construction - one token per step - so the three
+                            classes this page can emit follow from them
+                            without a second reading of the data. -#}
                         {%- set _ = bucket.update({
                                 'occurrences': bucket.occurrences + 1,
                                 'passed': bucket.passed + (1 if status == 'passed' else 0),
+                                'unknown': bucket.unknown + (1 if status == 'unknown' else 0),
                                 'total_ns': bucket.total_ns + nanos,
                                 'max_ns': [bucket.max_ns, nanos]|max
                             }) -%}
@@ -444,7 +266,17 @@
 
 {#- The footer, read off the rendered rows. The fourth cell is the largest ROW
     TOTAL, which is what the reference measured; the guard is what lets a run
-    that selected nothing render zeros instead of raising on an empty set. -#}
+    that selected nothing render zeros instead of raising on an empty set.
+
+    ALL FIVE NUMBERS ARE READINGS OF step_rows AND OF NOTHING ELSE, which is
+    what makes the footer follow the body without a rule of its own: an
+    unknown occurrence is in a row, so it is in the row count, in the
+    occurrence total, in the summed durations and in the average's
+    denominator, and a location seen only through steps whose outcome was
+    unreadable is a row like any other. No footer cell reports passes, so the
+    unknown tally reaches the footer only through the occurrences it is part
+    of - which is exactly the agreement with the statistics tables that
+    dropping those occurrences used to break. -#}
 {%- set footer_occurrences = step_rows|sum(attribute='occurrences') -%}
 {%- set footer_total_ns = step_rows|sum(attribute='total_ns') -%}
 {%- set footer_max_ns = (step_rows|map(attribute='total_ns')|max) if step_rows else 0 -%}
@@ -491,48 +323,57 @@
         0.00% failed and 100.00% passed and nothing between, so the boundary
         is unmeasured, and a row holding one failure among four is not a row
         to report green. The comparison is >= rather than == so a malformed
-        pass count cannot fall through to the failed branch. -#}
-    {%- set ratio_class = 'passed' if (row.occurrences > 0 and row.passed >= row.occurrences) else 'failed' %}
+        pass count cannot fall through to the failed branch.
+
+        THREE READINGS, IN THIS ORDER, and the third is the default:
+          passed   every occurrence of the row passed;
+          unknown  no occurrence of the row reported an outcome this port
+                   recognises, so the row has nothing to be green or red
+                   about and says so - reported, not guessed;
+          failed   anything else, the mixed row included. ONE PASS BESIDE ONE
+                   UNKNOWN READS FAILED, deliberately: the row did not fully
+                   pass and part of it was not understood, and the reading
+                   that overstates a run's health is the one that misleads.
+        A row with no unknown occurrences takes the first or the last branch
+        exactly as it did before that tally existed, which is what keeps a
+        well-formed page byte-identical. The guarded-default form is what
+        lets a step_stats override that never counted them render too: an
+        absent key reads as zero rather than raising. -#}
+    {%- set unknown_occurrences = row.unknown|default(0, true)|int(0) -%}
+    {%- set ratio_class = 'passed' if (row.occurrences > 0 and row.passed >= row.occurrences)
+                          else ('unknown' if (row.occurrences > 0 and unknown_occurrences >= row.occurrences)
+                                else 'failed') %}
             <tr>
               {#- The implementation identifies its row, so it is the row's
                   own header cell rather than a data cell: a reader hearing a
                   duration in the fourth column hears which step
                   implementation it belongs to.
 
-                  THREE DECLARATIONS TRAVEL WITH THE CELL, and each one undoes
-                  a rule that began matching only because the element changed.
-                  Every one was measured in Chrome against the reference page
-                  rather than reasoned about:
+                  THREE DECLARATIONS TRAVEL WITH THE CELL, because no vendored
+                  or prefixed class can carry them on a th - the centring
+                  selector is (0,1,2) and `.tqa-table th` is a direct rule on
+                  the cell:
 
-                  text-align: left. cucumber.css:181-184 declares
+                  text-align: left. cucumber.css declares
                     `table.stats-table td.location, .location { font-family:
                     monospace; text-align: left }`. The bare .location half
-                    still matches a th, so the monospace family survives - but
+                    still matches a th, so the monospace family survives, but
                     at (0,1,0) it loses to the table's own
-                    `table.stats-table th` centring rule at (0,1,2), and the
-                    column was measured re-centred against left on the
-                    reference. These are long dotted implementation paths,
-                    which centring makes markedly harder to scan.
+                    `table.stats-table th` centring rule at (0,1,2) - and
+                    centring a long dotted implementation path makes it
+                    markedly harder to scan.
                   white-space: normal. This table carries tqa-table, whose
                     `.tqa-table th` rule sets white-space: nowrap - right for
-                    a header row, wrong for a body cell holding a
-                    70-character dotted path. Measured: the column grew to
-                    660px and the table to 1162px, 110px past its col-md-10
-                    container and 4px past the viewport, squeezing the Ratio
-                    column to 48px so "100.00%" and the "Totals" label broke
-                    mid-word. With the declaration the table measures its
-                    container exactly.
+                    a header row, wrong for a body cell holding a 70-character
+                    dotted path, which it pushes past both its container and
+                    the viewport, squeezing the Ratio column until "100.00%"
+                    and the "Totals" label break mid-word.
                   background-color: transparent. The same rule paints a th
-                    with the header background, which tinted this body column
-                    where the reference leaves it white.
+                    with the header background, which tints this body column
+                    where the contract leaves it white.
 
                   The remaining difference, font-weight 700, is left alone: a
-                  row header reading bolder than its data is correct. No
-                  vendored or prefixed class can carry any of this - the
-                  centring selector is (0,1,2) and .tqa-table th is a direct
-                  rule on the cell - and the durable home is a prefixed rule
-                  in the port's own stylesheet, which this template does not
-                  own. #}
+                  row header reading bolder than its data is correct. #}
               <th scope="row" class="location" style="text-align: left; white-space: normal; background-color: transparent">{{ row.location }}</th>
               <td>{{ row.occurrences }}</td>
               {{ fmt.duration_cell(row.average_ns, 'tqa-duration') }}
@@ -571,8 +412,13 @@
       </div>{% if not step_rows %}{#- The table above still renders its header
           and its footer, so the page's shape never depends on the data; this
           says in words what an empty body cannot. Anchored to the tag so that
-          a page WITH rows is left byte-identical to the reference here. #}
-      <p class="tqa-empty">No step carrying result information was recorded for this run, so there is nothing to report here. Every artifact is still written when a run selects no scenario.</p>{% endif %}
+          a page WITH rows is left byte-identical to the reference here.
+
+          The notice names the one thing that now empties this table: a step
+          whose result the port could not read still gets a row, so an empty
+          body means no step named an implementation to aggregate under - a
+          run that selected nothing, or one whose steps went unmatched. #}
+      <p class="tqa-empty">No step naming an implementation was recorded for this run, so there is nothing to report here. Every artifact is still written when a run selects no scenario.</p>{% endif %}
     </div>
   </div>
 </div>

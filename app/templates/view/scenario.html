@@ -1,41 +1,96 @@
 {#-
-  ===========================================================================
-  view/scenario.html - one scenario, served read-only at the scenario
-  endpoint. The deepest of the three report views.
-  ===========================================================================
+  view/scenario.html - one scenario, served read-only at the scenario endpoint:
+  its values, every step with its resolved location and matched arguments, the
+  untruncated failure text, the screenshot when a run captured one, and the
+  background before it. Extends base.html, sets active_nav to "reports-detail",
+  overrides title - the scenario's name - and content, opening at h2.
 
-  This is the page a reader reaches for when something failed. It renders one
-  scenario in full - its own values, its aggregate status and duration, every
-  step with the resolved step function's location, the matched arguments
-  spliced into the step text, the complete untruncated failure text, and the
-  failure screenshot when a run captured one - together with the background
-  that ran before it and links on to the sibling scenarios either side.
+  CONTEXT - feature and scenario, both required, both raw mappings handed over
+  whole; the feature supplies the breadcrumb and the sibling count the previous
+  and next links come from. findex is the FEATURE's zero-based position in the
+  top-level list; sindex is THAT SCENARIO'S ZERO-BASED POSITION AMONG THE
+  FEATURE'S SCENARIO ELEMENTS, not among its elements, so interleaved
+  backgrounds consume no index, and view/feature.html, which derives the same
+  value, must agree with this route. Neither key is an id slug. background,
+  optional: the element IMMEDIATELY PRECEDING this scenario, never another
+  scenario's copy, and absent entirely when the route supplies none.
+  artifact_modified, optional: that file's modification time as UTC ISO-8601
+  with a literal Z. Unusable results and either index out of range are a 404,
+  so this template only ever renders a real scenario. A BACKGROUND'S STATUS AND
+  DURATION ARE ITS OWN, derived from its steps alone and never folded into the
+  scenario's.
 
-  It reads what a run has already written and nothing else: no form, no
-  control that starts or re-runs anything, no endpoint of its own invention,
-  and no write of any kind. Runs start from the command line.
+  STATE, three separate vocabularies. The data-report- hooks here:
+  data-report-filter on each filter button, data-report-toggle with
+  aria-controls on each step-list control and data-report-detail on its list,
+  data-report-toggle-all on the two detail controls, and data-report-status on
+  the scenario section and its counts; the per-step filterable-and-status
+  pairing is the step partial's and data-report-root is base.html's. The
+  mutable ARIA mirrors authored here are aria-pressed on the filter buttons -
+  "all" pressed, each status unpressed - and aria-expanded="true" on every
+  step-list control, together the fully expanded, unfiltered page report.js
+  then maintains; the aria-current="page" on the breadcrumb's current item is
+  static semantics rather than a mirror. That default is
+  load-bearing here, the failure text and screenshot living inside collapsible
+  detail. The runtime classes report-is-collapsed, report-is-filtered-out and
+  report-lightbox-is-open are report.js's alone to write and main.css's alone
+  to read, which reads their absence as expanded, visible and closed; none is
+  server-rendered.
 
   ---------------------------------------------------------------------------
   RENDER CONTEXT - the contract for app/web/routes.py
   ---------------------------------------------------------------------------
+  This page DERIVES NO AGGREGATE. Every status, count, duration and timestamp
+  below is computed by app/reporting/aggregation.py - the project's one
+  normalized result model - handed over by the route, and formatted here. That
+  is what keeps this page, its sibling views, GET /reports/summary and the two
+  generated HTML artifacts readings of one calculation; when each derived its
+  own, they disagreed, and the badge on a scenario whose teardown failed read
+  passed here while the artifacts read failed.
+
   REQUIRED
 
-      feature    ONE raw feature mapping from the parsed results file, exactly
-                 as the JSON writer produced it - the feature this scenario
-                 belongs to. It supplies the breadcrumb, the naming context in
-                 the header, and the scenario count the previous and next
-                 links are derived from. Nothing is pre-processed and no
-                 aggregate is pre-computed: every count, status and total below
-                 is derived here, so this page, its sibling views and the
-                 artifact they all describe cannot drift apart.
+      feature    ONE decorated feature mapping - the feature this scenario
+                 belongs to. It supplies the breadcrumb and the naming context
+                 in the header; its display values are read from it directly
+                 and are still type-guarded here, because a malformed document
+                 has to render rather than take the page down.
 
       findex     The FEATURE's zero-based position in the results file's
                  top-level list.
 
-      scenario   The raw scenario element mapping - the element whose type is
-                 "scenario" standing at position sindex among this feature's
-                 scenario elements. Handed in whole and unprocessed, for the
-                 same reason as the feature.
+      scenario   The decorated scenario element mapping - the element whose
+                 type is "scenario" standing at position sindex among this
+                 feature's scenario elements. Its display values, its tags and
+                 its screenshots are read from it directly; its status, steps,
+                 start, duration and tally arrive beside it.
+
+      scenario_status scenario_steps scenario_started scenario_duration
+      scenario_tally
+                 THAT ELEMENT'S OWN aggregate: its status - the fold over its
+                 own steps AND ITS OWN HOOKS - the step mappings to render,
+                 its start timestamp, its duration as text, and its steps by
+                 status (total plus a by_status map in reading order).
+
+      background_status background_steps background_duration
+      background_tally
+                 The same four for the background, or an empty status, no
+                 steps, no duration and an empty tally when the route supplied
+                 no background at all.
+
+      page_tally The steps of BOTH elements, which is what the filter acts on.
+
+      filters    One entry per status those steps carry, in severity order,
+                 each with its token and its count.
+
+      failure_position
+                 The position of the FIRST FAILED step of this scenario, or
+                 nothing. The failure screenshot is attached to that step, so
+                 the image sits with the assertion text it documents.
+
+      total_scenarios
+                 How many scenarios this feature carries, which bounds the
+                 previous and next links.
 
       sindex     THAT SCENARIO'S ZERO-BASED POSITION AMONG THE FEATURE'S
                  SCENARIO ELEMENTS, which is not its position among the
@@ -63,8 +118,8 @@
 
   OPTIONAL
 
-      background The background element that IMMEDIATELY PRECEDES this
-                 scenario in the feature's element list, or nothing. When
+      background The decorated background element that IMMEDIATELY PRECEDES
+                 this scenario in the feature's element list, or nothing. When
                  supplied it is rendered in full; when absent no background
                  section appears at all. The route must NOT substitute another
                  scenario's copy: the background repeats before each scenario
@@ -154,34 +209,43 @@
       implemented and the configuration surface stays at its six keys.
 
   ---------------------------------------------------------------------------
-  AGGREGATION RULES - the same definitions the other two views apply
+  AGGREGATION RULES - one definition, and it is not here
   ---------------------------------------------------------------------------
-  This page, view/feature.html and view/overview.html are three presentations
-  of one calculation, so a reader comparing them can never be shown two
-  different answers. The precedence order, the counting rules and the duration
-  and timestamp formatting below are theirs, name for name:
+  app/reporting/aggregation.py owns every rule below, and the other two views
+  present the same ones. They are restated here as documentation of what the
+  values in the context MEAN, not as instructions this file carries out - and
+  if any statement here ever disagrees with that module, that module is right:
 
-    1. Status      The worst status among a set of steps, by the precedence
-                   declared below, highest first: failed, undefined,
-                   ambiguous, pending, skipped, untested, passed. A set with no
-                   step at all is unknown. Each step's status is normalised
-                   through the status partial, the project's single
-                   normalisation point.
-    2. Duration    The sum of the duration values that are PRESENT AND USABLE,
-                   in nanoseconds, rendered as seconds to three decimals.
-                   Usable is the step partial's own exported predicate - a
-                   non-negative integer that is not a boolean - so a total here
-                   can never count a sample the step rows below it decline to
-                   render. With no usable duration at all the total is unknown
-                   rather than zero, and renders an em dash.
-    3. Separately  THE BACKGROUND'S STATUS AND DURATION ARE ITS OWN. They are
-                   derived from its steps alone and rendered in its own
-                   section, and the scenario's are derived from the scenario's
-                   steps alone, because the two are separate elements in the
-                   model. Folding the background's steps into the scenario's
-                   status would let a background failure be reported as this
-                   scenario's, and would disagree with view/feature.html, which
-                   gives each element its own status for the same reason.
+    1. Status      The severity fold over one element's OWN steps AND ITS OWN
+                   HOOKS, highest first: failed, undefined, ambiguous,
+                   pending, skipped, untested, passed. So the badge on a
+                   scenario whose steps all passed but whose after-hook failed
+                   reads failed - which is the whole reason a hook's outcome is
+                   part of this reading. An element with neither steps nor
+                   hooks is PASSED, the reference generator's measured
+                   rendering of the step-less Background in this suite's own
+                   EmployeeFc.feature, and unknown is kept for a status the
+                   model never produced.
+    2. Duration    The sum of the STEP duration values that are present and
+                   usable, in nanoseconds, rendered as seconds to three
+                   decimals. Usable is a non-negative integer that is not a
+                   boolean, the same predicate the step partial renders by, so
+                   a total here can never count a sample the step rows below it
+                   decline to show. A HOOK'S DURATION IS NEVER ADDED, so the
+                   after-hook carrying a failure screenshot does not lengthen
+                   this scenario. With no usable sample at all the total is
+                   unknown rather than zero, and renders an em dash.
+    3. Separately  THE BACKGROUND'S STATUS AND DURATION ARE ITS OWN, and so
+                   are this scenario's: each is graded from its own steps and
+                   its own hooks and rendered in its own section, because the
+                   two are separate elements in the model. Folding the
+                   background's steps into the scenario's status would let a
+                   background failure be reported as this scenario's, and would
+                   disagree with view/feature.html, which gives each element its
+                   own status for the same reason.
+    4. Timestamps  Only a value the model can parse is displayed, so this page
+                   can never show a start time GET /reports/summary reports as
+                   null.
 
   The filter is the one place both sets are counted together, and necessarily
   so: on this page the filterable unit is the STEP, and the filter acts on
@@ -284,59 +348,23 @@
     aria-current="page" on either would misstate where the reader is. The
     breadcrumb below names the current item. -#}
 {% set active_nav = "reports-detail" %}
-{% from "partials/status_badge.html" import status_badge, status_token %}
-{#- duration_is_usable is imported beside the row it belongs to: the row
-    renders a duration only for a non-negative, non-boolean integer, so the
-    scenario and background totals below admit exactly the same values and
-    cannot count a sample no step row shows. -#}
-{% from "partials/step_row.html" import step_row, duration_is_usable %}
+{#- The badge is the shared partial's, so a status reads identically here, on
+    the other two views and in both generated HTML artifacts. It normalises
+    the token it is handed, which is already a normalised token from the one
+    result model - applying that normalisation to its own answer changes
+    nothing, and it is the partial's contract rather than a step this page
+    performs. -#}
+{% from "partials/status_badge.html" import status_badge %}
+{% from "partials/step_row.html" import step_row %}
 {% from "partials/lightbox.html" import screenshots, lightbox_overlay %}
 
-{#- Rule 1 of the aggregation contract, as data, and the same sequence
-    view/feature.html and view/overview.html declare. Highest severity first:
-    the first member of this sequence that occurs among a set of step statuses
-    is the status of the element those steps belong to. It is declared once,
-    here, and reaches worst_token below as that macro's default argument so the
-    order cannot be restated - and therefore cannot be restated differently -
-    anywhere else in this file. -#}
-{% set STATUS_PRECEDENCE = ('failed', 'undefined', 'ambiguous', 'pending', 'skipped', 'untested', 'passed') %}
-
-{#- Reading order for the tallies, again the other two views': the reference
-    overview page's own column order first - passed, failed, skipped, pending,
-    undefined - then the three remaining states that page has no column for, so
-    a tally is never silently dropped. Every token the status partial can answer
-    with appears exactly once. -#}
-{% set STATUS_READING_ORDER = ('passed', 'failed', 'skipped', 'pending', 'undefined', 'untested', 'ambiguous', 'unknown') %}
-
-{#- The worst status in a collection of already-normalised tokens, by the
-    precedence above. Answers "unknown" for an empty collection, for a missing
-    one, and for a collection holding nothing the precedence names - a status
-    the model never produced must not be reported as a pass. -#}
-{%- macro worst_token(tokens, precedence=STATUS_PRECEDENCE) -%}
-    {%- set found = namespace(token='') -%}
-    {%- set candidates = tokens|default([], true) -%}
-    {%- for candidate in precedence -%}
-        {%- if not found.token and candidate in candidates -%}
-            {%- set found.token = candidate -%}
-        {%- endif -%}
-    {%- endfor -%}
-    {{- found.token if found.token else 'unknown' -}}
-{%- endmacro -%}
-
-{#- How many of one token a collection holds. Kept as a macro so the header's
-    tallies and each filter control's count are counted the same way. -#}
-{%- macro count_of(tokens, token) -%}
-    {{- (tokens|default([], true))|select('equalto', token)|list|length -}}
-{%- endmacro -%}
-
-{#- A nanosecond total as seconds to three decimals. samples is the number of
-    duration keys that were actually present, which is what separates a
-    genuinely zero total from a total of nothing at all: with no sample the
-    duration is unknown and renders an em dash. The raw nanosecond integer is
-    never rendered. -#}
-{%- macro duration_value(total_ns, samples) -%}
-    {%- if (samples|default(0, true)) > 0 and (total_ns|default(0, true)) is number -%}
-        <span class="tqa-duration">{{ '%.3f'|format(total_ns / 1000000000) }} s</span>
+{#- A duration as the route supplies it: the seconds figure the one result
+    model formatted, or nothing at all when no step carried a usable sample -
+    which is unknown rather than zero, and renders an em dash. The raw
+    nanosecond integer never reaches this page. -#}
+{%- macro duration_value(seconds) -%}
+    {%- if seconds -%}
+        <span class="tqa-duration">{{ seconds }} s</span>
     {%- else -%}
         <span class="tqa-duration">&mdash;</span>
     {%- endif -%}
@@ -344,10 +372,10 @@
 
 {#- One timestamp, machine-readable and human-readable from the same string:
     the results file already carries fixed-width UTC ISO-8601, so reformatting
-    it would only invite the two forms to disagree. Blank or absent renders an
-    em dash. -#}
-{%- macro timestamp_value(iso) -%}
-    {%- set stamp = iso|default('', true)|string|trim -%}
+    it would only invite the two forms to disagree. The route has already
+    dropped any value the result model cannot parse, so what arrives here is
+    either a usable timestamp or nothing; blank renders an em dash. -#}
+{%- macro timestamp_value(stamp) -%}
     {%- if stamp -%}
         <time class="tqa-timestamp" datetime="{{ stamp }}">{{ stamp }}</time>
     {%- else -%}
@@ -411,7 +439,6 @@
 {%- set scenario_id = (scenario_map.get('id') if scenario_map.get('id') is string else '')|trim -%}
 {%- set scenario_line = scenario_map.get('line') -%}
 {%- set scenario_desc = scenario_map.get('description') if scenario_map.get('description') is string else '' -%}
-{%- set scenario_started = (scenario_map.get('start_timestamp') if scenario_map.get('start_timestamp') is string else '')|trim -%}
 
 {%- set feature_name = (feature_map.get('name') if feature_map.get('name') is string else '')|trim -%}
 {%- set feature_uri = (feature_map.get('uri') if feature_map.get('uri') is string else '')|trim -%}
@@ -442,109 +469,41 @@
 
 {% block content %}
     {#- ---------------------------------------------------------------------
-        Derivation. The background and the scenario are walked SEPARATELY,
-        each accumulating its own statuses and its own duration, because they
-        are separate elements in the model and rule 3 of the aggregation
-        contract gives each its own status. Only the filter counts the two
-        together, and it has to: the filterable unit here is the step, and the
-        filter acts on every step on the page.
+        CONSUMPTION, not derivation. The route hands this page each element's
+        own aggregate - the scenario's and, separately, the background's -
+        computed by app/reporting/aggregation.py, so rule 3 above holds by
+        construction: neither element's status, duration or tally is folded
+        into the other's, and each badge here is the same grading the
+        generated artifacts and GET /reports/summary apply to that element,
+        hooks included.
 
-        Every lookup is guarded, and by a type test rather than a truth test
-        wherever an absent key is legitimate. A sequence that is a string or a
-        mapping is rejected rather than iterated, since both would otherwise
-        iterate into nonsense.
+        Only the filter counts the two together, and it has to: the filterable
+        unit here is the step, and the filter acts on every step on the page,
+        which is what page_tally counts and what the header's own tally
+        deliberately does not.
         --------------------------------------------------------------------- -#}
+    {%- set scenario_steps = scenario_steps|default([], true) -%}
+    {%- set scenario_counts = scenario_tally|default({}, true) -%}
+    {%- set background_steps = background_steps|default([], true) -%}
+    {%- set background_counts = background_tally|default({}, true) -%}
+    {%- set page_counts = page_tally|default({}, true) -%}
+    {%- set filters = filters|default([], true) -%}
 
     {#- How many scenarios this feature carries, by the SAME rule that defines
         this page's own key: the number of elements whose type is "scenario",
         never the element count, which double-counts in this suite. It bounds
         the previous and next links, so an out-of-range link - which would
-        resolve to a 404 - can never be fabricated. An absent element list
-        yields zero and therefore no sibling link at all, rather than raising. -#}
-    {%- set raw_elements = feature_map.get('elements') -%}
-    {%- set element_list = raw_elements if (raw_elements is sequence and raw_elements is not string and raw_elements is not mapping) else [] -%}
-    {%- set counter = namespace(scenarios=0) -%}
-    {%- for element in element_list -%}
-        {%- set el_type = (element.get('type') if (element is mapping and element.get('type') is string) else '')|trim|lower -%}
-        {%- if el_type == 'scenario' -%}
-            {%- set counter.scenarios = counter.scenarios + 1 -%}
-        {%- endif -%}
-    {%- endfor -%}
-    {%- set total_scenarios = counter.scenarios -%}
+        resolve to a 404 - can never be fabricated. A feature with no element
+        list yields zero and therefore no sibling link at all. -#}
+    {%- set total_scenarios = total_scenarios|default(0, true) -%}
     {%- set has_previous = total_scenarios > 0 and link_sindex > 0 -%}
     {%- set has_next = total_scenarios > 0 and (link_sindex + 1) < total_scenarios -%}
 
-    {#- This scenario's own steps. failure.position records the FIRST failed
-        step, which is where the failure screenshot is attached below: the
-        embedding documents that failure, so it belongs beside the assertion
-        text rather than in a region of its own. -#}
-    {%- set raw_scenario_steps = scenario_map.get('steps') -%}
-    {%- set scenario_steps = raw_scenario_steps if (raw_scenario_steps is sequence and raw_scenario_steps is not string and raw_scenario_steps is not mapping) else [] -%}
-    {%- set scenario_tokens = [] -%}
-    {%- set scenario_time = namespace(duration_ns=0, samples=0) -%}
-    {%- set failure = namespace(position=none) -%}
-    {%- for step in scenario_steps -%}
-        {%- set result = step.get('result') if step is mapping else none -%}
-        {%- set result_map = result if result is mapping else {} -%}
-        {%- set token = status_token(result_map.get('status'))|string|trim -%}
-        {%- set _ = scenario_tokens.append(token) -%}
-        {#- A skipped step may carry no duration key at all, and a value the
-            step row would decline to render - a float, a negative count, a
-            boolean, anything but a non-negative integer - must not reach a
-            total shown beside that row. Both count as no sample rather than as
-            zero, and the test is the step partial's own exported predicate
-            rather than a second one stated here, so one reading of a duration
-            serves the step and the totals above it. Zero passes it, which is
-            deliberate: a skipped or undefined step records the integer zero. -#}
-        {%- set step_duration = result_map.get('duration') -%}
-        {%- if duration_is_usable(step_duration)|trim != '' -%}
-            {%- set scenario_time.duration_ns = scenario_time.duration_ns + step_duration -%}
-            {%- set scenario_time.samples = scenario_time.samples + 1 -%}
-        {%- endif -%}
-        {%- if token == 'failed' and failure.position is none -%}
-            {%- set failure.position = loop.index0 -%}
-        {%- endif -%}
-    {%- endfor -%}
-    {%- set scenario_status = worst_token(scenario_tokens)|string|trim -%}
-
-    {#- The background, when the route supplied one. Its steps, its statuses
-        and its duration are entirely its own. -#}
-    {%- set background_map = background if (background is defined and background is mapping) else {} -%}
-    {%- set raw_background_steps = background_map.get('steps') -%}
-    {%- set background_steps = raw_background_steps if (raw_background_steps is sequence and raw_background_steps is not string and raw_background_steps is not mapping) else [] -%}
-    {%- set background_tokens = [] -%}
-    {%- set background_time = namespace(duration_ns=0, samples=0) -%}
-    {%- for step in background_steps -%}
-        {%- set result = step.get('result') if step is mapping else none -%}
-        {%- set result_map = result if result is mapping else {} -%}
-        {%- set _ = background_tokens.append(status_token(result_map.get('status'))|string|trim) -%}
-        {#- The same exported predicate as the scenario's own loop above, for
-            the same reason: the background's total counts exactly the samples
-            its step rows render. -#}
-        {%- set step_duration = result_map.get('duration') -%}
-        {%- if duration_is_usable(step_duration)|trim != '' -%}
-            {%- set background_time.duration_ns = background_time.duration_ns + step_duration -%}
-            {%- set background_time.samples = background_time.samples + 1 -%}
-        {%- endif -%}
-    {%- endfor -%}
-    {%- set background_status = worst_token(background_tokens)|string|trim -%}
     {#- A background is rendered whenever the route supplied a mapping for it,
         even one carrying no step: dropping it would misreport what the results
         file says ran before this scenario. -#}
+    {%- set background_map = background if (background is defined and background is mapping) else {} -%}
     {%- set has_background = background_map|length > 0 -%}
-
-    {#- Every step the page renders, which is what the filter acts on. -#}
-    {%- set page_tokens = (background_tokens if has_background else []) + scenario_tokens -%}
-
-    {#- The statuses those steps actually carry, in severity order, which is
-        what the filter controls offer. Offering a status no step carries would
-        give the reader a button that empties the page. -#}
-    {%- set filter_statuses = [] -%}
-    {%- for token in STATUS_PRECEDENCE + ('unknown',) -%}
-        {%- if token in page_tokens -%}
-            {%- set _ = filter_statuses.append(token) -%}
-        {%- endif -%}
-    {%- endfor -%}
 
     {#- Screenshots belong to the SCENARIO, on its after-hook list, and the
         lightbox partial flattens that one level of nesting itself - so the
@@ -645,11 +604,11 @@
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Duration</dt>
-                <dd class="tqa-meta-value">{{ duration_value(scenario_time.duration_ns, scenario_time.samples) }}</dd>
+                <dd class="tqa-meta-value">{{ duration_value(scenario_duration) }}</dd>
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Steps</dt>
-                <dd class="tqa-meta-value">{{ scenario_tokens|length }}</dd>
+                <dd class="tqa-meta-value">{{ scenario_counts.total|default(0, true) }}</dd>
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Position</dt>
@@ -663,7 +622,7 @@
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Results modified</dt>
-                <dd class="tqa-meta-value">{{ timestamp_value(artifact_modified|default('', true)) }}</dd>
+                <dd class="tqa-meta-value">{{ timestamp_value(artifact_modified) }}</dd>
             </div>
         </dl>
 
@@ -701,25 +660,26 @@
 
         <p>
             These counts are this scenario's OWN steps, which are the steps its
-            status is taken from: a scenario takes the worst status among them,
-            so one failure is never averaged away by the passes around it. The
-            background that ran before it keeps its own status and its own
+            status is taken from - together with its own hooks, so a teardown
+            that failed shows on the badge above without appearing as a step
+            here. One failure is never averaged away by the passes around it.
+            The background that ran before it keeps its own status and its own
             counts in its own section below.
         </p>
 
+        {#- The tally's own map, which carries only the non-zero statuses and
+            is already in reading order, and the tally's own total, so the
+            parts and the total cannot disagree. -#}
         <ul class="tqa-summary">
-            {%- for token in STATUS_READING_ORDER %}
-            {%- set counted = count_of(scenario_tokens, token)|int %}
-            {%- if counted %}
+            {%- for token, counted in (scenario_counts.by_status|default({}, true)).items() %}
             <li class="tqa-count" data-report-status="{{ token }}">
                 {{ status_badge(token) }}
                 <strong>{{ counted }}</strong>
             </li>
-            {%- endif %}
             {%- endfor %}
             <li class="tqa-count">
                 <span>All steps</span>
-                <strong>{{ scenario_tokens|length }}</strong>
+                <strong>{{ scenario_counts.total|default(0, true) }}</strong>
             </li>
         </ul>
     </section>
@@ -740,14 +700,14 @@
         authored pressed and each status button unpressed, which is what the
         script itself writes when it initialises, so the announced state cannot
         change under the reader as the script loads. -#}
-    {%- if page_tokens %}
+    {%- if page_counts.total|default(0, true) %}
     <div class="tqa-filter" role="group" aria-label="Filter steps by status">
         <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="true">
-            All steps ({{ page_tokens|length }})
+            All steps ({{ page_counts.total }})
         </button>
-        {%- for token in filter_statuses %}
-        <button type="button" class="tqa-filter-btn" data-report-filter="{{ token }}" aria-pressed="false">
-            {{ token|capitalize }} ({{ count_of(page_tokens, token) }})
+        {%- for control in filters %}
+        <button type="button" class="tqa-filter-btn" data-report-filter="{{ control.token }}" aria-pressed="false">
+            {{ control.token|capitalize }} ({{ control.count }})
         </button>
         {%- endfor %}
     </div>
@@ -804,7 +764,6 @@
         <p class="tqa-feature-desc">{{ background_desc }}</p>
         {%- endif %}
 
-        {#- Four short labelled fields, filling the row this grid resolves to. -#}
         <dl class="tqa-meta">
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Keyword</dt>
@@ -818,11 +777,11 @@
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Steps</dt>
-                <dd class="tqa-meta-value">{{ background_tokens|length }}</dd>
+                <dd class="tqa-meta-value">{{ background_counts.total|default(0, true) }}</dd>
             </div>
             <div class="tqa-meta-item">
                 <dt class="tqa-meta-label">Duration</dt>
-                <dd class="tqa-meta-value">{{ duration_value(background_time.duration_ns, background_time.samples) }}</dd>
+                <dd class="tqa-meta-value">{{ duration_value(background_duration) }}</dd>
             </div>
         </dl>
 
@@ -872,7 +831,7 @@
                     filterable=true,
                     show_location=true,
                     inline_args=true,
-                    embeddings=(raw_hooks if (failure.position is not none and loop.index0 == failure.position) else none),
+                    embeddings=(raw_hooks if (failure_position is not none and loop.index0 == failure_position) else none),
                     screenshot_fallback_caption=scenario_heading) }}
         {%- endfor %}
     </div>
@@ -897,7 +856,7 @@
         failed scenario, since a capture that fails is logged and suppressed -
         nothing is emitted here at all: no placeholder, no "unavailable" note
         and no broken image. -#}
-    {%- if has_shots and failure.position is none %}
+    {%- if has_shots and failure_position is none %}
     <h2>Screenshots</h2>
     {{ shots }}
     {%- endif %}

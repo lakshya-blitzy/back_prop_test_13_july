@@ -133,10 +133,14 @@ and ``Sales.java``.  No exception handling -- a ``TimeoutException`` from the
 wait, a ``NoSuchElementException`` from a lookup and an ``AttributeError`` from
 a session that was never created all propagate uncaught, which is what the
 Java code does and what lets the failure surface in the step that caused it.
-No guard on the configuration accessor either: :func:`app.config.get_web_table_url`
-returns ``None`` when the key or the whole ``configuration.properties`` file is
-absent -- tolerated by design (AAP 0.6) -- and that ``None`` is passed straight
-to ``driver.get`` so it fails there, exactly as today.  And no locale key: the
+No guard of this module's own on the configuration accessor either, and none is
+needed: :func:`app.config.get_web_table_url` returns ``None`` when the key or
+the whole ``configuration.properties`` file is absent -- tolerated by design
+(AAP 0.6) -- and that ``None`` is passed straight to ``driver.get`` so it fails
+there, exactly as today, while a ``web.table.url`` that is *set* to a
+destination outside that accessor's navigation policy raises
+:class:`ValueError` inside the accessor, before this module has a value to
+navigate to.  And no locale key: the
 French text at ``Login.feature:89`` is the browser's own required-field
 message, whose language follows the browser locale, which AAP 0.6 leaves
 explicitly unresolved; the string is carried through byte-for-byte and the
@@ -155,13 +159,7 @@ from app.automation import By, wait_visible_element
 from app.config import get_web_table_url
 from app.pages import LoginPage
 
-# The nine step functions, in ``LoginSD.java`` declaration order rather than
-# alphabetically, so this list and the module read as one sequence; the
-# ordering rule is suppressed for that reason alone.  ``_page`` is private and
-# so is absent.  Nothing imports this module -- behave loads it for its
-# decorator side effects -- so the list is documentation of the surface the
-# feature files reach, and the reason no tenth name may appear on it.
-__all__ = [  # noqa: RUF022
+__all__ = [
     "user_is_on_the_upgenix_login_page",
     "user_enters_username",
     "user_enters_password",
@@ -175,29 +173,6 @@ __all__ = [  # noqa: RUF022
 
 
 def _page(context):
-    """Bind a fresh login page object to this scenario's session.
-
-    :param context: behave's ``Context``.  Only ``context.driver`` is read --
-        the session ``features/environment.py``'s ``before_scenario``
-        published, which is the single owner of the lifecycle.
-    :returns: A :class:`~app.pages.login_page.LoginPage` bound to that session.
-
-    The stand-in for ``LoginSD.java:16``'s ``LoginP loginP = new LoginP()``
-    field.  Constructing per call rather than per module is what stops a worker
-    serving elements out of another worker's -- or a previous scenario's --
-    browser: ``features/environment.py`` quits the session after every
-    scenario, so a page object cached at import would hand its locators to a
-    dead one.  It costs nothing, because
-    :meth:`BasePage.__init__ <app.pages.base_page.BasePage.__init__>` stores
-    the driver and does nothing else -- no element is located, no page is
-    navigated to and no session is created or requested.
-
-    ``context.driver`` is passed through exactly as it is, including when it is
-    ``None``: ``Driver.java:29-42`` switches on the ``browser`` property with
-    cases for Chrome and Firefox and no default branch, so an unrecognised
-    value yields no session, and AAP 0.4.1 requires that to *"fail at first
-    driver use, as today"* rather than be validated here.
-    """
     return LoginPage(context.driver)
 
 
@@ -214,8 +189,11 @@ def user_is_on_the_upgenix_login_page(context) -> None:
 
     ``:22`` reads the ``web.table.url`` property into a local and ``:23``
     navigates to it; the local is kept because the Java code has one.  The
-    value may legitimately be ``None`` -- see the module docstring -- and
-    reaches ``driver.get`` unguarded.
+    value may legitimately be ``None`` -- see the module docstring -- and that
+    ``None`` reaches ``driver.get`` with nothing of this module's own in its
+    way.  A value the accessor's navigation policy rejects never becomes this
+    local at all: the :class:`ValueError` is raised on the read at ``:22``, so
+    this step fails with the browser still where the previous step left it.
 
     ``LoginSD.java:21`` holds a commented-out expected title,
     ``//String expectedTitle = "Login | Best solution for startups";``.  It has
@@ -232,106 +210,28 @@ def user_is_on_the_upgenix_login_page(context) -> None:
 
 @step('User enters "{username}" username')
 def user_enters_username(context, username: str) -> None:
-    """Type the username into the login field -- ``LoginSD.java:26-29``.
-
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :param username: The value the feature file supplies inside the quotes.
-        Cucumber's ``{string}`` matches the surrounding quotes and hands the
-        step the unquoted value, so the behave pattern carries the quotes
-        literally around the named field; the feature text has real quotes,
-        for instance ``Login.feature:15`` and ``Logout.feature:15``.
-    :returns: ``None``.
-
-    ``:28`` sends the keys to ``loginP.inputEmail`` --
-    :attr:`LoginPage.INPUT_EMAIL <app.pages.login_page.LoginPage.INPUT_EMAIL>`,
-    the control named ``login``.  The field is not cleared first and no value
-    is trimmed or validated, because the source does neither: the
-    ``@UPGN-288`` outline depends on the field being reachable in whatever
-    state the previous step left it.
-
-    The pattern's trailing literal ``username`` is what keeps it distinct from
-    the password step's ``password``, so the two never compete for a step; it
-    must not be widened.
-    """
     _page(context).input_email.send_keys(username)
 
 
 @step('User enters "{password}" password')
 def user_enters_password(context, password: str) -> None:
-    """Type the password into the password field -- ``LoginSD.java:31-34``.
-
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :param password: The value the feature file supplies inside the quotes.
-    :returns: ``None``.
-
-    ``:33`` sends the keys to ``loginP.inputPassword`` --
-    :attr:`LoginPage.INPUT_PASSWORD
-    <app.pages.login_page.LoginPage.INPUT_PASSWORD>`, the control named
-    ``password``.  :attr:`LoginPage.BULLET_PASS
-    <app.pages.login_page.LoginPage.BULLET_PASS>` is that same locator under a
-    second name, declared separately at ``LoginP.java:31-32`` and read by the
-    masking step below.  Each is used where its Java original uses it and
-    neither is collapsed into the other (AAP 0.2.2).
-
-    Reached as an effective ``When`` from ``Logout.feature:16`` and ``:40``,
-    where the ``And`` inherits the preceding ``When`` -- see the module
-    docstring on ``@step``.
-    """
     _page(context).input_password.send_keys(password)
 
 
 @step("User clicks the login button")
 def user_clicks_the_login_button(context) -> None:
-    """Submit the login form -- ``LoginSD.java:36-39``.
-
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-
-    ``:38`` clicks ``loginP.button`` --
-    :attr:`LoginPage.BUTTON <app.pages.login_page.LoginPage.BUTTON>`, matched
-    by the XPath ``//button[.='Log in']``.  Nothing waits for the click to be
-    clickable first and nothing waits for the page that follows: the source
-    relies on the session's 10-second implicit wait (``Driver.java:44``) and,
-    where a scenario needs the dashboard, on the explicit wait in the
-    dashboard step.
-    """
     _page(context).button.click()
 
 
 @step("User should see the dashboard")
 def user_should_see_the_dashboard(context) -> None:
-    """Wait for the dashboard, then assert the page title -- ``:41-47``.
+    """Wait for the dashboard, then assert the page title - ``:41-47``.
 
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-    :raises AssertionError: If the title is not ``"Odoo"``.  The message is
-        ``The title is not same as the expected!`` followed by a single
-        trailing space, byte-exact from ``LoginSD.java:46``.
-
-    Three operations, in the source's order:
-
-    1. ``:43`` waits for the visibility of ``loginP.dashboard`` --
-       :attr:`LoginPage.DASHBOARD
-       <app.pages.login_page.LoginPage.DASHBOARD>`, the Odoo element id
-       ``oe_main_menu_navbar`` -- with the **3-second** timeout that
-       ``LoginSD.java:17`` fixes for this class.  The timeout is passed as a
-       literal at this one call site because the source sets a different one
-       per step class (2s, 3s, 4s and 20s elsewhere), and a shared default
-       would erase that difference.  The return value is discarded, as in
-       Java, and a timeout propagates as itself.
-    2. ``:44-45`` name the expected and actual titles in locals, and the
-       actual is read from the session's ``title`` **property**, which is the
-       Python spelling of ``Driver.getDriver().getTitle()``.
-    3. ``:46`` asserts them equal.  Java's three-argument
-       ``assertEquals(message, expected, actual)`` becomes a plain ``assert``
-       carrying the same message text (AAP 0.5.2, deviation 16): Python cannot
-       produce JUnit's ``expected:<...> but was:<...>`` framing, so the
-       assertion's subject and message are the parity, not the formatting
-       around them.
-
-    Registered with ``@step`` rather than under a ``Then``-only decorator for
-    the reason the module docstring measures: ``Logout.feature:18`` and ``:42``
-    reach this phrase as an effective ``When``.
+    The plain ``assert`` stands in for Java's three-argument ``assertEquals``
+    (AAP 0.5.2, deviation 16) and keeps its message byte-exact from ``:46``,
+    the single trailing space included.  Registration is ``@step`` because
+    ``Logout.feature:18`` and ``:42`` reach this ``@Then``-declared phrase as
+    an effective ``When`` (deviation 7).
     """
     wait_visible_element(_page(context).DASHBOARD, 3)
     expected_dashboard = "Odoo"
@@ -343,56 +243,19 @@ def user_should_see_the_dashboard(context) -> None:
 
 @step("User sees error message")
 def user_sees_error_message(context) -> None:
-    """Assert the failed-login banner is displayed -- ``LoginSD.java:49-52``.
-
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-    :raises AssertionError: If the banner is present but not displayed.  Java's
-        ``assertTrue`` is given no message at ``:51``, so neither is this
-        assertion.
-
-    ``:51`` reads ``isDisplayed()`` off ``loginP.alertErrorMessage`` --
-    :attr:`LoginPage.ALERT_ERROR_MESSAGE
-    <app.pages.login_page.LoginPage.ALERT_ERROR_MESSAGE>`, class ``alert``.
-    The lookup itself raises when the banner is absent altogether, once the
-    implicit wait expires, and that exception propagates uncaught; only a
-    located-but-hidden banner reaches the assertion.  The ``@UPGN-287`` outline
-    is the only consumer.
-    """
     assert _page(context).alert_error_message.is_displayed()
 
 
 @step('User sees "{alert_message}" message')
 def user_sees_please_fill_out_this_field_message(context, alert_message: str) -> None:
-    """Compare the browser's required-field message -- ``:54-58``.
+    """Compare the browser's required-field message - ``:54-58``.
 
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :param alert_message: The text the feature file supplies inside the quotes
-        -- ``Veuillez renseigner ce champ.`` at ``Login.feature:89``, the
-        browser's own French validation message, carried byte-for-byte.
-    :returns: ``None``.
-    :raises AssertionError: If the two values differ.  Java uses the
-        **two-argument** ``assertEquals`` at ``:57``, so this assertion carries
-        no message.
-
-    ``:56`` reads the ``validationMessage`` attribute -- camelCase, as the DOM
-    property is spelled -- off the login input, which it reaches by building
-    ``By.name("login")`` **inline** rather than through the page object.  That
-    single line is why this module imports :data:`~app.automation.By`, and the
-    Python bindings take the strategy and the value as two arguments where Java
-    takes one factory call.
-
-    The naming is the source's and is deliberately preserved: the live value
-    read out of the DOM is the local ``expected_message``, and the value the
-    feature file supplied is the actual.  The roles are inverted with respect
-    to what the names suggest; keeping ``expected_message`` is what keeps that
-    visible instead of quietly correcting it.
-
-    Which locale the browser reports this message in is not decided anywhere in
-    either repository -- AAP 0.6 leaves it explicitly unresolved -- so this
-    step behaves exactly as it does today: passing under a French-locale
-    browser and failing otherwise.  Nothing here sets, reads or infers a
-    locale.
+    The locale this message arrives in is decided nowhere in either repository
+    - AAP 0.6 leaves it unresolved - so the step passes under a French-locale
+    browser, against ``Veuillez renseigner ce champ.`` (``Login.feature:89``),
+    and fails otherwise.  ``:56`` builds its locator inline, this module's one
+    use of ``By``, and names the live DOM value ``expected_message`` while the
+    Gherkin value is the actual - the source's inversion, kept visible.
     """
     expected_message = context.driver.find_element(
         By.NAME, "login"
@@ -402,43 +265,18 @@ def user_sees_please_fill_out_this_field_message(context, alert_message: str) ->
 
 @step("User should see the password in bullet signs")
 def user_should_see_the_password_in_bullet_signs(context) -> None:
-    """Assert the password field masks its input -- ``LoginSD.java:60-63``.
-
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-    :raises AssertionError: If the input's ``type`` attribute is not
-        ``"password"``.  ``:62`` wraps a ``String.equals`` comparison in a
-        one-argument ``assertTrue``, so there is no message.
-
-    ``:62`` reads ``getAttribute("type")`` off ``loginP.bulletPass`` --
-    :attr:`LoginPage.BULLET_PASS
-    <app.pages.login_page.LoginPage.BULLET_PASS>`, the second name
-    ``LoginP.java`` gives the ``password`` control -- and compares it to
-    ``"password"``.  Java's ``assertTrue(a.equals(b))`` collapses to a single
-    equality assertion here, which is the same subject and the same outcome.
-    Drives ``@UPGN-289``, the one outline that never submits the form.
-    """
     assert _page(context).bullet_pass.get_attribute("type") == "password"
 
 
 @step("User clicks the enter button")
 def user_clicks_the_enter_button(context) -> None:
-    """Submit the login form again, by clicking -- ``LoginSD.java:65-68``.
+    """Submit the login form again, by clicking - ``LoginSD.java:65-68``.
 
-    :param context: behave's ``Context``; ``context.driver`` is the session.
-    :returns: ``None``.
-
-    ``:67`` is ``loginP.button.click()`` -- byte-identical to the login-button
-    step above.  **No key is pressed.**  Despite the phrase and despite
-    ``@UPGN-290``'s intent (*"Verify if the 'Enter' key of the keyboard is
-    working correctly on the login page"*, ``Login.feature:121``),
-    ``LoginSD.java`` imports neither ``Keys`` nor ``Actions`` and sends
-    nothing; reproducing the phrase's intent instead of its body would change
-    what the scenario exercises.
-
-    Kept as its own function rather than merged with the login-button step:
-    they are two separately registered phrases, ``Login.feature:126`` reaches
-    this one and ``:17`` reaches the other, and the JSON writer records a
-    distinct ``match.location`` for each.
+    **No key is pressed.**  Despite the phrase and ``@UPGN-290``'s intent
+    (``Login.feature:121``), ``:67`` is ``loginP.button.click()``, and
+    ``LoginSD.java`` imports neither ``Keys`` nor ``Actions``; reproducing the
+    intent instead of the body would change what the scenario exercises.  The
+    step stays separate from the login-button step because it is a separately
+    registered phrase with its own ``match.location``.
     """
     _page(context).button.click()

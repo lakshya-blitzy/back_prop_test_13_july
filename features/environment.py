@@ -1,112 +1,27 @@
 """Scenario lifecycle for the Gherkin suite - the port of ``Hooks.java``.
 
-behave discovers this module automatically at the root of the directory named
-by ``behave.ini``'s ``paths`` key, which is ``features``; that is why the file
-lives at ``features/environment.py`` and nowhere else.  The eleven Java
-step-definition classes become ten step modules under ``features/steps/`` plus
-this file, which carries the eleventh -- ``Hooks`` -- whose role is the
-scenario lifecycle rather than step matching.
+behave discovers this module at the root of the ``features`` directory, and it
+owns the driver lifecycle alone: no step and no page object creates or quits a
+session.  ``Hooks.java`` imports JUnit's ``@After``, so the Java teardown never
+ran; deviation 6 registers these as real hooks.  Constraints the code omits:
 
-The behavioural source is eight lines long::
-
-    @After                                          // Hooks.java:11
-    public void teardownScenario(Scenario scenario){
-        if(scenario.isFailed()){                    // :13
-            byte [] screenshot = ((TakesScreenshot) Driver.getDriver())
-                    .getScreenshotAs(OutputType.BYTES);          // :14
-            scenario.attach(screenshot, "image/png", scenario.getName()); // :15
-        }
-        Driver.closeDriver();                       // :17 - OUTSIDE the if
-    }
-
-Three properties of those lines are load-bearing here:
-
-1. **Teardown is unconditional.**  ``Driver.closeDriver()`` sits outside the
-   ``if``, so it runs for every scenario, passed or failed.  Only the
-   screenshot is conditional.  :func:`after_scenario` therefore calls
-   :func:`~app.automation.quit_driver` from a ``finally`` block, so no failure
-   while gathering evidence can skip it.  Getting this wrong leaks one browser
-   process per failing scenario and, across a process pool, exhausts the host.
-2. **The failure test covers exceptions as well as assertion failures.**
-   Cucumber's ``Scenario.isFailed()`` is true for both, so the analogue is
-   ``scenario.status.has_failed()`` -- behave's own helper, which unions
-   ``failed``, ``error``, ``hook_error``, ``cleanup_error``, ``undefined`` and
-   ``pending``.  An
-   equality test against a single status member would silently drop the
-   screenshot for every scenario that died on an exception rather than an
-   assertion, which in a Selenium suite is most of them.
-3. **The attachment carries bytes, a MIME type and the scenario's name.**
-   behave's own ``context.attach(mime_type, data)`` takes only the first two;
-   the result collector in ``app/reporting/events.py`` supplies the name from
-   the scenario it is already tracking.  That split is why this module needs no
-   import from the reporting package beyond the screenshot helper.
-
-Why these are registered as real hooks
---------------------------------------
-``Hooks.java:5`` imports ``@After`` from ``org.junit.After`` instead of
-``io.cucumber.java.After``, so Cucumber never registers the hook and the Java
-teardown **never runs** -- the reference build's JSON report corroborates it by
-containing no ``embeddings`` and no ``"after"`` key anywhere.  The plan's
-Conflict 6 corrects that defect rather than reproducing it (deviation 6:
-*"the teardown hook is registered as a real hook, enabling failure screenshots
-and per-scenario driver teardown"*), because reproducing it would ship the
-framework's screenshot capability dead on arrival and leak a browser per
-scenario.  **The canonical hook names below are therefore deliberate and must
-not be renamed or disguised in the name of literal parity.**
-
-The lifecycle contract, stated once
------------------------------------
-Each worker process holds one slot for a driver.  :func:`before_scenario`
-creates a session into that slot if it is empty; :func:`after_scenario`
-captures failure evidence, quits, and clears the slot.  So exactly one live
-session exists per worker at any moment, every scenario gets a fresh session,
-and no code ever touches a driver after ``quit()``.  This module,
-``app/automation/driver.py`` and ``tests/test_driver.py`` all describe that
-same contract.  It is the reason no step and no page object may create or quit
-a driver: the lifecycle has exactly one owner, and this is it.
-
-Hooks do not run under ``--dry-run``
-------------------------------------
-behave guards the whole scenario-hook block with ``if not
-runner.config.dry_run``, so a dry run creates no driver and captures no
-screenshot.  That is the faithful analogue of the Java runner's ``dryRun``
-option, which also launches no browser, so nothing here compensates for it: no
-driver is created outside a hook and ``before_all`` performs no warm-up.
-
-Import boundary
----------------
-Permitted: :mod:`app.automation` for the session lifecycle, the screenshot
-module of the reporting package for the capture, :mod:`app.config` for the
-userdata handshake, and the standard library.  Deliberately absent, each for a
-reason: the Selenium bindings, which only ``app/automation`` may import - the
-driver arrives here as an opaque object and nothing is called on it; the
-port's logging-configuration module, whose only callers are the command-line
-entry point and the application factory (and which this file would have no use
-for in any case, since it emits no diagnostics of its own - every message this
-lifecycle produces is logged by the module that owns the behaviour, the driver
-holder or the screenshot helper, and duplicating them here would double every
-line an operator reads); the page-object package, because step modules bind
-their own pages per scenario; the run and report services, which sit above this
-module in the
-dependency graph; the properties reader, reached only through
-:mod:`app.config`; the reporting event stream, since the result collector is
-reached through behave's own ``context.attach`` and needs no cooperation from
-this file; the web framework, because these hooks run in worker processes that
-build no web application; and ``behave`` itself, whose model objects are passed
-in rather than imported - which keeps this module importable, and
-unit-testable, without the engine.
-
-Nothing happens at import time beyond binding those names, and behave finds
-only the three hooks below: no ``after_all``, no feature-, step- or tag-scoped
-hook, and no direct-execution entry point, because ``Hooks.java`` defines
-exactly one hook and behave only ever imports this file.  The single
-module-private helper, :func:`_scenario_identity`, is not a hook and is not
-exported; it exists because the screenshot module's suppression record has to
-be able to name the scenario whose evidence went missing.
+1. One session per scenario.  Each worker process holds one driver slot;
+   ``before_scenario`` fills it, ``after_scenario`` quits it and clears it, so
+   nothing reaches a driver after ``quit()``.
+2. The failure test covers exceptions as well as assertion failures, hence
+   ``status.has_failed()`` -- which unions ``error``, ``hook_error`` and the
+   rest -- and not a comparison against a single status member.
+3. Capture precedes teardown, and teardown is unconditional: a screenshot
+   needs a live session, and ``Hooks.java:17`` quits outside the ``if``, so the
+   quit runs from a ``finally`` that no capture failure can skip.
+4. Capture failures are suppressed in ``capture_png`` and nowhere else
+   (deviation 19); an attach or quit failure is left to escape instead, which
+   behave reports as ``HOOK-ERROR`` and records as a ``hook_error`` scenario.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from app.automation import get_driver, quit_driver
@@ -114,43 +29,24 @@ from app.config import set_userdata
 from app.reporting.screenshots import DEFAULT_MIME_TYPE, capture_png
 
 # Every name this module binds is used below, and it binds nothing else: no
-# module logger, because nothing here logs (see the docstring's import-boundary
-# note), and no state, because the one piece of per-scenario state - the
-# session - lives on behave's context and in the driver holder's slot.
+# state, because the one piece of per-scenario state - the session - lives on
+# behave's context and in the driver holder's slot.
+#
+# One record is emitted from this module, and only from one place: a failed
+# teardown, where the scenario's identity is the one thing this boundary knows
+# and the driver module does not.  Nothing on the evidence-gathering path logs,
+# because the screenshot module owns that diagnostic already.
+logger = logging.getLogger(__name__)
+
 __all__ = ["after_scenario", "before_all", "before_scenario"]
 
 
 def _scenario_identity(scenario: Any) -> str | None:
-    """Describe ``scenario`` for a diagnostic log record, or return ``None``.
+    """Describe ``scenario`` as ``file:line 'name'``, or ``None``.
 
-    The screenshot module suppresses capture failures by design (the plan's
-    deviation 19), so its log record is the only trace such a failure leaves.
-    This builds what that record needs to attribute one: the feature file and
-    line in the ``file:line`` shape behave uses for a location, then the
-    scenario's own name in quotes -- ``features/Crm.feature:9 'User can create
-    pipeline in the displayed dashboard'``.
-
-    Three properties matter, and each is deliberate:
-
-    * **It cannot raise.**  It runs inside ``after_scenario``, where an
-      exception would be reported as a hook error against a scenario that has
-      already finished, so every attribute is read with a default and the
-      whole body is guarded.  A scenario object from a unit test may expose
-      none of these attributes; that yields ``None``, not a failure.
-    * **``None`` rather than a placeholder.**  The screenshot module renders no
-      identity segment at all for ``None``, so an unidentifiable scenario
-      leaves the record reading exactly as it did before identities existed.
-    * **Only ``filename``, ``line`` and ``name``.**  No tag, no step text and
-      no table or example row, because those are where a scenario outline's
-      ``<placeholder>`` values land, and ``Login.feature``'s Examples tables
-      hold literal usernames and passwords.  No scenario name in this suite
-      contains a placeholder; an outline's expanded name carries behave's row
-      suffix, which names the Examples table rather than its values.
-      Restricting the identity to these three attributes keeps a credential
-      out of the log by construction rather than by inspection.
-
-    :param scenario: behave's ``Scenario``, or any object at all.
-    :returns: The identity string, or ``None`` when nothing usable is exposed.
+    Cannot raise: an exception here would turn a finished scenario into a hook
+    error.  Reads only ``filename``, ``line`` and ``name``, never tags, step
+    text or example rows, where ``Login.feature`` keeps literal credentials.
     """
     try:
         filename = getattr(scenario, "filename", None)
@@ -160,8 +56,6 @@ def _scenario_identity(scenario: Any) -> str | None:
         parts: list[str] = []
 
         if filename:
-            # ``line`` is absent on a stub and 0 on a synthetic scenario;
-            # neither is worth appending, and both are falsy.
             parts.append(f"{filename}:{line}" if line else str(filename))
 
         if name:
@@ -179,67 +73,19 @@ def _scenario_identity(scenario: Any) -> str | None:
 def before_all(context: Any) -> None:
     """Install the run's behave userdata as this process's configuration overrides.
 
-    Called once per worker process, before any feature is read.  Its whole job
-    is the handshake that makes ``run-tests --browser <name>`` effective: the
-    port's run service passes each worker the chosen browser
-    as ``-D browser=<name>``, behave collects that into
-    ``context.config.userdata``, and :func:`app.config.set_userdata` installs
-    it in front of the properties file -- userdata first, then
-    ``configuration.properties``.  That is the only override path in the port;
-    there is no environment-variable layer to fall back on, so omitting this
-    call would make the command-line option silently inert and send every
-    worker to the properties file instead.
-
-    Nothing else belongs here.  In particular no driver is created: behave
-    skips the scenario hooks under ``--dry-run`` but still runs this one, and a
-    session started here would survive as a browser nobody quits.  No logging
-    is configured, no directory is created and no artifact is written -- the
-    command-line entry point owns the first, and ``app/utils/paths.py`` owns
-    every path in the port.
-
-    :param context: behave's ``Context``.  Only ``context.config.userdata`` is
-        read, and it is passed through as it is: an empty mapping simply leaves
-        the file-only path in place, and no key is validated here.  An
-        unrecognised browser name has to reach the driver and fail at first
-        use, exactly as the source's missing ``default:`` branch arranges.
-    :returns: ``None``.
+    Runs once per worker process, before the first scenario executes.  It
+    installs the port's only override path - userdata ahead of
+    ``configuration.properties`` - which is what makes ``--browser`` effective.
     """
     set_userdata(context.config.userdata)
 
 
 def before_scenario(context: Any, scenario: Any) -> None:
-    """Open this worker's browser session and publish it on the context.
+    """Open this worker's browser session and publish it on ``context.driver``.
 
-    ``Hooks.java`` has no ``@Before`` hook: the Java driver is created lazily by
-    the first ``Driver.getDriver()`` call inside a step.  Creating it here
-    changes nothing observable, because :func:`~app.automation.get_driver` is
-    itself create-on-demand and every scenario in this suite navigates in its
-    Background or its first step; what it does buy is a single, explicit place
-    where a scenario's session begins, which is the half of the lifecycle
-    contract that guarantees a fresh session per scenario once
-    :func:`after_scenario` has cleared the slot.
-
-    ``context.driver`` is set at behave's scenario scope, so it is discarded
-    automatically when the scenario ends; :func:`after_scenario` clears it
-    explicitly all the same, so that nothing can read a stale session even
-    within the teardown itself.
-
-    :param context: behave's ``Context``.  Receives the ``driver`` attribute
-        that steps and page objects read.
-    :param scenario: The scenario about to run.  Not inspected: no tag, name or
-        status changes what happens here, because the Java lifecycle draws no
-        such distinction.
-    :returns: ``None``.
-
-    .. note::
-       ``get_driver()`` legitimately returns ``None`` -- the source switches on
-       the ``browser`` property with cases ``"chrome"`` and ``"firefox"`` only
-       and no default branch, so an unrecognised value yields no session.  That
-       value is published as it is: **nothing here validates the browser name,
-       raises on ``None`` or substitutes a default.**  The failure has to
-       surface at the point of use, which is what makes a configuration
-       mistake diagnosable in the step that needed the browser rather than in
-       a hook that hid it.
+    ``Hooks.java`` has no ``@Before``: the Java driver is created lazily in the
+    first step, so this only fixes where a session begins.  An unrecognised
+    ``browser`` yields ``None``, published unvalidated to fail at first use.
     """
     context.driver = get_driver()
 
@@ -247,107 +93,58 @@ def before_scenario(context: Any, scenario: Any) -> None:
 def after_scenario(context: Any, scenario: Any) -> None:
     """Capture a failed scenario's screenshot, then always quit the session.
 
-    The port of ``Hooks.java:12-18``, in the order the source fixes:
-
-    1. When the scenario failed, photograph the still-live session and attach
-       the PNG to the report.
-    2. **Unconditionally** quit the driver and empty the slot.
-
-    Step 2 runs from a ``finally`` block, so a problem in step 1 cannot leak a
-    browser -- the single most important property of this function.  Step 1
-    necessarily precedes it: a screenshot needs a live session, and once
-    :func:`~app.automation.quit_driver` returns there is nothing left to
-    photograph.
-
-    Capture happens on failure only and exactly once, with no enable flag.
-    ``README.md`` claims screenshots for passing tests "if you enable it", but
-    no setting and no branch in ``Hooks`` provides one, so under the plan's
-    precedence rule that claim is aspirational and the configuration surface
-    stays at its six keys.
-
-    :param context: behave's ``Context``.  ``context.driver`` supplies the
-        session to photograph and is cleared before this returns.
-    :param scenario: The finished scenario.  Its ``status`` decides whether
-        evidence is gathered and its ``name`` is what the result collector
-        records as the attachment's name.  Its ``filename``, ``line`` and
-        ``name`` also become the diagnostic identity
-        :func:`_scenario_identity` builds, so that a suppressed capture
-        failure names the scenario it belongs to.
-    :returns: ``None``.
-
-    .. note::
-       **The screenshot path cannot change a scenario's outcome; teardown
-       deliberately can.**  Gathering evidence writes nothing back: the status
-       is read and never written, no result is marked failed, passed or
-       skipped, and a capture failure is logged and suppressed inside
-       ``capture_png`` because the plan's deviation 19 sanctions suppression
-       there and only there.  A failing ``quit_driver()`` is the opposite
-       case: it propagates out of this hook, and behave 1.3.3's
-       ``runner.run_hook`` prints ``HOOK-ERROR in after_scenario: ...``,
-       counts a hook failure and records that scenario's status as
-       ``hook_error`` while the remaining scenarios still run and all four
-       artifacts are still written.  A browser that would not close is a real
-       teardown failure, and hiding it would let this boundary report clean
-       teardown over a process that may still be alive.
+    ``Hooks.java:12-18``: photograph the live session, attach the PNG, then quit
+    unconditionally from the ``finally``.  Suppression is ``capture_png``'s alone
+    (deviation 19); an attach failure, like a quit failure, deliberately escapes.
     """
     try:
         # Hooks.java:13.  ``has_failed()`` rather than a comparison against a
         # single status member: see the module docstring's point 2.
         if scenario.status.has_failed():
-            # Hooks.java:14.  The session comes from the context - the one
-            # ``before_scenario`` published - and deliberately NOT from a fresh
-            # ``get_driver()`` call, which is create-on-demand and would start
-            # a browser during teardown just to photograph a blank page.
-            #
-            # It is passed on without a ``None`` check, and without a
-            # ``try``/``except`` of any kind.  Suppression has exactly one
-            # owner: ``capture_png`` logs and returns ``None`` for a dead
-            # session, for an object that cannot be photographed at all (the
-            # ``None`` a mis-configured browser leaves behind) and for an
-            # unusable payload.  Duplicating that here would hide real
-            # defects, and the plan's deviation 19 places the behaviour there
-            # rather than in the caller.
-            #
-            # What this hook does contribute to that suppression is the one
-            # thing only it knows: which scenario the missing evidence belongs
-            # to.  The identity is diagnostic only - it reaches the log record
-            # and never the attachment, whose name the result collector takes
-            # from the scenario it is already tracking.
+            # Hooks.java:14.  The session is the one ``before_scenario``
+            # published, not a fresh ``get_driver()`` that would open a browser
+            # during teardown; unchecked, because ``capture_png`` suppresses.
             png = capture_png(
                 context.driver,
                 scenario_id=_scenario_identity(scenario),
             )
 
             if png is not None:
-                # Hooks.java:15.  behave's own embedding protocol: the runner
-                # forwards this to every formatter exposing ``embedding``,
-                # which is how the result collector receives it without this
-                # module importing the reporting event stream.
-                #
-                # Raw PNG bytes, not the base64 string that
-                # ``capture_failure_embedding`` returns: ``Context.attach``
-                # documents its payload as a bytes-like object and behave's own
-                # JSON formatter base64-encodes whatever it is handed, so a
-                # pre-encoded string would be encoded twice there.  The
-                # collector accepts the bytes, encodes them once, and supplies
-                # the third argument of the Java ``attach`` call -- the
-                # scenario's name -- from the scenario it is already tracking,
-                # since ``Context.attach`` has no name parameter.  The MIME
-                # type is the screenshot module's constant, which is
-                # ``"image/png"`` verbatim from the source.
+                # Hooks.java:15.  Raw bytes, not the base64 that
+                # ``capture_failure_embedding`` returns: the collector encodes
+                # once and supplies the name ``Context.attach`` has no slot for.
                 context.attach(DEFAULT_MIME_TYPE, png)
     finally:
         # Hooks.java:17 - outside the ``if``, and here outside the ``try``:
         # every scenario tears down, whatever happened above.
         try:
+            # ``quit_driver`` is the single owner of the session lifecycle and
+            # of the OS-level containment behind it: it asks the browser to
+            # close, then reclaims the driver executable's whole process tree
+            # and *verifies* that nothing of it is left running.  A tree it
+            # cannot confirm stopped is raised rather than returned, which is
+            # why this call is the whole of this hook's teardown - there is no
+            # second step here that could disagree with it, and nothing in this
+            # module reaches a process.
             quit_driver()
+        except BaseException:
+            # Re-raised immediately; the handler exists only to add the one
+            # thing this boundary knows and ``quit_driver`` does not - which
+            # scenario the failure belongs to. A teardown that failed may have
+            # left a browser running with the system under test's
+            # authenticated session in it, and an operator reading a
+            # ``HOOK-ERROR`` needs to know which scenario to look under. The
+            # record carries the exception, so the reclamation diagnostic that
+            # preceded it can be read alongside this line.
+            logger.warning(
+                "Scenario teardown failed for %s; a browser session may still "
+                "be running",
+                _scenario_identity(scenario) or "an unidentified scenario",
+                exc_info=True,
+            )
+            raise
         finally:
-            # The slot is emptied by ``quit_driver`` itself; this clears the
-            # context's reference to the session it just closed, so no later
-            # reader can reach a quit driver.  Nested in its own ``finally``
-            # because ``quit_driver`` *can* raise: it installs no handler, so a
-            # browser that refuses to close surfaces here as a behave hook
-            # error rather than being absorbed into a clean teardown.  Both
-            # halves of that are deliberate -- the reference is cleared on
-            # every path, and the failure travels on out of this hook.
+            # Nested in its own ``finally`` because ``quit_driver`` can raise:
+            # the reference to the session it just closed is cleared on every
+            # path, and the failure still travels out of this hook.
             context.driver = None

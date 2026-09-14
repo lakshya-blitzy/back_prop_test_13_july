@@ -1,27 +1,29 @@
 r"""Tests for ``app/pages`` - the ten page objects and all 131 Java locators.
 
-What this module is the gate for
---------------------------------
-AAP 0.4.1 gives each of the ten page modules one job - reproduce the
-``@FindBy`` inventory of the Java class it ports - and AAP 0.8 fixes how:
-*"Preserve, do not tidy."*  A locator is therefore not merely "a selector that
-works": it is a specific strategy and a specific string of bytes, in a specific
-position in its class, under a specific name, duplicates and dead declarations
-included.  This module is where that claim is measured.
+AAP 0.4.1 gives each of the ten page modules one job, reproduce the ``@FindBy``
+inventory of the Java class it ports, and AAP 0.8 fixes how: *"Preserve, do not
+tidy."*  A locator is not merely a selector that works: it is a specific
+strategy and a specific string of bytes, in a specific position in its class,
+under a specific name, duplicates and dead declarations included.
 
-The authority is the Java source, not the Python constants
-----------------------------------------------------------
-The expected inventory below was built by reading the ten reference classes at
-``/opt/reference/Upgenix-QA/src/main/java/com/testinium/pages/*.java``, pinned
+The authority is the Java source, never the Python constants.  :data:`JAVA_PAGES`
+was read from the ten classes under
+``/opt/reference/Upgenix-QA/src/main/java/com/testinium/pages/`` at pinned
 revision ``47e9d697e4a9a85da889f94a846fdf47af28a240``, held REFERENCE by AAP
-0.2.1 and never modified.  Every row cites the ``@FindBy`` line it came from,
-and :data:`JAVA_PAGES` is **committed here as data** rather than derived from
-``app/pages`` at run time.  That distinction is the whole value of the module:
-a test that read the Python constants and compared them with themselves would
-pass just as happily against a wrong selector, a dropped field or a re-ordered
-class body.
+0.2.1 and never modified; every row cites the ``@FindBy`` line it came from, and
+the table is data committed here, not derived from ``app/pages`` at run time.
+Derived from the constants it checks it could not fail - not against a wrong
+selector, a dropped field or a re-ordered class body.
 
-Measured from that source, and asserted below:
+Four devices make the comparison honest.  The table checks itself first against
+per-class counts, a total, a strategy histogram and a distinct-pair count
+transcribed independently of the rows, so a transcription slip fails here
+instead of becoming authority.  Every constant is resolved through its accessor
+against an ordered driver recorder, covering strategy and selector as the driver
+receives them.  Every preserved quirk - spacing, an unescaped ``&``, a
+twice-declared selector, a field no step reads - is a named test carrying its
+Java line.  And source guarantees are read off the syntax tree, each helper
+paired with a negative case.
 
 =================  ============  ========  =====================================
 Java class         Python class  @FindBy   Notes
@@ -63,6 +65,15 @@ How each expectation is kept honest
 * **Source guarantees are checked through the syntax tree**, and each helper is
   paired with a negative test that feeds it source violating the guarantee.
   No production file is modified by this suite, temporarily or otherwise.
+* **The credentials are asserted as arguments, never as literals and never as
+  a configuration read.**  ``EmployeePage.login(a, b)`` types ``a`` then ``b``
+  and ``login()`` types ``None`` twice, so the values this module passes in are
+  what it asserts came out - a body carrying hard-coded literals sends
+  something else and fails, and a body reaching for ``app.config`` fails the
+  import-surface equality and the behavioural refusal test alike.  Nothing
+  credential-shaped is written into this module or looked for by value, and one
+  test scans all twelve modules of the package, prose included, so the literals
+  cannot come back unnoticed.
 
 Boundaries of this module
 -------------------------
@@ -815,14 +826,15 @@ JAVA_PAGES: Final[tuple[JavaPage, ...]] = (
 # =========================================================================== #
 # Figures declared independently of the rows above
 #
-# These are the measurements the review finding names, and they are stated
-# separately on purpose: asserting them against the table catches a
-# transcription error in the table itself, which would otherwise be asserted
-# against the implementation as though it were authority.
+# Each figure below is transcribed from the ten reference classes on its own,
+# never derived from :data:`JAVA_PAGES`, and is then asserted against the
+# rows.  Stating it independently is what gives the assertion its value: a
+# transcription error in the table fails here, instead of being asserted
+# against the implementation as though the table were the authority.
 # =========================================================================== #
 
-#: ``@FindBy`` count per Java class - the 21/16/28/15/8/7/3/10/20/3 of the
-#: finding, keyed by the class each figure belongs to.
+#: ``@FindBy`` count per Java class, keyed by the class each figure belongs
+#: to: 21/16/28/15/8/7/3/10/20/3 in the order of the table above.
 EXPECTED_COUNTS: Final[dict[str, int]] = {
     "CalendarP": 21,
     "ContactsP": 16,
@@ -899,13 +911,42 @@ UNREFERENCED_SALES_FIELDS: Final[tuple[str, ...]] = (
 PLURAL_OWNER: Final[str] = "SalesPage"
 PLURAL_CONSTANT: Final[str] = "ALL_CUSTOMERS"
 
-#: The credentials ``EmployeeP.login()`` sends, verbatim from
-#: ``EmployeeP.java:60-61``.  AAP 0.8's test-data note governs: they are
-#: pre-existing fixture data for an external test instance, carried over
-#: because parity requires it, and no agent may redact, parameterize or rotate
-#: them, or treat their presence as a finding.
-EMPLOYEE_LOGIN_EMAIL: Final[str] = "posmanager50@info.com"
-EMPLOYEE_LOGIN_PASSWORD: Final[str] = "posmanager"
+#: The two values this module *passes to* ``EmployeePage.login()`` and then
+#: asserts were typed.  ``EmployeeP.java:60-61`` typed two account literals and
+#: this suite used to pin them character for character; the port types its two
+#: arguments instead, so the expected values are whatever the caller supplied -
+#: and asserting *these* two proves exactly that, because **no source file in
+#: the port contains them**: a method that went back to hard-coded literals, or
+#: that fetched the values from anywhere at all, would send something else and
+#: fail.  Deliberately unmistakable placeholders in the reserved ``.invalid``
+#: namespace (RFC 2606): AAP 0.8's test-data note sanctions the plaintext
+#: credentials in the Gherkin Examples tables and nothing beyond them, so no
+#: real account value is replicated here either.
+SUPPLIED_USERNAME: Final[str] = "supplied-user@example.invalid"
+SUPPLIED_PASSWORD: Final[str] = "supplied-password-placeholder"
+
+#: A second, distinguishable pair, for driving ``login()`` twice in one test:
+#: a body carrying literals would type the first pair both times, and one that
+#: memoized its arguments would too.
+OTHER_USERNAME: Final[str] = "other-user@example.invalid"
+OTHER_PASSWORD: Final[str] = "other-password-placeholder"
+
+#: Every public entry point of ``app/config.py``, none of which
+#: ``EmployeePage.login()`` may call: AAP 0.4.2 enumerates ``app.config``'s
+#: consumers - ``employee_steps``, ``session_steps``, ``login_steps`` and
+#: ``driver.py`` - and names no page module, so the credentials reach this page
+#: as arguments rather than as a read.  ``get_property`` is included because it
+#: is the shared implementation behind the six accessors and therefore the back
+#: door an inline ``import app.config`` in the method body would reach for.
+FORBIDDEN_LOGIN_ACCESSORS: Final[tuple[str, ...]] = (
+    "get_browser",
+    "get_empl_title",
+    "get_password",
+    "get_property",
+    "get_url",
+    "get_username",
+    "get_web_table_url",
+)
 
 #: Which page classes each step module imports from the barrel, measured
 #: against ``features/steps/``.  ``notes_steps`` is the only module importing
@@ -925,10 +966,16 @@ STEP_MODULE_CONSUMERS: Final[tuple[tuple[str, frozenset[str]], ...]] = (
 )
 
 #: The import surface AAP 0.4.2 allows a page module: ``By`` for locator
-#: construction and the base class, and nothing else.
+#: construction and the base class, and nothing else.  One expectation that all
+#: ten modules meet, stated as an equality: ``app.config`` included, an import
+#: no page module may carry is a failure wherever it appears.
 EXPECTED_PAGE_MODULE_IMPORTS: Final[frozenset[str]] = frozenset(
     {"app.automation.By", "app.pages.base_page.BasePage"}
 )
+
+#: The module that declares ``login()``, named where a test needs to single it
+#: out rather than walk all ten.
+LOGIN_OWNING_MODULE: Final[str] = "employee_page"
 
 #: Names whose appearance in a page module's *code* would contradict the
 #: contract: a page declares locators, it does not resolve them, wait, sleep,
@@ -954,6 +1001,63 @@ EXPECTED_PAGE_MODULE_CALLS: Final[frozenset[str]] = frozenset({"send_keys", "cli
 #: Calls a page module may evaluate at import time.  ``sales_page`` builds its
 #: ``PLURAL_LOCATORS`` frozenset; the other nine evaluate nothing at all.
 ALLOWED_IMPORT_TIME_CALLS: Final[frozenset[str]] = frozenset({"frozenset"})
+
+#: What a credential looks like *in source*, as three independent shapes, each
+#: with the label a failure reports.  Written as generic shapes and never as the
+#: reference's own account values: a test that searched for those two strings
+#: would have to carry them, which is the very thing being removed from this
+#: package.
+#:
+#: 1. an e-mail address outside the reserved example namespaces - the shape the
+#:    Examples tables use for user names [Login.feature:22-36], so an account
+#:    address is half of a credential all by itself;
+#: 2. a keyword-to-literal assignment (``password="..."``, ``token: "..."``),
+#:    the shape a secret takes when it is written down; and
+#: 3. a string literal typed straight into the login or password field, which
+#:    is precisely how ``EmployeeP.java:60-61`` held them and how a regression
+#:    would reintroduce them.
+#:
+#: The whole file text is searched, code and prose alike: the docstring that
+#: spelled both values out in a numbered list disclosed them exactly as the two
+#: ``send_keys`` calls did.
+EMAIL_SHAPE: Final[str] = "e-mail address"
+
+CREDENTIAL_SHAPES: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
+    (EMAIL_SHAPE, re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")),
+    (
+        "credential assignment",
+        re.compile(
+            r"(?i)(?:password|passwd|pwd|secret|token|api[_-]?key)s?['\"]?\s*[=:]\s*"
+            r"['\"][^'\"]+['\"]"
+        ),
+    ),
+    (
+        "literal typed into a login field",
+        re.compile(r"input_(?:login|pass|password)\.send_keys\(\s*['\"]"),
+    ),
+)
+
+#: The second-level domains RFC 2606 reserves for documentation.  Matched as
+#: the **whole** domain of an address rather than as a substring of it, so
+#: ``someone@example.com`` is documentation while
+#: ``someone@notreally.example.com.attacker.net`` is not.  That is what keeps
+#: the scan usable for prose: a page docstring may illustrate a call with a
+#: documentation address without being reported, which
+#: :func:`test_the_credential_scan_allows_a_documentation_address` pins, while
+#: an account address anywhere in the package still fails.
+RESERVED_EXAMPLE_DOMAINS: Final[frozenset[str]] = frozenset(
+    {"example.com", "example.net", "example.org", "example.edu"}
+)
+
+#: The top-level domains RFC 2606 and RFC 6761 reserve, matched as a suffix of
+#: the address's domain because any name under them is reserved too - which is
+#: what makes ``.invalid`` the namespace this module's own sentinels live in.
+RESERVED_EXAMPLE_TLDS: Final[tuple[str, ...]] = (
+    ".example",
+    ".invalid",
+    ".test",
+    ".localhost",
+)
 
 #: Directory holding the ten page modules and the barrel.
 PAGES_DIR: Final[Path] = REPO_ROOT / "app" / "pages"
@@ -1048,7 +1152,7 @@ def upper_snake(java_field: str) -> str:
 # Syntax-tree based rather than textual, and that is load-bearing here: the
 # page modules' docstrings are long and several of them begin a prose line with
 # the word "from" or "import" (``contacts_page.py:111``,
-# ``employee_page.py:70``, ``sales_page.py:97``), so a grep for an import
+# ``employee_page.py:75``, ``sales_page.py:97``), so a grep for an import
 # statement produces false positives on this very package.
 #
 # ``tests/test_base_page.py`` carries its own copy of the helpers it needs.
@@ -1184,6 +1288,51 @@ def called_attribute_names(source: str) -> frozenset[str]:
     )
 
 
+def credential_shaped_matches(source: str) -> tuple[str, ...]:
+    """Every credential-shaped literal in *source*, as ``"label: text"``.
+
+    :param source: The full text of a module, prose included.
+    :returns: One entry per match, in file order, naming the shape from
+        :data:`CREDENTIAL_SHAPES` that matched and the text it matched.  Empty
+        when the module carries nothing credential-shaped.
+
+    E-mail addresses whose domain is reserved by
+    :data:`RESERVED_EXAMPLE_DOMAINS` or :data:`RESERVED_EXAMPLE_TLDS` are
+    dropped: they are documentation addresses by definition and cannot be an
+    account anywhere.  The exemption is deliberately confined to that one shape
+    and to the whole domain - a reserved name says nothing about a
+    ``password="..."`` that happens to mention one, and an address is only
+    documentation when the reservation covers its own domain rather than some
+    label inside it.
+    """
+    found: list[str] = []
+
+    for label, pattern in CREDENTIAL_SHAPES:
+        for match in pattern.finditer(source):
+            text = match.group(0)
+            if label == EMAIL_SHAPE and _is_documentation_address(text):
+                continue
+            found.append(f"{label}: {text}")
+
+    return tuple(found)
+
+
+def _is_documentation_address(address: str) -> bool:
+    """Whether *address* sits in a namespace reserved for documentation.
+
+    :param address: An e-mail address as it appears in source.
+    :returns: ``True`` when its domain *is* one of
+        :data:`RESERVED_EXAMPLE_DOMAINS` or ends in one of
+        :data:`RESERVED_EXAMPLE_TLDS`, ``False`` otherwise - including for a
+        real domain that merely contains a reserved label.
+    """
+    domain = address.rsplit("@", 1)[-1].lower().strip(".")
+
+    return domain in RESERVED_EXAMPLE_DOMAINS or domain.endswith(
+        RESERVED_EXAMPLE_TLDS
+    )
+
+
 def declared_methods(source: str) -> dict[str, tuple[str, ...]]:
     """The methods each top-level class in *source* declares.
 
@@ -1214,7 +1363,7 @@ def module_level_assignments(source: str) -> tuple[str, ...]:
     :param source: Python source text.
     :returns: The assigned names, including the targets of tuple assignment.
 
-    Used to assert that ``app/pages/__init__.py`` *"contains no logic"* (AAP
+    The evidence for ``app/pages/__init__.py`` *"contains no logic"* (AAP
     0.4.1): its only module-level assignment is ``__all__``.
     """
     names: list[str] = []
@@ -1341,13 +1490,19 @@ class ReorderedLoginProbePage(pages.EmployeePage):
     ) -> None:
         """Click first, then type - the reverse of the Java body.
 
-        :param input_login: Accepted and ignored, as the real method does.
-        :param input_pass: Accepted and ignored, as the real method does.
+        :param input_login: Typed into the login field last, where the real
+            method types it first.
+        :param input_pass: Typed into the password field first, where the real
+            method types it second.
         :returns: ``None``.
+
+        The two arguments are honoured, as the real method honours them: this
+        body exists to be *wrong about order*, and nothing else about it may
+        differ, or a passing ordered assertion would prove less than it claims.
         """
         self.login_button.click()
-        self.input_pass.send_keys(EMPLOYEE_LOGIN_PASSWORD)
-        self.input_login.send_keys(EMPLOYEE_LOGIN_EMAIL)
+        self.input_pass.send_keys(input_pass)
+        self.input_login.send_keys(input_login)
 
 
 # =========================================================================== #
@@ -2170,10 +2325,15 @@ def test_login_performs_the_three_java_operations_in_order(
     lookups there and mean three here.  Hoisting the elements into locals
     would collapse them to three lookups at one earlier instant and change
     behaviour on a page that re-renders between operations.
+
+    The two values typed are the two the caller supplied, in the Java order -
+    the first argument into :attr:`INPUT_LOGIN`, the second into
+    :attr:`INPUT_PASS` - and asserting them is what proves the method carries
+    no credential of its own.
     """
     page = pages.EmployeePage(stub_driver)
 
-    page.login()
+    page.login(SUPPLIED_USERNAME, SUPPLIED_PASSWORD)
 
     assert stub_driver.operations() == (
         "find_element",
@@ -2189,8 +2349,55 @@ def test_login_performs_the_three_java_operations_in_order(
         pages.EmployeePage.LOGIN_BUTTON,
     )
     assert stub_driver.calls_of(ELEMENT_SEND_KEYS) == (
-        (pages.EmployeePage.INPUT_LOGIN, EMPLOYEE_LOGIN_EMAIL),
-        (pages.EmployeePage.INPUT_PASS, EMPLOYEE_LOGIN_PASSWORD),
+        (pages.EmployeePage.INPUT_LOGIN, SUPPLIED_USERNAME),
+        (pages.EmployeePage.INPUT_PASS, SUPPLIED_PASSWORD),
+    )
+    assert stub_driver.calls_of(ELEMENT_CLICK) == ((pages.EmployeePage.LOGIN_BUTTON,),)
+
+
+def test_login_types_whatever_the_caller_supplies(stub_driver: StubDriver) -> None:
+    """A second pair of arguments yields a second pair of typed values.
+
+    The regression guard the finding asks for, and the one assertion a
+    hard-coded body cannot satisfy in any form: the method is driven twice with
+    two different pairs, and each run must type the pair it was given.  A body
+    carrying literals would type the same pair both times; one that memoized
+    its first arguments would type the first pair twice.
+    """
+    page = pages.EmployeePage(stub_driver)
+
+    page.login(SUPPLIED_USERNAME, SUPPLIED_PASSWORD)
+    page.login(OTHER_USERNAME, OTHER_PASSWORD)
+
+    assert stub_driver.calls_of(ELEMENT_SEND_KEYS) == (
+        (pages.EmployeePage.INPUT_LOGIN, SUPPLIED_USERNAME),
+        (pages.EmployeePage.INPUT_PASS, SUPPLIED_PASSWORD),
+        (pages.EmployeePage.INPUT_LOGIN, OTHER_USERNAME),
+        (pages.EmployeePage.INPUT_PASS, OTHER_PASSWORD),
+    )
+
+
+def test_login_passes_an_omitted_credential_through_unguarded(
+    stub_driver: StubDriver,
+) -> None:
+    """An omitted argument reaches the driver, which is AAP 0.6's tolerance.
+
+    Both parameters default to ``None`` and the method neither substitutes a
+    value of its own nor pre-empts the omission with a guard, a default or an
+    assertion: the argument is passed straight to ``send_keys``, so the failure
+    surfaces at the operation that received it rather than as a second, earlier
+    error message this port never had.  That is the same tolerance an undefined
+    configuration key gets everywhere else - ``get_url()`` returning ``None``
+    reaches ``driver.get(...)`` in ``employee_steps``, and the shared sign-in
+    precondition passes an unset ``username`` to ``send_keys`` - and the
+    default must never become a credential, which is why it is ``None`` and why
+    this test asserts ``None`` arrives.
+    """
+    pages.EmployeePage(stub_driver).login()
+
+    assert stub_driver.calls_of(ELEMENT_SEND_KEYS) == (
+        (pages.EmployeePage.INPUT_LOGIN, None),
+        (pages.EmployeePage.INPUT_PASS, None),
     )
     assert stub_driver.calls_of(ELEMENT_CLICK) == ((pages.EmployeePage.LOGIN_BUTTON,),)
 
@@ -2214,48 +2421,69 @@ def test_login_neither_clears_a_field_nor_waits(stub_driver: StubDriver) -> None
 
 
 @pytest.mark.parametrize(
-    "call",
+    ("call", "expected"),
     [
-        pytest.param(lambda page: page.login(), id="no-arguments"),
+        pytest.param(lambda page: page.login(), (None, None), id="no-arguments"),
         pytest.param(
-            lambda page: page.login("someone@example.com", "secret"),
+            lambda page: page.login(SUPPLIED_USERNAME, SUPPLIED_PASSWORD),
+            (SUPPLIED_USERNAME, SUPPLIED_PASSWORD),
             id="two-positional",
         ),
         pytest.param(
-            lambda page: page.login(input_login="someone@example.com", input_pass="secret"),
+            lambda page: page.login(
+                input_login=SUPPLIED_USERNAME, input_pass=SUPPLIED_PASSWORD
+            ),
+            (SUPPLIED_USERNAME, SUPPLIED_PASSWORD),
             id="two-keyword",
         ),
-        pytest.param(lambda page: page.login("someone@example.com"), id="one-positional"),
+        pytest.param(
+            lambda page: page.login(SUPPLIED_USERNAME),
+            (SUPPLIED_USERNAME, None),
+            id="one-positional",
+        ),
     ],
 )
-def test_login_ignores_its_arguments_entirely(
+def test_login_types_exactly_what_each_call_shape_supplies(
     call: Any,
+    expected: tuple[str | None, str | None],
     stub_driver: StubDriver,
 ) -> None:
-    """Every call shape sends the same two hard-coded credentials.
+    """Every call shape types its own arguments, and returns ``None``.
 
     ``EmployeeP.java`` declares **two** overloads, ``login()`` at ``:59-63``
     and ``login(String, String)`` at ``:65-69``, with byte-identical bodies:
-    the two-argument form discards both arguments and sends the same
-    literals.  Python has no overloading, so the port declares one method with
-    optional parameters and reproduces the discard.  That is faithful
-    reproduction, not an unfinished parameterization - honouring the arguments
-    would change behaviour.
+    the two-argument form discarded both arguments and sent two hard-coded
+    credentials.  Python has no overloading, so the port declares one method
+    with optional parameters - and **honours them**, which is the one parity
+    departure the method makes and the reason the literals are gone from the
+    source (finding SEC2-F17, CWE-798/200; the page may not read
+    ``app.config`` either, per AAP 0.4.2).
+
+    All four shapes are driven, including the keyword form and the partial
+    call, because each is a route by which a value could be dropped, swapped
+    between the two fields, or replaced by something the method supplied
+    itself.  The ``void`` return is asserted too: the Java methods return
+    nothing and this one adds no result.
     """
     page = pages.EmployeePage(stub_driver)
 
     assert call(page) is None
 
     assert stub_driver.calls_of(ELEMENT_SEND_KEYS) == (
-        (pages.EmployeePage.INPUT_LOGIN, EMPLOYEE_LOGIN_EMAIL),
-        (pages.EmployeePage.INPUT_PASS, EMPLOYEE_LOGIN_PASSWORD),
+        (pages.EmployeePage.INPUT_LOGIN, expected[0]),
+        (pages.EmployeePage.INPUT_PASS, expected[1]),
     )
-    assert "someone@example.com" not in str(stub_driver.calls)
-    assert "secret" not in str(stub_driver.calls)
+    assert stub_driver.calls_of(ELEMENT_CLICK) == ((pages.EmployeePage.LOGIN_BUTTON,),)
 
 
 def test_login_accepts_zero_one_or_two_arguments() -> None:
-    """Both Java call shapes stay expressible, and neither is required."""
+    """Both Java call shapes stay expressible, and neither is required.
+
+    The two defaults are asserted to be ``None`` specifically: a default is a
+    value stored in this source, so a credential default would be the finding
+    all over again, and ``None`` is also what makes an omitted argument fail at
+    the driver the way an unset property does (AAP 0.6).
+    """
     signature = inspect.signature(pages.EmployeePage.login)
     parameters = list(signature.parameters)
 
@@ -2269,21 +2497,27 @@ def test_login_consults_no_configuration_accessor(
     stub_driver: StubDriver,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The credentials are hard-coded, and no ``app.config`` read happens.
+    """No ``app.config`` read happens: the credentials arrive as arguments.
 
-    ``EmployeeP.java:60-61`` types two literals, and AAP 0.4.1 keeps the
-    configuration surface at six keys, none of which is a credential: ``url``
-    and ``EmplTitle`` are the Employee flow's only two, and AAP 0.4.2 assigns
-    both reads to ``features/steps/employee_steps.py``, not to this page.
+    AAP 0.4.2 gives page objects ``app.automation`` and nothing else, and
+    enumerates ``app.config``'s consumers - ``employee_steps``,
+    ``session_steps``, ``login_steps`` and ``driver.py`` - without naming a
+    page module, so the ``username`` and ``password`` values
+    ``features/steps/employee_steps.py`` reads are passed *in* rather than
+    fetched here.  The credentials are equally absent as literals, which
+    :func:`test_no_module_under_app_pages_carries_a_credential_literal` scans
+    for over the whole package.
 
     The import-surface assertion elsewhere in this module already proves no
     page module imports ``app.config`` at all.  This is the behavioural
     complement, and it covers the one route that a static import check cannot
     see: an ``import app.config`` written *inside* the method body.  Every
-    public accessor of the module is replaced with one that raises, so a read
-    of any of the six keys would fail the test rather than quietly return a
-    value - and the three operations are still asserted afterwards, so a
-    method that silently swallowed the error could not pass either.
+    public accessor of the module is replaced with one that raises,
+    ``get_property`` included because it is the shared implementation behind
+    the six, so a read of any key would fail the test rather than quietly
+    return a value - and the three operations and the two supplied values are
+    still asserted afterwards, so a method that silently swallowed the error
+    could not pass either.
     """
     consulted: list[str] = []
 
@@ -2292,32 +2526,72 @@ def test_login_consults_no_configuration_accessor(
             consulted.append(name)
             raise AssertionError(
                 f"EmployeePage.login() read configuration through "
-                f"app.config.{name}(); EmployeeP.java:60-61 types two "
-                f"hard-coded literals and AAP 0.4.2 gives page objects no "
-                f"configuration reads at all"
+                f"app.config.{name}(); the credentials reach it as arguments "
+                f"and AAP 0.4.2 gives page objects no configuration reads at "
+                f"all"
             )
 
         return accessor
 
-    for name in (
-        "get_browser",
-        "get_empl_title",
-        "get_password",
-        "get_property",
-        "get_url",
-        "get_username",
-        "get_web_table_url",
-    ):
+    for name in FORBIDDEN_LOGIN_ACCESSORS:
         monkeypatch.setattr(config, name, refuse(name))
 
-    pages.EmployeePage(stub_driver).login()
+    pages.EmployeePage(stub_driver).login(SUPPLIED_USERNAME, SUPPLIED_PASSWORD)
 
     assert consulted == []
+    assert stub_driver.operations() == (
+        "find_element",
+        ELEMENT_SEND_KEYS,
+        "find_element",
+        ELEMENT_SEND_KEYS,
+        "find_element",
+        ELEMENT_CLICK,
+    )
     assert stub_driver.calls_of(ELEMENT_SEND_KEYS) == (
-        (pages.EmployeePage.INPUT_LOGIN, EMPLOYEE_LOGIN_EMAIL),
-        (pages.EmployeePage.INPUT_PASS, EMPLOYEE_LOGIN_PASSWORD),
+        (pages.EmployeePage.INPUT_LOGIN, SUPPLIED_USERNAME),
+        (pages.EmployeePage.INPUT_PASS, SUPPLIED_PASSWORD),
     )
     assert stub_driver.calls_of(ELEMENT_CLICK) == ((pages.EmployeePage.LOGIN_BUTTON,),)
+
+
+def test_the_refusal_check_detects_a_configuration_read(
+    stub_driver: StubDriver,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sensitivity: the refusing accessors do fail a body that reads one.
+
+    The test above passes when nothing is consulted, which is also what a
+    broken arrangement would report.  A probe body that fetches the user name
+    the way the removed code did is driven through the same refusing accessors
+    here, and it must raise - so the guarantee is that the seam works, not
+    merely that it was installed.
+    """
+
+    class ConfigReadingProbePage(pages.EmployeePage):
+        """**A deliberately wrong page**: it reads ``username`` itself."""
+
+        def login(
+            self,
+            input_login: str | None = None,
+            input_pass: str | None = None,
+        ) -> None:
+            """Fetch the user name from configuration instead of using it.
+
+            :param input_login: Ignored, which is the violation.
+            :param input_pass: Typed as supplied.
+            :returns: ``None``.
+            """
+            self.input_login.send_keys(config.get_username())
+            self.input_pass.send_keys(input_pass)
+            self.login_button.click()
+
+    def refuse(*args: object, **kwargs: object) -> object:
+        raise AssertionError("configuration was read")
+
+    monkeypatch.setattr(config, "get_username", refuse)
+
+    with pytest.raises(AssertionError, match="configuration was read"):
+        ConfigReadingProbePage(stub_driver).login(SUPPLIED_USERNAME, SUPPLIED_PASSWORD)
 
 
 def test_the_login_sequence_assertion_detects_a_reordered_body(
@@ -2330,12 +2604,12 @@ def test_the_login_sequence_assertion_detects_a_reordered_body(
     Only the ordered sequence distinguishes it from the real method.
     """
     correct = pages.EmployeePage(stub_driver)
-    correct.login()
+    correct.login(SUPPLIED_USERNAME, SUPPLIED_PASSWORD)
     correct_sequence = stub_driver.operations()
 
     stub_driver.clear_calls()
     broken = ReorderedLoginProbePage(stub_driver)
-    broken.login()
+    broken.login(SUPPLIED_USERNAME, SUPPLIED_PASSWORD)
     broken_sequence = stub_driver.operations()
 
     assert len(stub_driver.calls) == 6
@@ -2390,6 +2664,11 @@ def test_a_page_module_imports_exactly_by_and_the_base_class(module: str) -> Non
     else."*  ``By`` for locator construction and ``BasePage`` for the
     mechanism: an added import - ``app.config``, a service, a path helper -
     fails here just as loudly as a browser-library one.
+
+    One expectation, met by all ten modules including ``employee_page``: the
+    credentials its ``login()`` types arrive as arguments, so the page that
+    owns the only behaviour in the package carries no wider import surface than
+    the nine that own none.
     """
     assert imported_names(module_source(module)) == EXPECTED_PAGE_MODULE_IMPORTS
 
@@ -2507,6 +2786,108 @@ def test_the_only_method_calls_in_the_package_are_logins_three() -> None:
         calls |= called_attribute_names(module_source(page.module))
 
     assert calls == EXPECTED_PAGE_MODULE_CALLS
+
+
+def test_login_types_its_two_parameters_and_fetches_nothing() -> None:
+    """``login()``'s body is three statements over its own two arguments.
+
+    The source-level complement to the behavioural assertions above, and the
+    static guard against both routes the finding closed: each operation is
+    driven by the parameter itself, so there is no string literal to disclose
+    and no function call through which a value could be fetched -
+    ``get_username()``, a helper, an inline ``import app.config``, any of them
+    would appear here as a call.  The only string in the method is its own
+    docstring, which is asserted rather than assumed, because a docstring is
+    exactly where the two credentials were last spelled out.
+    """
+    tree = ast.parse(module_source(LOGIN_OWNING_MODULE))
+    method = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "login"
+    )
+    statements = [
+        ast.unparse(node)
+        for node in method.body
+        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant))
+    ]
+    plain_calls = [
+        node.func.id
+        for node in ast.walk(method)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    ]
+    strings = [
+        node.value
+        for node in ast.walk(method)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+
+    assert statements == [
+        "self.input_login.send_keys(input_login)",
+        "self.input_pass.send_keys(input_pass)",
+        "self.login_button.click()",
+    ]
+    assert plain_calls == []
+    assert strings == [ast.get_docstring(method, clean=False)]
+
+
+@pytest.mark.parametrize(
+    "module",
+    [param.values[0] for param in MODULE_PARAMS] + ["base_page", "__init__"],
+)
+def test_no_module_under_app_pages_carries_a_credential_literal(module: str) -> None:
+    """Twelve modules, no credential-shaped literal in code or in prose.
+
+    The guard that keeps the credential remediation from silently coming back:
+    an account address, a ``password="..."`` assignment, or a string literal
+    typed into the login or password field is a finding wherever it appears in
+    this package, docstrings included - the docstring that spelled both values
+    out in a numbered list disclosed them exactly as the two ``send_keys``
+    calls did.
+
+    AAP 0.8's test-data note is not a licence here.  Its subject is the Gherkin
+    Examples tables, which stay verbatim in the ten ``.feature`` files; this
+    package is executable Python, and a credential in it is durable in the
+    repository, in every clone of it and in every artifact built from it.
+    """
+    assert credential_shaped_matches(module_source(module)) == (), module
+
+
+@pytest.mark.parametrize(
+    ("label", "source"),
+    [
+        (
+            "account address",
+            'PASSWORD_HINT = "sign in as an.account@info.example.net"',
+        ),
+        ("assignment", 'CREDENTIALS = {"password": "s3cr3t"}'),
+        ("typed literal", 'self.input_pass.send_keys("s3cr3t")'),
+    ],
+)
+def test_the_credential_scan_sees_each_shape(label: str, source: str) -> None:
+    """Sensitivity: each of the three shapes is detected on its own.
+
+    The first case also shows the reserved-domain exemption is narrow rather
+    than a hole: ``info.example.net`` is not one of the reserved namespaces -
+    those are the ``example.*`` second-level domains themselves and the
+    reserved TLDs - so an address that merely contains the word "example" is
+    still reported.
+    """
+    assert credential_shaped_matches(source), label
+
+
+def test_the_credential_scan_allows_a_documentation_address() -> None:
+    """Control: the parity example in ``login()``'s docstring is not a finding.
+
+    ``login("someone@example.com", "secret")`` is how the docstring shows both
+    arguments being discarded.  RFC 2606 reserves ``example.com`` for exactly
+    this, so the scan must stay usable for documentation while still reporting
+    an account address - and the bare word ``"secret"`` in that example is not
+    an assignment to a credential keyword, so it is not reported either.
+    """
+    documentation = '``login("someone@example.com", "secret")`` discards both.'
+
+    assert credential_shaped_matches(documentation) == ()
 
 
 @pytest.mark.parametrize(("module", "expected"), STEP_CONSUMER_PARAMS)

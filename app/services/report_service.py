@@ -1,30 +1,62 @@
-"""Artifact production for one finished run - the port of the Cucumber plugin list.
+"""Artifact production for one finished run: the four writers, driven in order.
 
-The Java runner produced its reports by declaring four plugins on
-``@CucumberOptions`` - one each of the ``html``, ``json`` and ``rerun``
-formatters plus ``me.jvt.cucumber.report.PrettyReports``, every one of them
-paired with the destination it wrote.  That declaration is reproduced verbatim
-inside this repository at ``README.md:78-83``, which quotes the original
-``CukesRunner.java:9-14``, and its four destinations are the four artifact
-constants :mod:`app.utils.paths` declares.  It is not re-quoted here: this
-module spells no destination of its own, referring to each of the four by the
-key that module publishes, so the plugin list is cited rather than copied.
+The Java runner declared four report plugins on ``@CucumberOptions`` - the
+``html``, ``json`` and ``rerun`` formatters plus PrettyReports, each paired
+with its destination (``CukesRunner.java:9-14``, AAP 0.4.1) - and ran them as
+listeners during the run.  Here ``test_run_service`` merges the per-worker
+documents first and :func:`generate_reports` fans that one document over the
+four writers of :mod:`app.reporting`, in AAP 0.3.3's shape: one merged result
+set, four independent writers, none aware of the others.
 
-Cucumber-JVM attached those four as event listeners, and each wrote its own
-artifact as the run progressed.  The port keeps the shape and moves the moment:
-``app/services/test_run_service.py`` merges the per-worker documents into one
-first, and :func:`generate_reports` then fans that single document out over the
-four writers in :mod:`app.reporting`, so every artifact has exactly one
-producer - specification section 0.3.3's *"one merged result set, four
-independent writers, none aware of the others."*
+This module writes no file and spells no path - each writer resolves its own
+destination through :mod:`app.utils.paths`, the port's sole owner of every path
+(AAP 0.4.2), so ``base`` reaches it untouched.  The one path resolved here is
+the intended destination of a writer that *failed*, and it never reaches a
+writer: the AAP 0.4.1 writer-failure row requires the failing writer to be
+named, while a template or model exception need not mention a path itself.
 
-This module is the fan-out and nothing besides.  It writes no file itself: each
-writer owns its own I/O and resolves its own destination through
-:mod:`app.utils.paths`, the port's sole owner of every path (specification
-section 0.4.2).  That is why ``base`` is handed to each writer untouched rather
-than resolved on its behalf, and why **no path is spelled anywhere below - no
-literal, no fragment, not even inside a docstring**, where it would be the
-first step of exactly the drift that module exists to prevent.
+Writer order is the port's own decision, the plugin list recording a
+declaration order only, and the AAP 0.4.1 row "the artifacts written before the
+failure remain" makes it observable.  :data:`WRITER_SEQUENCE` therefore drives
+the two machine-read artifacts first - the JSON report, the Jenkins publisher's
+only input (``Jenkins:15`` narrows ``fileIncludePattern`` to it), then the
+rerun manifest ``run-tests --rerun`` reads back as ``FailedTestRunner.java:11``
+did - so a fault in the HTML page or the report tree, neither of which has an
+automated consumer, cannot cost those two; do not re-sort it.
+
+Nothing here rolls back or deletes, and every :exc:`Exception` a writer raises
+becomes a :class:`ReportOutcome` rather than an escape, while
+``KeyboardInterrupt`` and ``SystemExit`` propagate untouched.  Artifacts written
+before a failure stay on disk, one ERROR record names the writer that failed,
+and the outcome is reported once, by ``app/cli.py``.  A *test* outcome is never
+a failure (``testFailureIgnore=true`` at ``pom.xml:25``, six ``-1`` thresholds
+at ``Jenkins:15``), and a scenario-less run still writes all four, empty.
+
+That resolved path is carried on :attr:`ReportOutcome.failed_path`, for a
+caller with something to do about it.  What the **log records** name is a
+second rendering of the same identity, :meth:`WriterSpec.artifact_id` - the
+relative spelling :attr:`app.utils.paths.ArtifactSpec.relpath` carries,
+again from that module's own table.  A console log is archived and shared, so the absolute location of the
+workspace a run executed in is disclosure rather than diagnosis (CWE-200), and
+the relative form is the one a reader acts on in any case: it is what
+``README.md`` quotes and what the publisher's narrowed ``fileIncludePattern``
+matches (``Jenkins:15``).  Neither rendering is a path this module spelled.
+
+One fact the fan-out owns: when the run was reported
+----------------------------------------------------
+A run has one generation time, and this is the layer that can say so, because
+it is the last point at which the four artifacts are still one thing.  The
+stamp is therefore resolved **once, before the loop** - from the document, whose
+``generated_at`` the collector writes at close and the merge keeps the latest
+of, or, for a document carrying none, from a single clock reading here - and
+every writer is handed one document that carries it.  **No writer has a clock
+of its own.**  While one did, an empty run produced a generation time on the
+self-contained page and none in the report tree, whose Date cell is deliberately
+result-backed, so one document described itself two different ways and the value
+changed on every render; a stamp resolved here cannot do either.  It travels
+*in the document* rather than as a per-writer rendering argument, which is what
+keeps the call shape uniform for all four writers and leaves the two machine-read
+contracts untouched by it.
 
 One thing this module does do with a path, and the line it draws
 ----------------------------------------------------------------
@@ -159,10 +191,15 @@ Deliberately absent
 Import boundary
 ---------------
 The standard library, the four writer entry points from the
-:mod:`app.reporting` barrel, and from :mod:`app.utils.paths` the four artifact
-keys and the resolver a failure diagnostic names its destination with - the
-``SV --> RP`` and ``SV --> UT`` edges of the section 0.4.2 graph, and no
-others.  Nothing else: no Flask, no Selenium, nothing from ``app/config.py`` or
+:mod:`app.reporting` barrel, the timestamp format
+:mod:`app.reporting.events` owns - taken from that module because the barrel
+advertises the writers and the schema's operations rather than its formatting
+helper, and used for the one generation stamp above so an artifact cannot tell
+a resolved stamp from a result-backed one - and from :mod:`app.utils.paths` the
+four artifact keys, the artifact table a record takes its relative
+identifier from, and the resolver a failure diagnostic names its destination
+with: the ``SV --> RP`` and ``SV --> UT`` edges of the section 0.4.2 graph, and
+no others.  Nothing else: no Flask, no Selenium, nothing from ``app/config.py`` or
 ``app/utils/properties.py`` - the dependency graph has no
 services-to-configuration edge, and the properties file is reached only through
 the configuration module, whose consumers are the step modules and the driver -
@@ -185,20 +222,26 @@ whole fan-out at a temporary directory.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, NamedTuple
+from typing import TYPE_CHECKING, Final, NamedTuple, Protocol, runtime_checkable
 
-# The barrel, not the six sibling modules, because specification section 0.4.2
-# makes it the package's advertised surface and it documents this very loop
-# (``app/reporting/__init__.py``, "The four writers drive in a loop").
 from app.reporting import (
     write_cucumber_json,
     write_html_report,
     write_pretty_reports,
     write_rerun_txt,
 )
+
+# The one timestamp format in the project, from the module that owns the result
+# schema this fan-out passes through.  Taken from the defining module rather
+# than the barrel because the barrel deliberately advertises the writers and
+# the schema's own operations, not its formatting helper; the edge is still the
+# ``SV --> RP`` one, and this module reads no clock other than the single
+# generation stamp :func:`generate_reports` resolves with it.
+from app.reporting.events import format_timestamp
 
 # The artifact *identities*, and the one resolver that turns an identity into a
 # destination.  Imported for a diagnostic and for nothing else: this module
@@ -209,6 +252,7 @@ from app.reporting import (
 # ``app/utils/paths.py``"; section 0.4.2's graph carries the ``SV --> UT`` edge
 # this import travels).
 from app.utils.paths import (
+    ARTIFACT_SPECS,
     CUCUMBER_JSON_NAME,
     CUCUMBER_REPORTS_HTML_NAME,
     PRETTY_REPORTS_DIR_NAME,
@@ -221,12 +265,16 @@ if TYPE_CHECKING:  # pragma: no cover - resolved by a type checker, never at run
     # ``app/reporting/__init__.py`` deliberately withholds from the barrel as
     # "annotations rather than API", so it is taken from its defining module -
     # the same guarded-import shape ``app/automation/waits.py`` uses for the
-    # types it never touches at run time.  This module only passes the document
-    # through; it never builds or inspects one.
+    # types it never touches at run time.  The document is passed through
+    # rather than built: the one key this module reads is ``generated_at``, and
+    # the one document it may construct is a shallow copy of the caller's
+    # carrying that stamp - see :func:`_document_for_fan_out`.
     from app.reporting.events import ResultSet
 
 __all__ = [
     "WRITER_SEQUENCE",
+    "PublicationBoundaryLost",
+    "PublicationGuard",
     "ReportOutcome",
     "WriterResult",
     "WriterSpec",
@@ -235,12 +283,98 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: Substituted for a destination that could not be resolved, so that a
-#: writer-failure record always reads as a sentence instead of printing a bare
-#: ``None`` beside the writer's name.  It is deliberately not path-shaped:
-#: nothing downstream should be able to mistake it for a destination it could
-#: look for.
 _UNRESOLVED_DESTINATION: Final[str] = "an unresolved destination"
+
+#: The result document's generation-stamp key, in the internal schema
+#: ``app/reporting/events.py`` owns - the one key this module reads, and the one
+#: it may set on a copy.  Named once here so the fan-out spells it in exactly
+#: one place.
+_GENERATED_AT_KEY: Final[str] = "generated_at"
+
+
+# --------------------------------------------------------------------------- #
+# The publication boundary
+#
+# The four artifacts sit at fixed paths that every run in a checkout shares, so
+# two runs publishing at once leave a workspace holding a mixture of both -
+# this run's JSON beside that run's HTML, each naming scenarios, step arguments
+# and screenshots from a different execution.  What prevents that is the claim
+# the command line holds on the build output from before the clean until after
+# this fan-out, and what this module adds is the *check*: the claim is verified
+# immediately before each writer publishes, so a run that has lost it stops
+# instead of writing into a workspace another run has taken over.
+#
+# The claim is passed in rather than acquired here, and it is read through the
+# protocol below rather than by its type, because specification section 0.4.2
+# fixes the dependency graph: the two services never import each other and
+# ``app/cli.py`` connects them.  A structural protocol is what lets this module
+# verify the boundary without an import that graph forbids.
+#
+# What this module deliberately does **not** do is render the four artifacts
+# into a private generation and promote them onto their final paths itself.
+# Three frozen contracts forbid it, and each of them independently:
+#
+# * **Specification section 0.4.2** - "Artifact paths are owned by
+#   ``app/utils/paths.py``.  Every writer, the artifact route, the clean step
+#   and the per-worker invocation take their paths from it, and no other Python
+#   module contains a path literal."  Promotion means this module deriving a
+#   staged artifact location and then *writing onto* the four final paths, so
+#   the destinations would stop being the ones each writer resolved for itself.
+# * **Sections 0.3.3 and 0.4.1** - one merged result set, four independent
+#   writers, and "each artifact has exactly one producer".  Promotion makes
+#   this module the producer of all four final paths.
+# * **Section 0.1.1** - "The four artifact paths do not move."  A genuinely
+#   atomic *set* switch needs the visible artifacts to sit behind an
+#   indirection that can be swapped in one operation, which is precisely a
+#   move; ``Jenkins:15``'s narrowed publisher glob reads one of those paths
+#   directly.
+#
+# What that leaves is not a gap where the threat was.  Two runs mixing their
+# reports is prevented by the claim, which spans clean, run and publication.
+# Within one run, each artifact is replaced atomically by its own writer - the
+# self-contained HTML page through a temporary file and :func:`os.replace`, the
+# report tree through a staged sibling renamed into place - and every machine
+# consumer reads exactly one of them: the Jenkins publisher the JSON report,
+# ``--rerun`` the manifest, the HTTP views the JSON report.  None of them can
+# observe a cross-artifact mixture, and AAP section 0.4.1's writer-failure row
+# requires the artifacts written before a failure to *remain*, which an
+# all-or-nothing promotion would contradict.
+#
+# The claim is therefore checked before each writer **and once more after the
+# last one**, so a run that lost the workspace part-way through publication
+# says so instead of reporting four artifacts it cannot vouch for.
+# --------------------------------------------------------------------------- #
+
+
+@runtime_checkable
+class PublicationGuard(Protocol):
+    """Something that can say whether this run still owns the build output.
+
+    Structural rather than nominal, so the fan-out can be handed the command
+    line's run lock without this module importing the service that defines it
+    (specification section 0.4.2).  Anything answering :meth:`is_held` will do,
+    which is also what makes the boundary testable with a two-line double.
+    """
+
+    def is_held(self) -> bool:
+        """Return whether the claim is still exclusively this process's.
+
+        Returns:
+            ``True`` while this run may publish; ``False`` once it may not,
+            which stops the fan-out at the next writer.
+        """
+        ...
+
+
+class PublicationBoundaryLost(RuntimeError):
+    """Raised into a :class:`ReportOutcome` when the run's claim is gone.
+
+    Never raised out of :func:`generate_reports` - like every other cause of a
+    failed fan-out it becomes a reported outcome - but a real exception type
+    rather than a string, so that :attr:`ReportOutcome.error` carries the same
+    kind of value whatever stopped the publication, and a consumer can tell
+    this cause from a writer's own failure by type.
+    """
 
 
 # --------------------------------------------------------------------------- #
@@ -252,52 +386,27 @@ class WriterSpec(NamedTuple):
     """One writer in the fan-out: a stable name, the callable, the artifact.
 
     Attributes:
-        name: Stable identifier for the writer.  It is not a display string:
-            ``app/cli.py`` recognises a failure by it,
-            :attr:`ReportOutcome.failed_writer` and
-            :attr:`ReportOutcome.skipped` report it, and the test module
-            asserts the fan-out order by it - so it is part of this module's
-            contract and is not to be reworded.
+        name: Stable identifier, not a display string: ``app/cli.py``
+            recognises a failure by it and :class:`ReportOutcome` reports it,
+            so rewording one is a change of contract.
         artifact_key: The :attr:`app.utils.paths.ArtifactSpec.key` of the
             artifact this writer produces, taken from the constant
-            :mod:`app.utils.paths` publishes for it and never spelled out
-            here.  It exists so that a failure can name **where** the writer
-            was writing, which the section 0.4.1 exit contract requires of the
-            writer-failure row and which no template or model exception is
-            obliged to mention: :meth:`destination` turns it into a path and
-            :attr:`ReportOutcome.failed_path` carries that path to
-            ``app/cli.py``.
-
-            It is an *identity*, not a destination, and that distinction is
-            what keeps this module path-free: the key is resolved only in a
-            diagnostic, never passed to a writer, so each writer still
-            resolves its own destination from the same owner.
-
-            The identity is the artifact the plugin list declared, which is not
-            always what the writer hands back: ``pretty_reports`` resolves to
-            the report tree's root, while
-            :func:`app.reporting.write_pretty_reports` returns the
-            page sub-directory :data:`app.utils.paths.PRETTY_HTML_SUBDIR`
-            names, filled inside it.  The
-            asymmetry is deliberate - :meth:`destination` is the intended
-            artifact, :attr:`WriterResult.path` is the writer's own return
-            value - and the other three writers' two values coincide.
-        write: The writer entry point.  Called uniformly as
-            ``write(result_set, base=base)`` and returns the
-            :class:`~pathlib.Path` it wrote - a file for the first three
-            writers, a directory for the report tree.
-
-            ``base`` is passed **by keyword**, and that is a correctness
-            requirement rather than a style choice: it is the second positional
-            parameter of three of the writers but the third of
+            :mod:`app.utils.paths` publishes for it.  It is an *identity*, not
+            a destination: :meth:`destination` resolves it only for the failure
+            diagnostic AAP 0.4.1 requires, and the writer still resolves where
+            it writes.  For ``pretty_reports`` the identity is the report
+            tree's root while :func:`app.reporting.write_pretty_reports`
+            returns the :data:`app.utils.paths.PRETTY_HTML_SUBDIR`
+            sub-directory it filled; for the other three the two coincide.
+        write: The writer entry point, called as
+            ``write(result_set, base=base)`` and returning what it wrote - a
+            file for the first three writers, a directory for the report tree.
+            ``base`` goes **by keyword** for correctness: it is the second
+            positional parameter of three writers but the third of
             :func:`app.reporting.write_rerun_txt`, whose second is ``path``, so
-            a positional call would write the rerun manifest to a
-            directory-shaped destination.  The barrel states the same rule.
-
-            Typed ``Callable[..., Path]`` because the four writers agree on the
-            document and ``base`` and then diverge - ``path`` against
-            ``directory``, and the rendering arguments only the two HTML writers
-            accept - none of which this module ever supplies.
+            a positional call would send the manifest to a directory-shaped
+            destination.  Typed ``Callable[..., Path]`` because the four
+            signatures diverge past ``base``, in arguments never supplied here.
     """
 
     name: str
@@ -307,35 +416,28 @@ class WriterSpec(NamedTuple):
     def destination(self, base: Path | str | None = None) -> Path | None:
         """Resolve the artifact this writer is meant to produce.
 
-        The *intended* destination, resolved through
-        :func:`app.utils.paths.artifact_path` from :attr:`artifact_key`, for a
-        diagnostic that has to say where a writer was writing.  It is not what
-        the writer returned: :attr:`WriterResult.path` is that, and for
-        :func:`app.reporting.write_pretty_reports` the two deliberately differ
-        - the writer returns the :data:`app.utils.paths.PRETTY_HTML_SUBDIR`
-        sub-directory it
-        filled, while this key resolves to the report tree's root, which is the
-        artifact the plugin list declared and the artifact route serves.  For
-        the other three writers the two coincide.
+        The *intended* destination, from :attr:`artifact_key` through
+        :func:`app.utils.paths.artifact_path`, for a diagnostic that has to say
+        where a writer was writing - not what the writer returned
+        (:attr:`WriterResult.path` is that).  For ``pretty_reports`` this key
+        resolves to the report tree's root while the writer returns the
+        sub-directory it filled; for the other three the two coincide.
 
-        **This method never raises.**  It is called from the one path where an
-        exception is already being reported, so a problem resolving a path must
-        not displace the writer failure the path was describing - an unknown
-        key or a ``base`` that cannot be combined into a path yields ``None``
-        and a ``DEBUG`` record, and the caller substitutes readable text.
+        Called from the one path where an exception is already being reported,
+        so every :exc:`Exception` is suppressed rather than displacing the
+        writer failure being described: an unknown key, or a ``base`` that
+        cannot be combined into a path, yields ``None`` and a ``DEBUG`` record,
+        and the caller names :data:`_UNRESOLVED_DESTINATION` instead.
+        :exc:`KeyboardInterrupt` and :exc:`SystemExit` still propagate.
 
         Args:
             base: Directory to resolve against, exactly as handed to
-                :func:`generate_reports` and to the writer itself, so the
-                destination named in a diagnostic is the one that writer was
-                actually working on.  ``None`` resolves against the working
-                directory, which is what every accessor in
-                :mod:`app.utils.paths` does by default.
+                :func:`generate_reports` and to the writer, so a diagnostic
+                names the destination that writer was working on.  ``None``
+                resolves against the working directory, as the accessors do.
 
         Returns:
-            The intended artifact path - a file for the first three writers, a
-            directory for the report tree - or ``None`` if it could not be
-            resolved.
+            The intended artifact path, or ``None`` if unresolved.
         """
         try:
             return artifact_path(self.artifact_key, base=base)
@@ -353,14 +455,43 @@ class WriterSpec(NamedTuple):
             )
             return None
 
+    def artifact_id(self) -> str:
+        """Return the repository-relative identifier of this writer's artifact.
 
-#: The four writers, in the order :func:`generate_reports` drives them: the two
-#: machine-read contracts first.  This constant is the single home of that
-#: order - the module docstring explains why it is what it is, and why it must
-#: not be re-sorted into the plugin-declaration order of ``README.md:78-83``.
-#: Each entry's ``artifact_key`` is the constant :mod:`app.utils.paths`
-#: publishes for that artifact, so adding a writer here without an identity is
-#: not expressible and a destination can always be named in a diagnostic.
+        The name a *log record* calls the artifact by, as distinct from
+        :meth:`destination`, which is the absolute path a caller may need to
+        act on.  It is :attr:`app.utils.paths.ArtifactSpec.relpath` for this
+        writer's key - the four relative identifiers that module publishes -
+        so it is the spelling ``README.md`` quotes, the spelling the Jenkins
+        publisher's narrowed ``fileIncludePattern`` matches (``Jenkins:15``),
+        and the spelling that does not publish the absolute layout of the
+        workspace a run happened to execute in (CWE-200).
+
+        Resolved from :data:`app.utils.paths.ARTIFACT_SPECS` rather than
+        spelled here, so this module still contains no path of its own and the
+        identifier cannot drift from the destination the writer resolves.
+
+        **Never raises**, for the same reason :meth:`destination` does not: it
+        is read while a failure is already being reported, and an
+        unrecognisable key degrades to the key itself - which still names the
+        artifact usefully - rather than displacing the incident.
+
+        Returns:
+            The relative identifier, or :attr:`artifact_key` when no spec
+            declares that key.
+        """
+        for spec in ARTIFACT_SPECS:
+            if spec.key == self.artifact_key:
+                return spec.relpath
+        return self.artifact_key
+
+
+#: The four writers in the order :func:`generate_reports` drives them, and the
+#: single home of that order: the two machine-read artifacts first, for the
+#: reason the module docstring gives, and not the declaration order of
+#: ``CukesRunner.java:9-14``.  Each entry's ``artifact_key`` is the constant
+#: :mod:`app.utils.paths` publishes for its artifact, so a writer cannot be
+#: registered without a destination a diagnostic can name.
 WRITER_SEQUENCE: Final[tuple[WriterSpec, ...]] = (
     WriterSpec(
         name="cucumber_json",
@@ -383,16 +514,6 @@ WRITER_SEQUENCE: Final[tuple[WriterSpec, ...]] = (
         artifact_key=PRETTY_REPORTS_DIR_NAME,
     ),
 )
-
-
-# --------------------------------------------------------------------------- #
-# What the fan-out reports back
-#
-# Both are frozen, because an outcome describes a fan-out that has already
-# happened: ``app/cli.py`` reads it to pick an exit status and must not be able
-# to alter the record on the way.  The tuple fields are immutable for the same
-# reason, and make the defaults below safe to declare inline.
-# --------------------------------------------------------------------------- #
 
 
 @dataclass(frozen=True)
@@ -423,13 +544,16 @@ class WriterResult:
 class ReportOutcome:
     """The result of one fan-out over :data:`WRITER_SEQUENCE`.
 
+    Frozen, because it records a fan-out that has already happened and
+    ``app/cli.py`` reads it to choose an exit status.
+
     Attributes:
         results: One :class:`WriterResult` per writer **attempted**, in
-            :data:`WRITER_SEQUENCE` order.  Shorter than that sequence exactly
+            :data:`WRITER_SEQUENCE` order - shorter than that sequence exactly
             when a writer failed, since the fan-out stops there.
-        written: The paths successfully written, in the same order.  Every entry
-            is a writer's return value, and every one of them is still on disk:
-            a later failure never removes an earlier artifact.
+        written: The paths successfully written, in the same order.  Each is a
+            writer's own return value and each is still on disk: a later
+            failure never removes an earlier artifact.
         failed_writer: :attr:`WriterSpec.name` of the first writer that failed,
             or ``None`` if all four succeeded.
         error: That writer's exception, or ``None`` if all four succeeded.
@@ -450,6 +574,14 @@ class ReportOutcome:
             :mod:`app.utils.paths` exists to prevent.  Declared last so every
             existing construction of this class, positional or by keyword,
             stays valid.
+        boundary_lost: ``True`` when the caller's claim on the build output was
+            no longer held at the end of the fan-out, whether or not a writer
+            also failed.  All four artifacts may be on disk in that case and
+            are left there; what cannot be vouched for is that they are all
+            *this* run's, because another run may have claimed the workspace
+            part-way through.  :attr:`ok` is ``False`` and ``app/cli.py``
+            reports the artifact-failure class, naming this cause rather than a
+            writer.
     """
 
     results: tuple[WriterResult, ...]
@@ -458,19 +590,111 @@ class ReportOutcome:
     error: BaseException | None = None
     skipped: tuple[str, ...] = ()
     failed_path: Path | None = None
+    boundary_lost: bool = False
 
     @property
     def ok(self) -> bool:
-        """Whether every writer succeeded.
+        """Whether every writer succeeded under a claim that held throughout.
 
         Returns:
-            ``True`` if no writer failed.  A run whose scenarios failed still
-            reports ``True``: ``testFailureIgnore=true`` (``pom.xml:25``) and the
-            six ``-1`` publisher thresholds (``Jenkins:15``) keep a test outcome
-            out of the exit status, so the only thing this flag describes is
-            whether the four artifacts were produced.
+            ``True`` if no writer failed and the caller's claim on the build
+            output was still held when the last one finished.  A run whose
+            scenarios failed still reports ``True``:
+            ``testFailureIgnore=true`` (``pom.xml:25``) and the six ``-1``
+            publisher thresholds (``Jenkins:15``) keep a test outcome out of
+            the exit status, so the only thing this flag describes is whether
+            the four artifacts were produced, and produced into a workspace
+            this run still owned.
         """
-        return self.failed_writer is None
+        return self.failed_writer is None and not self.boundary_lost
+
+
+# --------------------------------------------------------------------------- #
+# The one generation stamp
+#
+# A run has exactly one generation time, and this is where it is resolved: once,
+# before the fan-out, so that the four artifacts of one run agree on it.  The
+# alternative - each writer reading its own clock when the document carries no
+# stamp - produced a generation time in one human artifact and none in the
+# other for one and the same document, and a different value on every render.
+# Neither HTML writer holds a clock now; this is the only one in the fan-out.
+# --------------------------------------------------------------------------- #
+
+
+def _usable_stamp(value: object) -> str:
+    """Reduce a candidate generation stamp to usable text.
+
+    The same judgement ``app/reporting/events.py`` applies when it folds the
+    per-worker stamps together and the two HTML writers apply when they read
+    one: a stamp is usable when it is non-blank text, and anything else -
+    ``None``, a blank string, a number a hand-built document put there - counts
+    as no stamp at all.
+
+    Args:
+        value: The candidate, from the document or from a caller.
+
+    Returns:
+        The trimmed text, or ``""`` when the candidate is not usable.
+    """
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _document_for_fan_out(
+    result_set: ResultSet,
+    generated_at: str | None,
+) -> ResultSet:
+    """Resolve the one document every writer is handed, stamp included.
+
+    Three cases, and the first is the normal one:
+
+    * the document already carries the stamp the run is to report - the
+      collector wrote it at close and the merge kept the latest - so the
+      **caller's own object** is returned, unchanged and unwrapped, and all four
+      writers receive that one object;
+    * the document carries no usable stamp, so one is resolved here and handed
+      on in a **single shallow copy**, which all four writers then receive by
+      identity for the same reason;
+    * the caller pinned a stamp that the document does not already carry, which
+      takes the same copy.
+
+    **The caller's document is never mutated.**  :func:`generate_reports`
+    documents its input as read-only, and a mutation would be the very fault
+    that contract exists to prevent: the same object reaches every writer, so
+    writing to it would alter the input of each writer still to run.  The copy
+    is shallow on purpose - the features, metadata and errors below the top
+    level are shared, not duplicated, because nothing here writes to them and a
+    deep copy of a large document would cost the run real time.
+
+    Args:
+        result_set: The merged result document, in the internal schema
+            ``app/reporting/events.py`` owns.  A value that is not a mapping at
+            all is returned untouched: the writers' reads are total and each
+            handles such a document on its own, and inventing a mapping here
+            would hide the fault from all four of them.
+        generated_at: A stamp pinned by the caller, which wins over the
+            document's own, or ``None`` to use the document's.
+
+    Returns:
+        Either ``result_set`` itself or one shallow copy of it carrying the
+        resolved stamp - in both cases one object, for all four writers.
+    """
+    if not isinstance(result_set, Mapping):
+        return result_set
+
+    recorded = _usable_stamp(result_set.get(_GENERATED_AT_KEY))
+    resolved = (
+        _usable_stamp(generated_at)
+        or recorded
+        # The fan-out's own clock, read exactly once per call and formatted the
+        # way the collector formats every timestamp in the document, so the
+        # value on an artifact is indistinguishable from a result-backed one.
+        # Reached only by a document that recorded no stamp, which is the
+        # empty-run case: nothing was selected, so nothing was ever stamped.
+        or format_timestamp(datetime.now(UTC))
+    )
+    if resolved == recorded:
+        return result_set
+    return {**result_set, _GENERATED_AT_KEY: resolved}
 
 
 # --------------------------------------------------------------------------- #
@@ -478,31 +702,135 @@ class ReportOutcome:
 # --------------------------------------------------------------------------- #
 
 
+def _boundary_failure(
+    spec: WriterSpec,
+    index: int,
+    results: Sequence[WriterResult],
+    written: Sequence[Path],
+    base: Path | str | None,
+    guard: PublicationGuard | None,
+) -> ReportOutcome | None:
+    """Return the outcome of a fan-out stopped by a lost claim, or ``None``.
+
+    The publication boundary, checked once per writer.  A claim that is still
+    held costs one predicate call and produces nothing; a claim that is gone
+    stops the fan-out **before** the writer runs, which is the whole point -
+    the artifacts this run has already published stay exactly where they are,
+    and nothing further is written into a build output another run has taken
+    over.
+
+    Args:
+        spec: The writer about to be driven, named as the one not attempted.
+        index: Its position in :data:`WRITER_SEQUENCE`, which fixes the
+            writers reported as skipped.
+        results: What the writers before it did, carried through unchanged.
+        written: The artifacts they produced, carried through unchanged and
+            **not** deleted: the section 0.4.1 exit contract keeps whatever a
+            stopped fan-out had already published.
+        base: The directory the destinations resolve against, used only to
+            name this writer's intended destination in the outcome.
+        guard: The claim to check, or ``None`` when the caller holds none, in
+            which case there is no boundary to lose and this returns ``None``.
+
+    Returns:
+        ``None`` when publication may proceed; otherwise a
+        :class:`ReportOutcome` whose :attr:`~ReportOutcome.failed_writer` is
+        this writer and whose :attr:`~ReportOutcome.error` is a
+        :class:`PublicationBoundaryLost`, which ``app/cli.py`` maps onto its
+        artifact-failure status exactly as it maps a writer's own exception.
+    """
+    if guard is None or guard.is_held():
+        return None
+
+    destination = spec.destination(base)
+    named_destination: Path | str = (
+        _UNRESOLVED_DESTINATION if destination is None else destination
+    )
+    error = PublicationBoundaryLost(
+        f"this run no longer holds the build output, so {spec.name} did not "
+        f"write {named_destination}: another run has claimed the workspace, "
+        "and publishing now would leave a mixture of two runs' reports"
+    )
+    # ERROR, so the stream split sends it to stderr beside the exit class
+    # ``app/cli.py`` derives from the outcome.  No traceback: nothing raised,
+    # and the message is the whole of the diagnosis.
+    logger.error(
+        "Report writer %s did not run: %s",
+        spec.name,
+        error,
+    )
+    return ReportOutcome(
+        results=tuple(results),
+        written=tuple(written),
+        failed_writer=spec.name,
+        error=error,
+        skipped=tuple(later.name for later in WRITER_SEQUENCE[index + 1 :]),
+        failed_path=destination,
+        boundary_lost=True,
+    )
+
+
 def generate_reports(
     result_set: ResultSet,
     *,
     base: Path | str | None = None,
+    guard: PublicationGuard | None = None,
+    generated_at: str | None = None,
 ) -> ReportOutcome:
     """Write the four report artifacts from one merged result document.
 
     Drives :data:`WRITER_SEQUENCE` in order, calling each writer as
-    ``write(result_set, base=base)``, and stops at the first one that raises.
-    The function never raises on a writer's behalf and never deletes anything:
-    artifacts written before a failure remain on disk, which is the section
-    0.4.1 exit contract's writer-failure row, and ``app/cli.py`` turns the
-    returned outcome into an exit status.
+    ``write(result_set, base=base)``, and stops at the first that raises.  AAP
+    0.4.1's writer-failure row: earlier artifacts stay on disk, nothing is
+    deleted, and the failing writer is named on stderr at ``ERROR``.
+
+    When a ``guard`` is supplied it is consulted immediately before each
+    writer, so the four artifacts are published only while this run still owns
+    the build output - see the publication-boundary section above for why that
+    check is here and why the set is not promoted atomically.
+
+    **The run's generation time is resolved here, once, before the fan-out.**
+    :func:`_document_for_fan_out` either recognises the stamp the document
+    already carries - the normal case, since the collector writes one at close
+    and the merge keeps the latest - or resolves one for a document that
+    carries none, and the writers are then handed one document that carries it.
+    **No writer has a clock of its own**, so every artifact of one run reports
+    the same generation time and two renders of one document report the same
+    value; a writer that read its own clock instead put a generation time on
+    the self-contained page while the report tree's Date cell, which has no
+    clock, stayed empty for that same document.  The call shape is uniform for
+    all four writers - the stamp travels in the document, not as a per-writer
+    rendering argument - so the two machine-read writers are unaffected by it
+    and neither HTML writer needs telling.
 
     Args:
         result_set: The merged result document, in the internal schema
             ``app/reporting/events.py`` owns.  Treated as read-only: the same
             object is handed to all four writers, so a mutation here would
-            corrupt the input of every writer that had not run yet.
+            corrupt the input of every writer that had not run yet.  Stamping
+            therefore never writes to it - a document that needs a stamp is
+            shallow-copied once and the copy is what the writers receive.
         base: Directory the artifact paths resolve against, passed through
             untouched and defaulting to ``None``, which each writer resolves to
             the working directory through :mod:`app.utils.paths` - the same
             default every accessor there applies.  It is the only override
             mechanism, and the seam a test uses to redirect the whole fan-out
             into a temporary directory.
+        generated_at: The generation time to report, which wins over the
+            document's own.  Defaults to ``None``, which resolves the stamp
+            from the document and, for a document carrying none, from this
+            one clock reading.  Keyword-only with a default because it is an
+            override rather than an input: ``app/cli.py`` calls this function
+            with the merged document alone, and a caller that needs the value
+            pinned - a test, or a tool re-rendering a stored document against a
+            known time - supplies it by name.
+
+        guard: The claim the caller holds on the build output, checked before
+            each writer publishes, or ``None`` to publish unconditionally.
+            ``app/cli.py`` always supplies the run lock it took before the
+            clean step; ``None`` is what keeps this function callable on its
+            own, by a test or by a caller that has established exclusivity
+            some other way, and it is the historical behaviour unchanged.
 
     Returns:
         A :class:`ReportOutcome`.  On success its :attr:`~ReportOutcome.results`
@@ -512,16 +840,21 @@ def generate_reports(
         :attr:`~ReportOutcome.error` and :attr:`~ReportOutcome.failed_path`
         describe it - the writer, its exception and the destination it was
         producing - and :attr:`~ReportOutcome.skipped` names the writers left
-        unattempted.
+        unattempted.  The outcome carries no document: the stamped object is
+        the writers' input and nothing downstream reads it back.
 
     Raises:
-        KeyboardInterrupt: Propagated untouched - an interrupt is the operator
-            stopping the run, not an artifact-production failure.
-        SystemExit: Propagated untouched, for the same reason.  Every
-            :exc:`Exception` a writer raises is caught and reported instead.
+        KeyboardInterrupt: Propagated untouched - an interrupt stops the run.
+        SystemExit: Propagated untouched; every :exc:`Exception` a writer
+            raises is caught and reported instead.
     """
     results: list[WriterResult] = []
     written: list[Path] = []
+
+    # Before the loop, and exactly once: every writer below is handed this one
+    # object, so the four artifacts cannot disagree about when the run was
+    # reported, and no writer is left to invent the answer.
+    document = _document_for_fan_out(result_set, generated_at)
 
     # No empty-result-set guard here, and its absence is deliberate: a run that
     # selected no scenario must still write all four artifacts, empty, so that
@@ -532,11 +865,17 @@ def generate_reports(
     # truthiness check on the features would silently break that row while
     # looking like an optimisation.  Fan out unconditionally.
     for index, spec in enumerate(WRITER_SEQUENCE):
+        boundary = _boundary_failure(spec, index, results, written, base, guard)
+        if boundary is not None:
+            return boundary
         try:
             # ``base`` by keyword - see WriterSpec.write.  No ``path`` or
             # ``directory`` override is ever passed: each writer resolves its
-            # own destination, so this module owns no path at all.
-            path = spec.write(result_set, base=base)
+            # own destination, so this module owns no path at all.  The
+            # document is the stamped one resolved above, which is the caller's
+            # own object whenever that object already carried the run's
+            # generation time.
+            path = spec.write(document, base=base)
         except Exception as exc:  # noqa: BLE001 - the boundary is the point
             # Broad on purpose.  The writers document OSError, and the tree
             # writer additionally jinja2.TemplateError and FileNotFoundError,
@@ -549,32 +888,29 @@ def generate_reports(
 
             # The destination is resolved *here*, from the same ``base`` the
             # writer was given, and carried on the outcome - so the record
-            # below and ``app/cli.py``'s exit-class record name one path that
-            # was derived once.  The call cannot raise.
+            # below and ``app/cli.py``'s exit-class record name one artifact
+            # that was derived once.  The call cannot raise.
             destination = spec.destination(base)
-            named_destination: Path | str = (
-                _UNRESOLVED_DESTINATION if destination is None else destination
+
+            # What the *record* names it by is the relative identifier, not
+            # that absolute path.  The path is what a caller acts on and is
+            # carried onward on ``failed_path`` for exactly that; a console log
+            # is archived and shared, and the absolute location of a CI
+            # workspace in it is disclosure rather than diagnosis (CWE-200).
+            # ``artifact_id()`` cannot raise and degrades to the key.
+            named_destination: str = (
+                _UNRESOLVED_DESTINATION
+                if destination is None
+                else spec.artifact_id()
             )
 
             # ERROR, so ``app/logging_config.py`` routes it to stderr, naming
-            # the writer that failed **and the artifact it was producing**, as
-            # the section 0.4.1 exit contract's writer-failure row requires: a
-            # template or model exception need not mention a path itself, so
-            # without this the destination could not be recovered from the log.
-            # ``exc_info`` carries the traceback with it, because the cause
-            # of a failed write is diagnosed from nothing else.
-            #
-            # This is the **one** record this module emits for the failure, and
-            # it is the canonical one: the cause and its traceback are reported
-            # where the exception was caught, because a traceback is the one
-            # thing :class:`ReportOutcome` cannot usefully carry to a later
-            # reader.  Everything the outcome *does* carry - which writers were
-            # skipped, which artifacts survive, and the exit class the failure
-            # produces - is reported exactly once by ``app/cli.py`` from those
-            # fields.  Naming the skipped writers here as well, which this
-            # module did until the duplication was reviewed, made one incident
-            # two ERROR records under two logger names and left neither layer
-            # the account of it.
+            # the writer and the artifact it was producing as AAP 0.4.1's
+            # writer-failure row requires - a template or model exception need
+            # not mention a path itself - with the traceback attached, which is
+            # the one thing ``ReportOutcome`` cannot carry to a later reader.
+            # It is the only record this module emits for the failure: what the
+            # outcome carries is reported once, by ``app/cli.py``.
             logger.error(
                 "Report writer %s failed writing %s: %r",
                 spec.name,
@@ -583,8 +919,6 @@ def generate_reports(
                 exc_info=exc,
             )
 
-            # Return, rather than raise or roll back.  The paths already in
-            # ``written`` stay exactly where their writers put them.
             return ReportOutcome(
                 results=tuple(results),
                 written=tuple(written),
@@ -597,7 +931,28 @@ def generate_reports(
         results.append(WriterResult(name=spec.name, path=path))
         written.append(path)
         # INFO, so the same handler split sends progress to stdout; one line per
-        # artifact, both streams being line-buffered for capture by CI.
-        logger.info("Report writer %s wrote %s", spec.name, path)
+        # artifact, both streams being line-buffered for capture by CI.  The
+        # artifact is named by its relative identifier for the reason
+        # ``artifact_id()`` states - the path the writer returned is on the
+        # outcome, for a caller that needs to act on it.
+        logger.info("Report writer %s wrote %s", spec.name, spec.artifact_id())
+
+    if guard is not None and not guard.is_held():
+        # Checked once more after the last writer, because the check before
+        # each one cannot cover the interval during which the last one ran.
+        # All four artifacts are on disk and are kept - nothing here deletes an
+        # artifact - but the run no longer owns the workspace it put them in,
+        # so what a reader will find may be a mixture of two runs' reports and
+        # this fan-out will not report success over it.
+        logger.error(
+            "The four artifacts were written, but this run no longer holds the "
+            "build output: another run has claimed the workspace, so the "
+            "published set cannot be vouched for as this run's"
+        )
+        return ReportOutcome(
+            results=tuple(results),
+            written=tuple(written),
+            boundary_lost=True,
+        )
 
     return ReportOutcome(results=tuple(results), written=tuple(written))

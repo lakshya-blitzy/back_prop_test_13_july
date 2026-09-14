@@ -1,229 +1,55 @@
 /*
  * Interactive behaviour for the generated test reports.
- * -----------------------------------------------------
  *
- * The one hand-written browser script in this project. Three consumers embed
- * or serve this exact text, unchanged, unbundled and untranspiled:
+ * One hand-written classic script, unbundled and untranspiled. The same text
+ * is inlined verbatim into the single self-contained report page, emitted
+ * beside the pages of the generated report tree, and served to the viewer's
+ * pages, so one copy satisfies all three consumers. No path, name, filename,
+ * address or scheme belonging to any of them is written anywhere in this
+ * file, comments included: this text travels into a page that must carry no
+ * reference to anything outside itself.
  *
- *   1. The self-contained-artifact writer inlines it into the single report
- *      page it produces.
- *   2. The report-tree writer emits it beside the pages of the tree it
- *      produces, under that tree's own script name.
- *   3. The viewer application serves it from its package-relative static
- *      folder, which the view templates reference through the framework's
- *      own static-asset URL builder.
+ * SCOPE - three behaviours and no others: filtering result rows by status;
+ * expanding and collapsing detail regions, including expand-all and
+ * collapse-all where the markup offers those controls; and a lightbox over
+ * failure screenshots already present in the page. It presents results and
+ * never changes them, and it can never start a test run.
  *
- * No path, name or scheme belonging to any of those three is written
- * anywhere in this file. Two of the three copy this text verbatim into a
- * page that must carry no reference to anything outside itself, so a
- * reference written even in a comment would travel into the artifact and
- * break exactly the property the artifact is checked for.
+ * HOOK CONTRACT. Elements are found by "data-report-" attribute only, each
+ * one declared as a constant below, and aria-controls is the sole way a
+ * control names the region it operates. The presentation classes of the
+ * generated report tree are never selected on and never modified. Every hook
+ * is optional: a missing control, region or overlay is a silent no-op.
  *
- * Four consequences shape every line below.
+ * STATE CONTRACT, three separate concepts. The "data-report-" attributes are
+ * selection and carry no state. The three runtime classes below are the
+ * state: this script is their only author and the project stylesheet their
+ * only reader, and their absence is the authored, fully expanded, unfiltered
+ * page. The MUTABLE ARIA MIRRORS of that state are the third: the templates
+ * author aria-expanded on every toggle and aria-pressed on every filter
+ * control including the reserved "all", at that same default, and the
+ * generated report tree also authors aria-hidden on its detail regions, which
+ * this script supplies on every other surface. It maintains all three from
+ * there. An overlay is a case of its own: it ships with none at all, is
+ * written "false" while open and has the attribute REMOVED on close, which
+ * restores the authored absence exactly. STATIC ARIA SEMANTICS are not state
+ * and this script neither owns nor maintains them: a decorative glyph's
+ * aria-hidden="true", aria-current on the current navigation link, and the
+ * roles, accessible names and aria-controls relationships a template authors
+ * once. No boolean state-attribute family of this project's own invention
+ * exists, and none may be added.
  *
- *   - It is inlined into an HTML page. It therefore contains no sequence that
- *     could terminate or corrupt the surrounding markup, and no module syntax
- *     of any kind: it is always evaluated as a classic script, never as a
- *     module, so it neither imports nor exports anything.
- *   - The reports are opened straight from a continuous-integration
- *     workspace, off the local filesystem rather than from a server.
- *     Nothing here assumes a server, an origin, a base URL or an absolute
- *     path, and no code path can issue a network request: the lightbox only
- *     ever accepts a source that is already an inline data URI (see below).
- *   - It may be evaluated before or after DOMContentLoaded, and possibly twice
- *     on one page. It therefore binds delegated listeners once, guards
- *     re-evaluation with a single namespaced global, and defers only its
- *     initial ARIA sync.
- *   - It has no dependency whatsoever: no library, no polyfill, no build step,
- *     no vendored global. The third-party libraries that ship beside the
- *     emitted report tree are that generator's own output and are
- *     deliberately never referenced here, because neither the self-contained
- *     artifact nor the viewer's pages load them.
- *
- * SCOPE - exactly three behaviours, and no others:
- *
- *   1. Filtering result rows by status.
- *   2. Expanding and collapsing detail regions, including expand-all and
- *      collapse-all where the markup offers those controls.
- *   3. The screenshot lightbox, over failure screenshots that are already
- *      present in the page as inline data: URIs.
- *
- * There is deliberately no sorting, no charting, no persistence, no
- * analytics, no clipboard support, no theming switch, no keyboard-shortcut
- * layer, no address-bar state syncing and no recomputation of any count or
- * summary. This script presents results; it never changes them, and it can
- * never start a test run.
- *
- * -----------------------------------------------------------------------
- * THE SHARED HOOK CONTRACT
- * -----------------------------------------------------------------------
- * This script only ever toggles state. The project's own stylesheet owns how
- * that state renders, and the templates own the markup - the artifact
- * templates, the report-tree templates and the viewer's views all share the
- * same three partials (status badge, step row, screenshot lightbox), so one
- * vocabulary has to serve all three. Publishing the whole contract here is
- * what lets the stylesheet and the partials converge on it.
- *
- * THERE IS EXACTLY ONE STATE VOCABULARY, and it is the one below. Three
- * runtime classes, written only here and read only by the stylesheet;
- * thirteen authored data hooks, written only by the templates and read only
- * here; and aria-controls as the single way a control names the region it
- * operates. No parallel family of state attributes exists, and none may be
- * added: a second vocabulary is a second contract, and the one that no
- * template produces is the one that silently stops working.
- *
- * Selection is by data attribute only. The generator classes carried by the
- * emitted report-tree pages (passed, step, element, collapsable-control,
- * chevron, panel and the rest) are never selected on and never modified:
- * they are that generator's presentation vocabulary, owned by the stylesheet
- * that ships beside those pages, and this script has no business in it.
- * Result-detail collapse on those pages is NOT that widget's - the templates
- * author every region expanded and hand it to the hooks below, which is what
- * makes the pages complete with no scripting and complete in print - so
- * there is nothing here to reconcile with a second collapse mechanism.
- *
- * SELECTION ATTRIBUTES
- * --------------------
- *   data-report-root
- *       Container wrapping report content. Query scope: filtering and
- *       expand-all/collapse-all apply within the clicked element's closest
- *       root, falling back to the document when no root ancestor exists.
- *       Sibling roots are therefore independent of one another.
- *
- *   data-report-filter="<status>" | "all"
- *       A filter control, expected to be a non-navigating <button
- *       type="button">. Toggles <status> in the shown-set for its scope, and
- *       carries aria-pressed mirroring that membership. "all" is the one
- *       reserved value and clears the set: it carries aria-pressed too, and
- *       is pressed exactly while the shown-set is EMPTY, the state in which
- *       every row is shown. A value that is empty or whitespace-only is
- *       treated as "all", because no element can carry an empty status and
- *       the alternative would hide everything.
- *
- *   data-report-filterable
- *       Marks an element the status filter may hide. Hiding it hides its
- *       whole subtree, so no per-descendant bookkeeping is needed.
- *
- *   data-report-status="<status>"
- *       The status of that element, compared case-insensitively and after
- *       trimming. Values are opaque strings: passed, failed, skipped, pending
- *       and undefined are what occur in practice, but no closed list is
- *       hard-coded, so a status added later needs no change here. A
- *       filterable element with no status, or a blank one, is never hidden by
- *       a status filter.
- *
- *   data-report-toggle
- *       A control that toggles one detail region. The region it operates is
- *       named by aria-controls, which is the SOLE target reference: there is
- *       no second target attribute, because two ways to name one region are
- *       two things to keep in agreement and the accessible one has to be
- *       present regardless. A control whose aria-controls resolves to
- *       nothing falls back to the first detail region inside its own row.
- *
- *   data-report-detail
- *       The collapsible region that a toggle shows and hides.
- *
- *   data-report-toggle-all="expand" | "collapse"
- *       A control that expands or collapses every detail region in its scope.
- *       Where the markup offers no such control the feature simply does not
- *       exist on that page, which is expected rather than an error.
- *
- *   data-report-screenshot
- *       The lightbox trigger. An optional value supplies the image source;
- *       when it is empty the authored src of an <img> inside the trigger is
- *       used instead. The shared partial emits a real <button type="button">
- *       around the thumbnail, so activation, focus and the keyboard come
- *       from the platform. A trigger that is NOT a native button is still
- *       supported: it is given a tabindex and a button role if it carries
- *       neither, and Enter and Space activate it here.
- *
- *   data-report-screenshot-name
- *       Optional caption text for that trigger - the embedding's name, which
- *       is the scenario name.
- *
- *   data-report-lightbox
- *       The lightbox container, once per page. The overlay itself.
- *
- *   data-report-lightbox-image
- *       An <img> inside the container. Receives the source.
- *
- *   data-report-lightbox-caption
- *       Optional element inside the container. Receives the caption text.
- *
- *   data-report-lightbox-close
- *       A control inside the container that closes it.
- *
- * BACKDROP DISMISSAL is a click whose target IS the overlay container
- * itself. There is no separate backdrop element and no hook for one: an
- * empty flex child has no size, so it could never be clicked, and the
- * container already covers the whole viewport.
- *
- * THE ONLY IMAGE SOURCE THIS SCRIPT WILL USE is an inline PNG data URI:
- * a literal "data:image/png;base64," prefix followed by a canonical base64
- * payload that begins with the base64 encoding of the PNG signature. A
- * value of any other media type, any other encoding, or a malformed
- * payload is rejected and the overlay does not open. That is the same test
- * the screenshot partial applies before it emits a thumbnail at all, so the
- * two cannot disagree, and it is what keeps a result-controlled value from
- * becoming an active document inside the page.
- *
- * STATE CLASSES - exactly three, and no fourth is permitted
- * ---------------------------------------------------------
- *   report-is-collapsed        on [data-report-detail]      detail hidden
- *   report-is-filtered-out     on [data-report-filterable]  row hidden by the
- *                                                           status filter
- *   report-lightbox-is-open    on [data-report-lightbox]     overlay visible
- *
- * Active-filter styling is expressed through aria-pressed="true|false" on a
- * filter control, which the stylesheet can select on. That keeps the class
- * set at three and is also the accessible form.
- *
- * The reserved "all" control is pressed exactly when NO status is selected,
- * which is the state in which every row is shown. It is a toggle like the
- * others and reports its state truthfully rather than being permanently
- * unpressed while it is the control describing what the reader sees.
- *
- * ARIA MIRRORS
- * ------------
- * State is mirrored into ARIA rather than into inline style or the hidden
- * attribute, because the stylesheet owns rendering:
- *   aria-expanded on the toggle control, aria-hidden on the detail region,
- *   aria-pressed on every filter control, the reserved "all" control
- *   included, and on the open overlay
- *   role="dialog", aria-modal="true" and aria-hidden="false" (role and
- *   aria-modal only when the markup has not already set them).
- *
- * MODAL FOCUS - the one place a default action is suppressed
- * ---------------------------------------------------------
- * An overlay that claims aria-modal="true" has to behave like one, so while
- * it is open:
- *   - focus moves into it on open, to its close control;
- *   - Tab and Shift+Tab are contained inside it, wrapping at both ends, and
- *     those two keystrokes are the ONLY default actions this file ever
- *     prevents - a modal that lets Tab walk into the obscured report behind
- *     it is a modal in name only;
- *   - Escape dismisses it;
- *   - on close, focus returns to THE TRIGGER THAT OPENED IT, remembered as
- *     an element rather than read back from the document, because a pointer
- *     activation commonly leaves the active element somewhere else entirely.
- *
- * REQUIREMENTS ON THE MARKUP
- * --------------------------
- *   - The authored default is expanded and unfiltered. Initialization sets
- *     ARIA attributes to match that authored state and changes no class, so a
- *     reader with scripting disabled loses interactivity but never content.
- *     The stylesheet must render all three states, and must render their
- *     absence as the fully expanded, unfiltered page.
- *   - Hook controls must be non-navigating - <button type="button"> - because
- *     no click handled here suppresses an authored default action. That is
- *     deliberate: a hook that swallowed default actions would also swallow a
- *     genuine link inside a row. A real button also carries focusability and
- *     Enter/Space activation from the platform, which is why every control
- *     the shared partials emit is one.
- *   - Every hook is optional. A missing control, container, region or
- *     embedding is a silent no-op, never an error, so a page with no failures
- *     and no screenshots - equally an index or error page that merely extends
- *     the base template - runs this script with no diagnostic output at all.
+ * CONSTRAINTS THAT BIND EVERY LINE BELOW
+ *   - Inlined into HTML: no sequence that could terminate or corrupt the
+ *     surrounding markup, and no module syntax - always a classic script,
+ *     importing and exporting nothing, dependent on no library, polyfill or
+ *     build step.
+ *   - No network: a report is opened straight off a local filesystem, nothing
+ *     assumes a server, an origin or a base address, and the lightbox accepts
+ *     only a source that is already an inline PNG data URI.
+ *   - Evaluated before or after DOMContentLoaded, possibly twice on one page:
+ *     delegated listeners are bound once, re-evaluation is guarded by a
+ *     single namespaced global, and only the initial ARIA sync is deferred.
  */
 (function () {
     'use strict';
@@ -235,8 +61,6 @@
     var globalScope = typeof window !== 'undefined' ? window : null;
     var doc = globalScope && globalScope.document ? globalScope.document : null;
 
-    /* No window and no document means there is nothing to enhance. Bailing
-     * out keeps this text harmless if it is ever evaluated outside a page. */
     if (!globalScope || !doc) {
         return;
     }
@@ -282,29 +106,56 @@
     var ATTR_ARIA_MODAL = 'aria-modal';
     var ATTR_ARIA_PRESSED = 'aria-pressed';
 
-    /* The reserved filter value. */
     var FILTER_ALL = 'all';
 
     /* The only image source this script will ever hand to an img element,
      * spelled out in full: media type, encoding and payload shape.
      *
-     * PNG_SIGNATURE_BYTES is the file signature from PNG's specification, all
-     * eight bytes of it. The payload is decoded and its first eight bytes are
-     * compared against these, rather than its first characters being compared
-     * against a base64 prefix: a prefix of eight characters pins only the
-     * first SIX bytes, because base64 maps three bytes onto four characters,
-     * and a payload agreeing in six bytes is base64 of something that is not
-     * a PNG. Comparing decoded bytes has no such edge and needs no arithmetic
-     * to justify.
+     * WHERE THE CONTRACT LIVES. app/reporting/screenshots.py is the authority
+     * and it is a structural validator: it walks every chunk, checks every
+     * CRC, bounds the declared geometry and requires the image data to inflate
+     * to exactly the size its header declares. Every attachment in every
+     * artifact has been through it. This script has no zlib and no CRC, so
+     * what follows is DEFENCE IN DEPTH over a strictly weaker rule - the rule
+     * a page rendered outside that pipeline still gets - and never the control
+     * that makes an attachment safe.
      *
-     * MAX_BASE64_CHARS mirrors the backend authority's decoded-size bound at
-     * the encoded length that implies it - 32 MiB of image, four characters
-     * per three bytes - and is checked before the decode, so an oversized
-     * payload is never expanded in the page. */
+     * PNG_HEADER_BYTES is the fixed opening of every valid PNG: the eight-byte
+     * file signature from the specification, then 00 00 00 0D - the length of
+     * the first chunk, which the format fixes at IHDR's thirteen bytes - then
+     * the four characters IHDR. Sixteen bytes, identical in every PNG that
+     * exists. The payload is decoded and its first sixteen bytes are compared
+     * against these, rather than its first characters being compared against a
+     * base64 prefix: a prefix of eight characters pins only the first SIX
+     * bytes, because base64 maps three bytes onto four characters, and a
+     * payload agreeing in six bytes is base64 of something that is not a PNG.
+     * Comparing decoded bytes has no such edge and needs no arithmetic to
+     * justify. Requiring the whole header rather than the signature alone is
+     * what rejects the signature followed by arbitrary bytes.
+     *
+     * PNG_TRAILER_BYTES is the other fixed run every valid PNG has: the IEND
+     * chunk that ends it, whose length is zero, whose type is IEND and whose
+     * CRC is therefore the constant AE 42 60 82. Requiring the payload to END
+     * with those twelve bytes costs one comparison and rejects a truncated
+     * image and a polyglot carrying a second document behind a valid one -
+     * the two shapes a header test alone cannot see.
+     *
+     * MIN_BASE64_CHARS and MAX_BASE64_CHARS mirror the authority's own bounds
+     * at the encoded lengths that imply them - a 57-byte structural minimum,
+     * and a 16 MiB payload ceiling shared with the per-worker result schema -
+     * and both are checked before the decode, so an oversized payload is never
+     * expanded in the page. */
     var DATA_PNG_PREFIX = 'data:image/png;base64,';
-    var PNG_SIGNATURE_BYTES = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+    var PNG_HEADER_BYTES = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52
+    ];
+    var PNG_TRAILER_BYTES = [
+        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
+    ];
     var BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-    var MAX_BASE64_CHARS = 44739244;
+    var MIN_BASE64_CHARS = 76;
+    var MAX_BASE64_CHARS = 16777216;
 
     /* Selectors are derived from the attribute names above so the two can
      * never drift apart. An attribute selector matches an exact attribute
@@ -466,8 +317,6 @@
         }
     }
 
-    /* The scope of a filtering or expand-all action: the clicked element's
-     * closest root, or the whole document when the markup declares none. */
     function resolveScope(element) {
         return closestMatch(element, SEL_ROOT) || doc;
     }
@@ -677,8 +526,6 @@
             return;
         }
         setCollapsed(region, !hasClass(region, CLASS_COLLAPSED));
-        /* The clicked control is described immediately, then every other
-         * control in scope is brought into line with it. */
         writeAttribute(
             control,
             ATTR_ARIA_EXPANDED,
@@ -704,31 +551,27 @@
     /* -------------------------------------------------------------------
      * Behaviour 3: the screenshot lightbox
      *
-     * A failure screenshot is captured once, on failure, before the driver is
-     * quit, and travels in the results as a base64 PNG embedding with a mime
-     * type and the scenario name. Both HTML outputs render it as an inline
-     * data: URI, so by the time this script sees it the image is ALREADY IN
-     * THE PAGE and opening the overlay is pure presentation.
+     * A screenshot is captured on failure only and travels in the results as
+     * a base64 PNG embedding carrying a media type and the scenario name.
+     * Both HTML outputs render it inline, so by the time this script sees it
+     * the image is ALREADY IN THE PAGE and opening the overlay is pure
+     * presentation - there is no capture control and no enable switch here.
      *
-     * That is why the source is validated before use, and validated to the
-     * exact shape the contract permits rather than to a family of shapes:
-     * the literal prefix "data:image/png;base64,", a payload drawn only from
+     * The source is therefore validated before use, and validated to the one
+     * shape the contract permits rather than to a family of shapes: the
+     * inline PNG prefix constant declared above, a payload drawn only from
      * the base64 alphabet with correct padding, and the base64 encoding of
      * the PNG signature at its head. Everything else is rejected and the
-     * overlay does not open - an absolute URL, a protocol-relative one, a
-     * relative path, a different media type, an unencoded or percent-encoded
+     * overlay does not open - an absolute address, a protocol-relative one, a
+     * relative one, a different media type, an unencoded or percent-encoded
      * payload, and in particular a scalable-vector payload, which is an
      * active document able to carry script and is never a screenshot this
      * project produces.
      *
-     * There is consequently no code path in this file that can cause the
-     * browser to request anything, and none that can turn a result-supplied
-     * value into anything but a raster image, which is what makes the reports
-     * safe to read straight from a workspace with no network at all.
-     *
-     * There is deliberately no capture control and no enable switch here: the
-     * documentation's claim of screenshots for passing tests describes an
-     * intent the implementation never had.
+     * No code path here can cause the browser to request anything, and none
+     * can turn a result-supplied value into anything but a raster image,
+     * which is what makes the reports safe to read straight from a workspace
+     * with no network at all.
      * ------------------------------------------------------------------- */
 
     var openOverlay = null;
@@ -786,13 +629,11 @@
         for (var index = 0; index < payload.length; index += 1) {
             var character = payload.charAt(index);
             if (character === '=') {
-                /* Padding is only ever the final one or two characters. */
                 if (index < payload.length - 2) {
                     return false;
                 }
                 padding += 1;
             } else {
-                /* A payload character after a padding character is invalid. */
                 if (padding > 0 || BASE64_ALPHABET.indexOf(character) === -1) {
                     return false;
                 }
@@ -835,13 +676,30 @@
         }
     }
 
+    /* Compares a run of decoded bytes against a fixed expected run. Written
+     * once so the header test and the trailer test cannot drift apart, and
+     * taking an offset so the trailer can be compared at the end of the
+     * payload without copying it. */
+    function bytesMatchAt(bytes, expected, offset) {
+        for (var index = 0; index < expected.length; index += 1) {
+            if (bytes.charCodeAt(offset + index) !== expected[index]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /* Decodes a base64 payload and answers its bytes only if it is the
-     * canonical encoding of a PNG. Four things are established, and each
-     * exists because a weaker test admits something concrete:
+     * canonical encoding of something shaped like a PNG. Six things are
+     * established, and each exists because a weaker test admits something
+     * concrete:
      *
-     *  - length and alphabet, by isCanonicalBase64 above, BEFORE decoding.
-     *    atob is lenient about whitespace and about some malformed padding,
-     *    so the scan is what fixes the accepted set rather than atob;
+     *  - length, against both bounds, BEFORE decoding. A payload shorter than
+     *    a signature plus an IHDR, an IDAT and an IEND chunk cannot be a PNG,
+     *    and one longer than the ceiling is refused without being expanded;
+     *  - alphabet and padding, by isCanonicalBase64 above, also before
+     *    decoding. atob is lenient about whitespace and about some malformed
+     *    padding, so the scan is what fixes the accepted set rather than atob;
      *  - decodability, by atob itself. It throws a DOMException on what it
      *    will not take, and a throw here is a rejection rather than an error -
      *    a malformed attachment must not break the page it appears on;
@@ -850,14 +708,25 @@
      *    non-zero unused pad bits: "iVBORw0KAB==" passes it, yet its bytes
      *    canonically encode as "iVBORw0KAA==", so a reader would have two
      *    spellings of one payload;
-     *  - the complete eight-byte PNG signature, on the decoded bytes.
+     *  - the complete sixteen-byte PNG header, on the decoded bytes. The
+     *    eight-byte signature alone admits "iVBORw0KGgo=" - a signature and
+     *    nothing else - which is an image to a signature test and is not one;
+     *  - the twelve-byte IEND trailer, at the end of the decoded bytes, which
+     *    is what a truncated image and a polyglot both fail.
+     *
+     * What it still cannot do is walk the chunks, check a CRC or inflate the
+     * image data: there is no zlib here. Those are the server-side
+     * authority's, and this function is deliberately its weaker shadow rather
+     * than a second opinion.
      *
      * atob returns a binary string, one character per byte with a code point
      * of 0-255, so charCodeAt IS the byte and no typed array is needed -
      * which keeps this working in a document opened straight off disk, with
      * no fetch, no module loader and nothing but the DOM. */
     function decodePngPayload(payload) {
-        if (typeof payload !== 'string' || payload.length > MAX_BASE64_CHARS) {
+        if (typeof payload !== 'string'
+                || payload.length < MIN_BASE64_CHARS
+                || payload.length > MAX_BASE64_CHARS) {
             return null;
         }
         if (!isCanonicalBase64(payload)) {
@@ -876,13 +745,14 @@
         if (reencoded !== payload) {
             return null;
         }
-        if (bytes.length < PNG_SIGNATURE_BYTES.length) {
+        if (bytes.length < PNG_HEADER_BYTES.length + PNG_TRAILER_BYTES.length) {
             return null;
         }
-        for (var index = 0; index < PNG_SIGNATURE_BYTES.length; index += 1) {
-            if (bytes.charCodeAt(index) !== PNG_SIGNATURE_BYTES[index]) {
-                return null;
-            }
+        if (!bytesMatchAt(bytes, PNG_HEADER_BYTES, 0)) {
+            return null;
+        }
+        if (!bytesMatchAt(bytes, PNG_TRAILER_BYTES, bytes.length - PNG_TRAILER_BYTES.length)) {
+            return null;
         }
         return bytes;
     }
@@ -919,7 +789,6 @@
         }
 
         var nameAttribute = readAttribute(trigger, ATTR_SCREENSHOT_NAME);
-        /* Never render the string "null" or "undefined" as visible text. */
         var caption = typeof nameAttribute === 'string' ? nameAttribute : '';
 
         writeAttribute(image, 'src', source);
@@ -956,7 +825,6 @@
             }
         }
 
-        /* The trigger itself, remembered as an element. */
         overlayTrigger = isElement(trigger) ? trigger : null;
         openOverlay = overlay;
 
@@ -987,17 +855,15 @@
         /* The mirror is REMOVED rather than set to "true". Once the class is
          * gone the overlay is display:none, so it is already outside the
          * accessibility tree and a "true" here would add nothing; removing the
-         * attribute also restores exactly the state the template authored,
-         * which emits no visibility attribute at all.
+         * attribute restores exactly the state the template authored, which is
+         * no visibility attribute at all.
          *
-         * Writing "true" at this point is what made Chrome report "Blocked
-         * aria-hidden on an element because its descendant retained focus":
-         * the close control inside the overlay still holds focus here, and the
-         * browser refuses to hide a focused element's ancestor from assistive
-         * technology. Removing an attribute can never trip that check, so this
-         * holds on every close path - the close control, the backdrop and the
-         * Escape key alike - rather than only where focus happens to have
-         * somewhere to go back to. */
+         * Removal is also the only form a browser cannot refuse: an engine
+         * declines to hide an element from assistive technology while a
+         * descendant holds focus, and at this point focus is still on the
+         * close control inside the overlay. Removing an attribute never meets
+         * that check, so every close path - the close control, the backdrop
+         * and the Escape key alike - leaves the same state behind. */
         if (typeof overlay.removeAttribute === 'function') {
             overlay.removeAttribute(ATTR_ARIA_HIDDEN);
         }
@@ -1010,9 +876,6 @@
              * itself. */
             image.removeAttribute('src');
             if (overlayOwnsImageAlt) {
-                /* Exactly what the markup authored goes back: an empty string
-                 * where it authored one, and no attribute at all where it
-                 * authored none. */
                 if (overlayAuthoredAlt === null) {
                     image.removeAttribute('alt');
                 } else {
@@ -1081,7 +944,6 @@
     function containFocus(event, overlay) {
         var focusable = focusableWithin(overlay);
         if (focusable.length === 0) {
-            /* Nothing inside can hold focus, so the overlay itself does. */
             safeFocus(overlay);
             return true;
         }
@@ -1162,13 +1024,12 @@
             return;
         }
 
-        /* 1. A close control, wherever it sits. */
         if (closestMatch(target, SEL_LIGHTBOX_CLOSE)) {
             closeLightbox();
             return;
         }
 
-        /* 2. Any other click that lands inside an overlay. Only a backdrop
+        /* Any other click that lands inside an overlay. Only a backdrop
          * dismissal acts; nothing inside an overlay is a report hook, so the
          * click stops here either way. */
         var overlay = closestMatch(target, SEL_LIGHTBOX);
@@ -1179,21 +1040,19 @@
             return;
         }
 
-        /* 3. A screenshot trigger. */
         var screenshotTrigger = closestMatch(target, SEL_SCREENSHOT);
         if (screenshotTrigger) {
             openLightbox(screenshotTrigger);
             return;
         }
 
-        /* 4. A status filter control. */
         var filterControl = closestMatch(target, SEL_FILTER);
         if (filterControl) {
             handleFilterClick(filterControl);
             return;
         }
 
-        /* 5. An expand-all or collapse-all control, before the single toggle,
+        /* An expand-all or collapse-all control, before the single toggle,
          * so a control carrying both attributes acts on the whole scope. */
         var toggleAllControl = closestMatch(target, SEL_TOGGLE_ALL);
         if (toggleAllControl) {
@@ -1201,7 +1060,6 @@
             return;
         }
 
-        /* 6. A single detail toggle. */
         var toggleControl = closestMatch(target, SEL_TOGGLE);
         if (toggleControl) {
             handleToggleClick(toggleControl);

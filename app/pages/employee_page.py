@@ -1,29 +1,33 @@
 r"""Employees-module page object - the port of ``EmployeeP.java``.
 
-The Python counterpart of
-``src/main/java/com/testinium/pages/EmployeeP.java`` at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240``, which AAP 0.2.1 holds REFERENCE
-and never modifies.  AAP 0.4.1 pairs this module with
+The fifteen ``@FindBy`` fields of ``EmployeeP.java:14-57``, at pinned revision
+``47e9d697e4a9a85da889f94a846fdf47af28a240``, as locator constants in Java
+declaration order - part of the contract, since
+:attr:`~app.pages.base_page.BasePage.LOCATORS` is built from the class body in
+source order and compared against that order - plus the one behaviour method
+the reference page package has.  AAP 0.4.1 pairs the module with
 ``features/EmployeeFc.feature`` and ``features/steps/employee_steps.py``, the
 port of ``EmployeeStage.java``.
 
 **This is the only page object in the package that carries behaviour.**  The
 other nine are pure locator holders; ``EmployeeP.java:59-69`` declares
-:meth:`EmployeePage.login`, the single method in the whole reference page
-package - which is also why ``app/pages/base_page.py`` deliberately holds no
-behaviour of its own: a convenience added there would be inherited by all ten
-pages, whereas this one belongs to this one page.
+:meth:`EmployeePage.login`, which is why :class:`~app.pages.base_page.BasePage`
+holds no behaviour of its own - a convenience added there would be inherited by
+all ten pages, whereas this one belongs to this page.  The Employees flow signs
+in here rather than through ``LoginP`` because ``EmployeeStage.java`` navigates
+straight to the ``url`` property and calls ``login()`` there (``:24-25``,
+``:60-61``, ``:93-94``).  The accessors are the Java field names in snake_case,
+which is how ``EmployeeStage.java`` reaches them: ``emplStage.click()``
+(``:30``) is ``page.empl_stage.click()`` and ``nameEdit`` (``:101``) is
+``page.name_edit``.
 
-What is ported, field for field
--------------------------------
-Fifteen ``@FindBy`` fields (``EmployeeP.java:14-57``) become the fifteen
-locator constants of :class:`EmployeePage`, declared in Java order, and
-``PageFactory.initElements(Driver.getDriver(), this)``
-(``EmployeeP.java:10-12``) becomes the subclass hook in
-``app/pages/base_page.py``, which turns each constant into a read-only
-accessor that re-runs ``find_element`` on every access.  Nothing is looked up
-at construction, so ``EmployeePage()`` touches neither the DOM nor a browser -
-the same guarantee ``initElements`` gave, since it only installed proxies.
+Three selector shapes are carried verbatim under AAP 0.8's *"Preserve, do not
+tidy"*: the exact-``@class`` XPaths of :attr:`~EmployeePage.CREATE_BTN`,
+:attr:`~EmployeePage.EMPLOYEES_NAME` and :attr:`~EmployeePage.SAVED_MESSAGE`,
+where ``@class=`` matches the whole attribute rather than a token, so no space
+may be trimmed, re-ordered or collapsed; the two absolute DOM paths of
+:attr:`~EmployeePage.CHOOSE_EMPLOYEE` and :attr:`~EmployeePage.EDIT_EMPLOYEE`;
+and :attr:`~EmployeePage.NAME_EDIT`'s generated widget id.
 
 The two names each field yields, and both are used by the Employee steps:
 
@@ -52,12 +56,16 @@ only consumer of the ``url`` and ``EmplTitle`` configuration keys.
 ``EmployeeStage.java`` reads them itself - ``url`` at ``:24``, ``:60`` and
 ``:93``, ``EmplTitle`` at ``:31`` - so per AAP 0.4.2 the consumer of the
 configuration accessors is ``features/steps/employee_steps.py``, **not this
-module**, which reads no configuration at all.  For the same reason the timing the
-Employee flow depends on stays there too: the 3-second ``WebDriverWait``
-built at ``EmployeeStage.java:14``, and the one 7-second plus seven 3-second
-fixed sleeps AAP 0.4.1 requires be *"reproduced as equivalent fixed delays at
-the same call sites"*.  None of them belongs to a page object, and none
-appears below.
+module**, which reads no configuration at all.  That holds for the
+``username`` and ``password`` properties too: the two values
+:meth:`EmployeePage.login` types arrive as its two arguments, read by the step
+module at each of its three call sites, and :meth:`EmployeePage.login`
+documents why.  For the same reason the timing the Employee flow depends on
+stays there too: the 3-second ``WebDriverWait`` built at
+``EmployeeStage.java:14``, and the one 7-second plus seven 3-second fixed
+sleeps AAP 0.4.1 requires be *"reproduced as equivalent fixed delays at the
+same call sites"*.  None of them belongs to a page object, and none appears
+below.
 
 Import boundary (AAP 0.4.2)
 ---------------------------
@@ -68,11 +76,13 @@ else."*  This module therefore imports exactly two names -
 nothing further: no browser-automation-library import of any kind, not even
 under ``typing.TYPE_CHECKING``, because ``app.automation`` is the only package
 in the port permitted to import that library and a guarded import is still an
-import statement; no configuration module; no service, reporting writer, path
-helper, web framework or Gherkin engine.  Importing this module has no side
-effects whatever - it starts no browser, reads no file and configures no
-logging - which is what lets the unit suite import it on a machine with no
-browser installed.
+import statement; **no configuration module** - AAP 0.4.2 enumerates
+``app.config``'s consumers exhaustively and names no page module among them,
+which is why the credentials are parameters here rather than a read; no
+service, reporting writer, path helper, web framework or Gherkin engine.
+Importing this module has no side effects whatever - it starts no browser,
+reads no file and configures no logging - which is what lets the unit suite
+import it on a machine with no browser installed.
 
 Driver ownership (AAP 0.3.3)
 ----------------------------
@@ -90,16 +100,22 @@ requires the port to *"preserve, do not tidy"*:
 
 * **No sixteenth locator.**  ``EmployeeP.java`` declares fifteen; a locator
   the reference never had would be a functional addition.
-* **No second login method** - no ``login_with(username, password)`` that
-  actually uses its arguments.  The reference's two-argument overload ignores
-  both of its parameters, and reproducing that faithfully means one method
-  that ignores them, not a new one that does not.
+* **No second login method** - no ``login_with(username, password)`` beside
+  :meth:`~EmployeePage.login`.  ``EmployeeP.java`` declares two overloads with
+  byte-identical bodies, so the port declares one method whose two optional
+  parameters express both call shapes; a second method would be a surface the
+  reference does not have.
 * **No navigation.**  ``EmployeeStage.java`` navigates first, with
   ``Driver.getDriver().get(...)`` at ``:24``, ``:60`` and ``:93``, and *then*
   calls ``login()``; the navigation stays in the step module.
 * **No wait, no clear-before-type, no post-login assertion, no return value
   and no logging** inside :meth:`~EmployeePage.login`.  The Java body has
   three statements and so does this one.
+* **No credential, and no configuration read.**  Neither value appears in this
+  file, as a literal or as a default, and neither is fetched here: both arrive
+  as arguments.  The configuration surface is untouched by this module - it
+  stays at the six keys AAP 0.4.1 inventories, read by the consumers AAP 0.4.2
+  names.
 """
 
 from app.automation import By
@@ -116,107 +132,59 @@ class EmployeePage(BasePage):
     read-only, never-cached accessor per constant under the lower-case name
     and publishes :attr:`~app.pages.base_page.BasePage.LOCATORS` as an
     immutable ``{constant name: locator}`` mapping in **declaration order**,
-    which is the Java ``@FindBy`` order of ``EmployeeP.java:14-57``.  There
-    are consequently no hand-written accessors and no hand-written inventory
-    here - either would be a second, divergible copy of what the constants
-    already say.
+    which is the ``@FindBy`` order of ``EmployeeP.java:14-57``.  Each constant
+    cites the Java line and field name it ports.
 
     :attr:`~app.pages.base_page.BasePage.PLURAL_LOCATORS` is *not* overridden:
     ``EmployeeP.java`` declares no ``List<WebElement>`` field, so all fifteen
     accessors resolve to a single element through ``find_element``.  (The
     reference's only plural field in the entire suite is ``SalesP.java:69``.)
 
-    Usage, exactly as ``features/steps/employee_steps.py`` uses it::
+    Usage, exactly as ``features/steps/employee_steps.py`` uses it - the two
+    credentials come from that module's own configuration reads, because this
+    one performs none::
 
         page = EmployeePage()                 # touches nothing at all
-        page.login()                          # three DOM operations, now
+        page.login(get_username(), get_password())   # three DOM operations
         page.empl_stage.click()               # one find_element, now
         wait_visible(EmployeePage.EMPL_STAGE, 3)
-
-    Nothing in the class body is protected against reassignment beyond the
-    accessors being read-only properties: a locator constant is a module-level
-    fact, and the parity tests read it rather than write it.
     """
 
-    # ------------------------------------------------------------------
-    # The login form (EmployeeP.java:14-21).
-    #
-    # The Employees flow signs in through this page rather than through
-    # LoginP, because EmployeeStage.java navigates straight to the `url`
-    # property and calls login() there (:24-25, :60-61, :93-94). These three
-    # fields are the ones login() drives, in this order.
-    # ------------------------------------------------------------------
-
-    #: ``EmployeeP.java:14-15`` - ``@FindBy(id = "login")`` ``inputLogin``.
-    #: The e-mail field :meth:`login` types into first.
+    #: ``EmployeeP.java:14-15``'s ``inputLogin``, typed into first by
+    #: :meth:`login`.
     INPUT_LOGIN = (By.ID, "login")
 
-    #: ``EmployeeP.java:17-18`` - ``@FindBy(id = "password")`` ``inputPass``.
-    #: The password field :meth:`login` types into second.
+    #: ``EmployeeP.java:17-18``'s ``inputPass``, typed into second by
+    #: :meth:`login`.
     INPUT_PASS = (By.ID, "password")
 
-    #: ``EmployeeP.java:20-21`` -
-    #: ``@FindBy(xpath = "//button[.='Log in']")`` ``loginButton``.
-    #: The submit button :meth:`login` clicks last.  The XPath matches on the
-    #: button's exact string value, so the selector is preserved verbatim
-    #: including its inner single quotes.
+    #: ``EmployeeP.java:20-21``'s ``loginButton``, clicked last by :meth:`login`.
     LOGIN_BUTTON = (By.XPATH, "//button[.='Log in']")
 
-    # ------------------------------------------------------------------
-    # Module navigation (EmployeeP.java:23-36).
-    #
-    # Four partial-link-text entries into the Employees module and its
-    # gamification sub-menus. EmployeeStage.java clicks EMPL_STAGE in five
-    # separate steps (:30, :63, :86, :96, :109), and walks the other three in
-    # one step apiece (:37-42 for badges/challenges/goals, :47 for
-    # departments), each click followed there by its own explicit wait.
-    # ------------------------------------------------------------------
-
-    #: ``EmployeeP.java:23-24`` -
-    #: ``@FindBy(partialLinkText = "Employees")`` ``emplStage``.
+    #: ``EmployeeP.java:23-24``'s ``emplStage``.
     EMPL_STAGE = (By.PARTIAL_LINK_TEXT, "Employees")
 
-    #: ``EmployeeP.java:26-27`` -
-    #: ``@FindBy(partialLinkText = "Badges")`` ``badgesBtn``.
+    #: ``EmployeeP.java:26-27``'s ``badgesBtn``.
     BADGES_BTN = (By.PARTIAL_LINK_TEXT, "Badges")
 
-    #: ``EmployeeP.java:29-30`` -
-    #: ``@FindBy(partialLinkText = "Challenges")`` ``challengesBtn``.
+    #: ``EmployeeP.java:29-30``'s ``challengesBtn``.
     CHALLENGES_BTN = (By.PARTIAL_LINK_TEXT, "Challenges")
 
-    #: ``EmployeeP.java:32-33`` -
-    #: ``@FindBy(partialLinkText = "Goals History")`` ``goalsHistoryBtn``.
-    #: The single embedded space is part of the link text and is preserved.
+    #: ``EmployeeP.java:32-33``'s ``goalsHistoryBtn``, whose embedded space is
+    #: part of the link text.
     GOALS_HISTORY_BTN = (By.PARTIAL_LINK_TEXT, "Goals History")
 
-    #: ``EmployeeP.java:35-36`` -
-    #: ``@FindBy(partialLinkText = "Departments")`` ``departmentsBtn``.
+    #: ``EmployeeP.java:35-36``'s ``departmentsBtn``.
     DEPARTMENTS_BTN = (By.PARTIAL_LINK_TEXT, "Departments")
 
-    # ------------------------------------------------------------------
-    # Employee creation (EmployeeP.java:38-48).
-    #
-    # The Odoo kanban "Create" control, the required-name input, the form's
-    # save control and the confirmation paragraph. Driven by
-    # EmployeeStage.java:69, :72, :73 and asserted at :78.
-    #
-    # The three class-attribute XPaths below match Odoo's compiled class
-    # strings exactly, whitespace included: `//button[@class='...']` is an
-    # exact-value match, not a token match, so re-ordering, trimming or
-    # collapsing a space would change which element is found. They are
-    # therefore reproduced byte for byte from the Java source.
-    # ------------------------------------------------------------------
-
-    #: ``EmployeeP.java:38-39`` - ``createBtn``.  Odoo's kanban "Create"
-    #: button, matched on its full class attribute.
+    #: ``EmployeeP.java:38-39``'s ``createBtn``, on its full class attribute.
     CREATE_BTN = (
         By.XPATH,
         "//button[@class='btn btn-primary btn-sm o-kanban-button-new btn-default']",
     )
 
-    #: ``EmployeeP.java:41-42`` - ``employeesName``.  The required "Employee's
-    #: Name" input, matched on the class string Odoo gives a required char
-    #: widget.  ``EmployeeStage.java:72`` sends the new employee's name here.
+    #: ``EmployeeP.java:41-42``'s ``employeesName``, on the class string Odoo
+    #: gives a required char widget.
     EMPLOYEES_NAME = (
         By.XPATH,
         "//input[@class='o_field_char o_field_widget o_input o_required_modifier']",
@@ -232,9 +200,7 @@ class EmployeePage(BasePage):
         "//button[@class='btn btn-primary btn-sm o_form_button_save']",
     )
 
-    #: ``EmployeeP.java:47-48`` - ``createdMessage``.  The "Employee created"
-    #: confirmation paragraph, matched on its exact text.
-    #: ``EmployeeStage.java:78`` asserts it is displayed.
+    #: ``EmployeeP.java:47-48``'s ``createdMessage``, on its exact text.
     CREATED_MESSAGE = (By.XPATH, "//p[.='Employee created']")
 
     # ------------------------------------------------------------------
@@ -270,22 +236,20 @@ class EmployeePage(BasePage):
     #: ``tests/test_pages.py`` compares it character for character.
     NAME_EDIT = (By.XPATH, '//*[@id="o_field_input_678"]')
 
-    # Both parameters are accepted and never read, exactly as the two-argument
-    # Java overload never reads its own (EmployeeP.java:65-69). The bare noqa
-    # markers sit on the two parameter lines because that is where an
-    # unused-argument diagnostic is reported, and they record that the unused
-    # arguments are the specification rather than an oversight - the docstring
-    # below states why at length.
     def login(
         self,
-        input_login: str | None = None,  # noqa: ARG002
-        input_pass: str | None = None,  # noqa: ARG002
+        input_login: str | None = None,
+        input_pass: str | None = None,
     ) -> None:
-        """Sign in to the Employees module with the suite's fixed credentials.
+        """Type the two supplied credentials into the form and submit it.
 
-        :param input_login: Accepted and **ignored**.  Present only so that
-            the two-argument Java call shape stays expressible; see below.
-        :param input_pass: Accepted and **ignored**, for the same reason.
+        :param input_login: The value typed into :attr:`INPUT_LOGIN`.  The
+            caller supplies it - ``features/steps/employee_steps.py`` reads the
+            ``username`` property at each of its three ``login()`` call sites -
+            and this module neither defaults it to a value of its own nor
+            fetches one; see below.
+        :param input_pass: The value typed into :attr:`INPUT_PASS`, supplied by
+            the same caller from the ``password`` property.
         :returns: ``None``.  The Java methods are ``void`` and this one adds
             no result of its own - not the driver, not a page object, not a
             success flag.
@@ -293,15 +257,22 @@ class EmployeePage(BasePage):
             ``NoSuchElementException`` once the session's 10-second implicit
             wait expires on any of the three lookups, or ``AttributeError``
             when no session exists at all.  Nothing here catches, retries or
-            logs, so a failure surfaces at the operation that caused it.
+            logs, so a failure surfaces at the operation that caused it.  An
+            omitted argument is not pre-empted either: it arrives as ``None``
+            and the driver rejects it at the ``send_keys`` that received it,
+            which is the tolerant configuration behaviour AAP 0.6 fixes for
+            every unset property in the port - the same way a ``None`` from an
+            undefined key reaches ``driver.get(...)`` in the step module and
+            ``send_keys`` in the shared sign-in precondition
+            (``features/steps/session_steps.py``).
 
         The port of ``EmployeeP.java:59-63``, called at
         ``EmployeeStage.java:25``, ``:61`` and ``:94`` - always in the
-        no-argument form, always immediately after the step has navigated to
-        the ``url`` property.  Three operations, in this order:
+        no-argument form there, and always immediately after the step has
+        navigated to the ``url`` property.  Three operations, in this order:
 
-        1. ``send_keys("posmanager50@info.com")`` on :attr:`INPUT_LOGIN`
-        2. ``send_keys("posmanager")`` on :attr:`INPUT_PASS`
+        1. ``send_keys(input_login)`` on :attr:`INPUT_LOGIN`
+        2. ``send_keys(input_pass)`` on :attr:`INPUT_PASS`
         3. ``click()`` on :attr:`LOGIN_BUTTON`
 
         Each goes through its lazy accessor, so each triggers its **own**
@@ -312,35 +283,64 @@ class EmployeePage(BasePage):
         lookups at a single earlier instant and change behaviour on a page
         that re-renders between operations.
 
-        Why the parameters exist and do nothing
-        ---------------------------------------
+        Why the parameters exist, and the one parity departure they cost
+        ----------------------------------------------------------------
         ``EmployeeP.java`` declares **two** overloads, ``login()`` at
         ``:59-63`` and ``login(String inputLogin, String inputPass)`` at
-        ``:65-69``, whose bodies are byte-identical: the two-argument form
-        discards both of its arguments and sends the very same hard-coded
-        credentials.  Python has no overloading, so the port declares one
-        method with optional parameters, keeping both Java call shapes
-        expressible while reproducing the discard exactly.
+        ``:65-69``, whose bodies are byte-identical: each sends two hard-coded
+        credentials, so the two-argument form **discards both of its
+        arguments**.  Python has no overloading, so the port declares one
+        method with two optional parameters, and that two-argument shape is
+        what it expresses.
 
-        ``login("someone@example.com", "secret")`` therefore performs
-        precisely the calls ``login()`` performs, and
-        ``tests/test_pages.py`` asserts that equivalence.  This is faithful
-        reproduction of the source, **not** a defect introduced by the port
-        and not an unfinished parameterization: honouring the arguments would
-        change behaviour, which AAP 0.1.2 forbids, since it admits no
-        functional addition and no functional loss.
+        **The discard is not reproduced, and that is deliberate.**  It is the
+        single parity departure this method makes, and it is the smallest one
+        available.  What the Java discarded its arguments in favour of are the
+        two account literals at ``:60-61``, and a credential in executable
+        Python source is durable in the repository, in every clone of it and in
+        every artifact built from it - the security review raised exactly that
+        as a blocking finding (CWE-798/200).  Removing the literals leaves the
+        two values needing a source, and AAP 0.4.2 rules out the obvious one
+        *here*: *"Page objects import ``app.automation`` for the current
+        driver, nothing else"*, and its exhaustive enumeration of
+        ``app.config``'s consumers - ``employee_steps``, ``session_steps``,
+        ``login_steps`` and ``driver.py`` - names no page module.  Every route
+        that keeps this module free of ``app.config`` therefore needs the
+        caller to supply the values, which means honouring the parameters.
+        AAP 0.1.3's precedence rule settles the residue: an explicit AAP rule
+        outranks a finding's suggested resolution, so the boundary is kept and
+        the discard is given up.
 
-        Why the credentials are inline
-        ------------------------------
-        Both literals are carried over verbatim from ``EmployeeP.java:60-61``.
-        AAP 0.8's test-data note governs and is explicit: credentials in this
-        suite *"are carried over verbatim because parity requires it ... no
-        agent should redact, parameterize or rotate them, or treat their
-        presence as a finding."*  They are pre-existing fixture data for an
-        external test instance, not a secret this port introduces, and they
-        are deliberately **not** read from ``configuration.properties`` - the
-        configuration surface stays at the six keys AAP 0.4.1 inventories, and
-        the Java method reads none of them.
+        What survives unchanged is everything observable about the sign-in
+        itself: the two fields in the Java order, the third click, three
+        separate lookups, no ``clear()``, no wait, no assertion and no logging.
+        ``login(a, b)`` types ``a`` then ``b``; ``login()`` types ``None``
+        twice and fails at the driver, exactly as an undefined property does
+        everywhere else in the port.  ``tests/test_pages.py`` pins both.
+
+        Where the credentials come from
+        -------------------------------
+        From the caller, and from nowhere in this file.  Neither value is a
+        literal here, neither is a parameter default, and this module performs
+        no configuration read of any kind - ``features/steps/employee_steps.py``
+        reads the ``username`` and ``password`` properties through
+        ``app.config`` at each of its three call sites, which is the layer AAP
+        0.4.2 puts configuration reads in.
+
+        No key was added for it: ``username`` and ``password`` are two of the
+        six keys AAP 0.4.1 inventories, already read by the shared sign-in
+        precondition at ``Session.java:15-16``, so the configuration surface is
+        unchanged and a deployment that has a ``configuration.properties`` at
+        all already has the two values.
+
+        AAP 0.8's test-data note is not a licence to keep the literals either.
+        Its subject is the Gherkin Examples tables, which *"carry plaintext
+        credentials for the system under test and are carried over verbatim
+        because parity requires it"* - those tables are step arguments a
+        scenario supplies, and they stay exactly as they are in the ten
+        ``.feature`` files.  Two hard-coded Python literals were never that:
+        sanctioned fixture data may stay where it is sanctioned, but new code
+        must not log, copy or replicate it.
         """
         # Exactly the three statements of EmployeeP.java:60-62, in order, and
         # deliberately nothing else: no clear() before typing (the reference
@@ -349,6 +349,13 @@ class EmployeePage(BasePage):
         # and the Employee flow's 3-second explicit waits live at the step
         # call sites), and no assertion that the sign-in succeeded (the
         # feature asserts that in its own steps).
-        self.input_login.send_keys("posmanager50@info.com")
-        self.input_pass.send_keys("posmanager")
+        #
+        # The arguments are passed straight through, unguarded and not
+        # normalized: a None must surface at the operation that received it
+        # (AAP 0.6), the same way an undefined property does at every other
+        # point of use in the port. And each self.<accessor> must stay inside
+        # its own statement so the three find_element lookups happen at the
+        # three instants the Java PageFactory proxy performed them.
+        self.input_login.send_keys(input_login)
+        self.input_pass.send_keys(input_pass)
         self.login_button.click()

@@ -1,13 +1,28 @@
 """Tests for ``create_app()``, the console-logging contract and the project pins.
 
-Four contracts meet in this module, and they are here together because each one
-is about the *application as a whole* rather than about a single view, writer or
-page object:
+Four whole-application contracts meet here, each about the application rather
+than about a single view, writer or page object.  ``app/__init__.py`` is the
+port's sole registration point (AAP 0.4.2) -- one blueprint, two error
+handlers, one command, nothing else -- and it assigns the assertions for its
+numbered acceptance criteria to this module, so each appears below with its
+criterion number; the deferred-import criterion runs in a fresh interpreter,
+the only place this session's imports cannot influence it.  The packaging is
+proved from outside this session too, in a child interpreter started with the
+checkout off its path, so a broken editable install or package mapping fails
+here rather than being answered by the source tree.
+``app/logging_config.py``'s stream split -- both streams line-buffered,
+progress on stdout, engine diagnostics on stderr, per AAP 0.4.1 -- is asserted
+on its factory side only, the command-line half belonging to
+``tests/test_cli.py``.  And the declarations AAP 0.4.1 and 0.5.1 fix -- the
+runtime pin, build and entry-point consistency, the requirement pins,
+``.gitattributes``, the runner scripts and the CI publisher -- are asserted as
+contracts rather than as wording, so rewording cannot fail a test while
+removing a guarantee does.
 
 ``app/__init__.py`` - the factory
     The port's sole registration point (AAP 0.4.2): one blueprint, two error
     handlers, one command, and nothing else.  That file's docstring states
-    eleven numbered acceptance criteria and says explicitly that this module
+    twelve numbered acceptance criteria and says explicitly that this module
     owns their assertions, so every one of them is implemented below and the
     criterion number appears in the test's docstring.  The most important of
     them is criterion 1, the deferred-import proof: ``import app.utils.paths``
@@ -153,6 +168,76 @@ VIEW_TEMPLATES: Final[tuple[str, ...]] = (
 
 #: The two static assets the base template and the artifact writer both need.
 STATIC_ASSETS: Final[tuple[str, ...]] = ("css/main.css", "js/report.js")
+
+# --------------------------------------------------------------------------- #
+# Host-header validation, as the factory fixes it
+#
+# Nothing behind the six routes authenticates anything: they are public within
+# a local trust boundary, and what stops that boundary being crossed *by name*
+# - a page loaded under an attacker-controlled hostname reaching this machine's
+# artifacts through the browser that loaded it - is the ``TRUSTED_HOSTS``
+# allowlist the factory installs.  The spellings below are restated here rather
+# than imported from the factory's private constant, so that the contract and
+# the code have to be changed together instead of silently agreeing with each
+# other.
+# --------------------------------------------------------------------------- #
+
+#: The allowlist every factory-built application must carry, in order: the
+#: loopback address, its name, and the IPv6 loopback in the bracketed form a
+#: browser sends.
+LOCAL_TRUSTED_HOSTS: Final[tuple[str, ...]] = ("127.0.0.1", "localhost", "[::1]")
+
+#: ``Host`` headers a local client genuinely sends, all of which must be
+#: answered.  Werkzeug compares only the text before the first colon, so the
+#: port-bearing spellings are admitted by the same three entries - which is
+#: why a fixed port is not part of the contract.
+ACCEPTED_HOST_HEADERS: Final[tuple[str, ...]] = (
+    "localhost",
+    "localhost:5000",
+    "127.0.0.1",
+    "127.0.0.1:5030",
+    "[::1]",
+    "[::1]:5000",
+)
+
+#: ``Host`` headers no local viewer is ever reached by, and every class of
+#: them:
+#:
+#: * a foreign name, and a foreign name carrying a port, since the port is not
+#:   what is being checked;
+#: * a **foreign IPv6 literal**, which is the class Werkzeug's own comparison
+#:   cannot refuse: it splits a host and every trusted entry at the first
+#:   colon, so ``[::1]`` and ``[::2]`` both reduce to ``[`` and the loopback
+#:   entry would admit every compressed literal - the global, the
+#:   documentation-range and the IPv4-mapped ones alike.  ``app/__init__.py``
+#:   closes that with a before-request check, and these are the cases that
+#:   prove it closed;
+#: * a **bracketed value that is not a host at all** - unterminated, with a
+#:   non-numeric port, or carrying text after the closing bracket - which is
+#:   refused rather than parsed leniently, because a value the check cannot
+#:   judge is not a value it may trust;
+#: * ``[0:0:0:0:0:0:0:1]``, which denotes the loopback and is still refused.
+#:   The allowlist is exact by design: it names spellings, and one that
+#:   expanded them would no longer be an allowlist.  The cost is one
+#:   documented spelling; the alternative admits a class of address.
+REJECTED_HOST_HEADERS: Final[tuple[str, ...]] = (
+    "attacker.example",
+    "evil.test:80",
+    "[::2]",
+    "[::2]:5000",
+    "[2001:db8::1]:5000",
+    "[fe80::1]",
+    "[::ffff:127.0.0.1]",
+    "[0:0:0:0:0:0:0:1]",
+    "[::1",
+    "[::1]:abc",
+    "[::1]x",
+)
+
+#: The name an application built with an explicit ``TRUSTED_HOSTS`` override
+#: answers for - a server deliberately reached under its own hostname, which
+#: is the one supported way to widen the allowlist.
+OVERRIDDEN_TRUSTED_HOST: Final[str] = "reports.example"
 
 # --------------------------------------------------------------------------- #
 # The factory module's own source, and what it may contain
@@ -535,7 +620,6 @@ def _executed_module_level_imports(tree: ast.Module) -> set[str]:
 
 
 def _function(tree: ast.Module, name: str) -> ast.FunctionDef:
-    """The named module-level function definition."""
     for statement in tree.body:
         if isinstance(statement, ast.FunctionDef) and statement.name == name:
             return statement
@@ -994,6 +1078,224 @@ def test_a_non_mapping_argument_is_rejected_before_anything_is_built(
 
 
 # =========================================================================== #
+# The factory: Host-header validation
+#
+# Criterion 12.  Flask accepts every ``Host`` header unless it is told which
+# ones to trust, and this viewer has no authentication behind its routes, so
+# the allowlist the factory installs is the whole of what keeps a foreign name
+# away from the artifacts - which carry the suite's configured credentials, its
+# failure screenshots and its tracebacks (CWE-346, Host header / DNS
+# rebinding).  Every test below drives ``GET /``, the one route AAP 0.3.1 makes
+# "200 always, including before any run", so an outcome here is about the host
+# and never about whether a run has happened.
+# =========================================================================== #
+
+
+def test_a_factory_built_application_trusts_only_the_local_names(
+    flask_app: Flask,
+) -> None:
+    """Criterion 12: the local allowlist is the factory's default.
+
+    Asserted as the exact list, not as a membership test: an entry beyond these
+    three would admit a name the security model does not cover, and an absent
+    one would refuse a spelling a local browser really sends.
+    """
+    assert flask_app.config["TRUSTED_HOSTS"] == list(LOCAL_TRUSTED_HOSTS)
+
+
+@pytest.mark.parametrize("host", ACCEPTED_HOST_HEADERS)
+def test_every_local_host_spelling_is_answered(
+    client: FlaskClient, host: str
+) -> None:
+    """Criterion 12: each way of addressing a local viewer still works.
+
+    The allowlist is only correct if it is invisible in normal use, so all five
+    spellings a local client sends - the bare name, the bare address, either
+    with a port, and the bracketed IPv6 loopback with one - are exercised
+    through the client rather than reasoned about from the three entries.
+    """
+    response = client.get("/", headers={"Host": host})
+
+    assert response.status_code == 200
+    assert response.mimetype == "text/html"
+
+
+@pytest.mark.parametrize("host", REJECTED_HOST_HEADERS)
+def test_a_foreign_host_is_refused_before_any_view_runs(
+    flask_app: Flask, host: str
+) -> None:
+    """Criterion 12: a foreign ``Host`` is 400, and nothing is rendered.
+
+    The status is asserted both ways round - 400, and *not* 200 - because the
+    defect this closes was a 200: with the allowlist unset, ``Host:
+    attacker.example`` was served the index like any other request.  "Before
+    any view runs" is proved with Flask's ``template_rendered`` signal rather
+    than inferred from the status: no template renders at all, so the index
+    view was never entered and no artifact was read on behalf of the rejected
+    name.
+    """
+    rendered: list[Any] = []
+
+    def record(_sender: Any, template: Any, **_extra: Any) -> None:
+        rendered.append(template)
+
+    template_rendered.connect(record, flask_app)
+    try:
+        with flask_app.test_client() as client:
+            response = client.get("/", headers={"Host": host})
+    finally:
+        template_rendered.disconnect(record, flask_app)
+
+    assert response.status_code == 400, (
+        f"Host: {host} was answered {response.status_code} rather than refused"
+    )
+    assert rendered == []
+
+
+def test_an_explicit_override_replaces_the_local_allowlist() -> None:
+    """Criterion 12: ``TRUSTED_HOSTS`` in the overrides wins outright.
+
+    The factory sets the local allowlist before it merges the overrides, so a
+    deployment reached under its own hostname states that in one place - and it
+    replaces the list rather than extending it, which is asserted from both
+    ends: the supplied name is answered and the local name it displaced is
+    refused.  A merge would be the worse contract, because it would leave a
+    revised security model still trusting names nobody reviewed.
+    """
+    application = create_app(
+        {"TESTING": True, "TRUSTED_HOSTS": [OVERRIDDEN_TRUSTED_HOST]}
+    )
+
+    assert application.config["TRUSTED_HOSTS"] == [OVERRIDDEN_TRUSTED_HOST]
+
+    with application.test_client() as client:
+        accepted = client.get("/", headers={"Host": OVERRIDDEN_TRUSTED_HOST})
+        displaced = client.get("/", headers={"Host": "localhost"})
+
+    assert accepted.status_code == 200
+    assert displaced.status_code == 400
+
+
+def test_an_overridden_ipv6_entry_is_enforced_exactly_too() -> None:
+    """Criterion 12: the exact check reads the live allowlist, not the default.
+
+    A deployment served over IPv6 names its own literal, and the before-request
+    check must then trust that literal and refuse every other - including the
+    loopback the default names, which the override displaced.  Asserted from
+    both ends for the same reason the previous test is: a check that fell back
+    to the module default would trust ``[::1]`` here, and one that only ever
+    compared against the default would refuse the supplied name.
+    """
+    served_as = "[fe80::1]"
+    application = create_app({"TESTING": True, "TRUSTED_HOSTS": [served_as]})
+
+    with application.test_client() as client:
+        supplied = client.get("/", headers={"Host": f"{served_as}:9000"})
+        displaced = client.get("/", headers={"Host": "[::1]:9000"})
+
+    assert supplied.status_code == 200
+    assert displaced.status_code == 400
+
+
+def test_a_malformed_allowlist_entry_widens_nothing() -> None:
+    """Criterion 12: an entry the check cannot read is not an entry it trusts.
+
+    An operator's ``TRUSTED_HOSTS`` is hand-written configuration, so it can
+    carry a value that is not a host - here a name with a junk port.  Such an
+    entry must be ignored rather than treated as a wildcard, and the one
+    well-formed entry beside it must still work: the failure mode this rules
+    out is a malformed list that admits every IPv6 literal because nothing in
+    it could be parsed to compare against.
+
+    The host part of the entry is asserted too, and it is not incidental:
+    Werkzeug splits an entry at its first colon, so ``localhost:not-a-port``
+    still trusts the *name* ``localhost`` at that layer while contributing
+    nothing to the exact IPv6 comparison - two layers reading one malformed
+    entry differently, and neither of them widening it.
+    """
+    application = create_app(
+        {"TESTING": True, "TRUSTED_HOSTS": ["localhost:not-a-port", "[::1]"]}
+    )
+
+    with application.test_client() as client:
+        trusted = client.get("/", headers={"Host": "[::1]:5000"})
+        untrusted = client.get("/", headers={"Host": "[::2]:5000"})
+        by_name = client.get("/", headers={"Host": "localhost"})
+
+    assert trusted.status_code == 200
+    assert untrusted.status_code == 400
+    assert by_name.status_code == 200
+
+
+def test_a_host_value_that_is_not_text_is_not_a_trusted_host() -> None:
+    """Criterion 12: the parse is total, and answers "not a host" for a scalar.
+
+    Asserted against the helper directly because the WSGI path cannot deliver
+    a non-string: an environment value is always text, and a non-string
+    *allowlist* entry is refused inside Werkzeug's own comparison - with an
+    ``AttributeError`` - before any hook of ours is reached, so the guard
+    cannot be provoked through a request.  It stays because the helper's
+    contract is a total coercion, the pattern every reader of this port's
+    documents follows, and a caller handing it a scalar must get "untrusted"
+    rather than an exception out of a security check.
+    """
+    from app import _host_without_port
+
+    for value in (None, 1234, ["[::1]"], {"host": "[::1]"}, b"[::1]"):
+        assert _host_without_port(value) == "", value
+
+    # And the two shapes it does read, so the assertion above is a statement
+    # about non-text rather than about everything.
+    assert _host_without_port("[::1]:5000") == "[::1]"
+    assert _host_without_port("LOCALHOST:5000") == "localhost"
+
+
+def test_an_allowlist_naming_nothing_restricts_nothing() -> None:
+    """Criterion 12: ``None`` is the framework's "every name", and stays so.
+
+    A deployment that deliberately turns host validation off sets the key to
+    ``None``, which is Flask's own documented default and means every name is
+    accepted.  The exact IPv6 check must add no restriction of its own to that
+    decision: a hook that refused a bracketed literal whenever the allowlist
+    named no bracketed entry would silently break IPv6 for an application
+    whose operator had chosen to validate nothing.
+    """
+    application = create_app({"TESTING": True, "TRUSTED_HOSTS": None})
+
+    with application.test_client() as client:
+        literal = client.get("/", headers={"Host": "[::2]:1"})
+        foreign = client.get("/", headers={"Host": "anything.example"})
+
+    assert literal.status_code == 200
+    assert foreign.status_code == 200
+
+
+def test_one_applications_allowlist_cannot_widen_the_next_ones() -> None:
+    """Criterion 6 applied to criterion 12: the default is not shared state.
+
+    The factory hands each application its own list, so code holding one
+    application's config - a test, a shell session, an extension - cannot
+    append a name to it and have the next application built in that
+    interpreter trust it.  Asserted behaviourally as well as by identity: the
+    second application refuses the name the first was widened with.
+    """
+    widened = create_app({"TESTING": True})
+    allowlist = widened.config["TRUSTED_HOSTS"]
+    assert isinstance(allowlist, list)
+    allowlist.append(REJECTED_HOST_HEADERS[0])
+
+    later = create_app({"TESTING": True})
+
+    assert later.config["TRUSTED_HOSTS"] == list(LOCAL_TRUSTED_HOSTS)
+    assert later.config["TRUSTED_HOSTS"] is not allowlist
+
+    with later.test_client() as client:
+        response = client.get("/", headers={"Host": REJECTED_HOST_HEADERS[0]})
+
+    assert response.status_code == 400
+
+
+# =========================================================================== #
 # The factory: no side effects
 # =========================================================================== #
 
@@ -1057,10 +1359,15 @@ def test_no_configuration_key_or_value_reaches_flask_config(
         "password": "factory-password-sentinel",
         "EmplTitle": "Employees-title-sentinel",
     }
-    (tmp_path / "configuration.properties").write_text(
+    properties_file = tmp_path / "configuration.properties"
+    properties_file.write_text(
         "".join(f"{key}={value}\n" for key, value in values.items()),
         encoding="latin-1",
     )
+    # Owner-only, because the reader refuses a credential-bearing file that is
+    # readable beyond its owner and would then report every key as ``None`` -
+    # which would make the assertions below pass for the wrong reason.
+    os.chmod(properties_file, 0o600)
     monkeypatch.chdir(tmp_path)
 
     application = create_app({"TESTING": True})
@@ -1847,10 +2154,15 @@ def test_no_configured_credential_reaches_a_stream_or_flask_config(
         value for key, value in values.items() if key != "browser"
     )
 
-    (tmp_path / "configuration.properties").write_text(
+    properties_file = tmp_path / "configuration.properties"
+    properties_file.write_text(
         "".join(f"{key}={value}\n" for key, value in values.items()),
         encoding="latin-1",
     )
+    # Owner-only: the reader refuses a group- or world-accessible credential
+    # file, so an unrestricted fixture would read back as six ``None`` values
+    # and the secret-hygiene assertions below would prove nothing.
+    os.chmod(properties_file, 0o600)
     monkeypatch.chdir(tmp_path)
 
     application = create_app({"TESTING": True})
@@ -2113,32 +2425,6 @@ AAP_RUNTIME_PINS: Final[Mapping[str, str]] = {
     "cucumber-tag-expressions": "11.0.1",
     "selenium": "4.48.0",
     "webdriver-manager": "4.1.2",
-}
-
-#: The runtime distribution the manifest declares beyond that table, with the
-#: reason it is a direct dependency rather than a transitive one:
-#: ``app/reporting/html_report.py`` imports it **by name**
-#: (``from markupsafe import Markup``), and the manifest's own regime is direct
-#: dependencies only, exact ``==``, transitive closure left unpinned.  A
-#: distribution this code imports is therefore a direct dependency whatever
-#: else happens to pull it in, and relying on Flask or Jinja2 to keep supplying
-#: it would make an import in this project depend on another project's
-#: dependency table.  3.0.3 is the version Jinja2 3.1.6 resolves to on the
-#: pinned interpreter.  Declared as its own constant so that this addition is
-#: visible against the AAP's table rather than blended into it.
-DECLARED_RUNTIME_PINS: Final[Mapping[str, str]] = {
-    "markupsafe": "3.0.3",
-}
-
-#: The whole authoritative runtime list: what ``requirements.txt`` must pin,
-#: exactly, and therefore - through ``pyproject.toml``'s dynamic dependency
-#: table - what the build backend writes into the distribution's metadata.
-#: Read from the manifest rather than from installed metadata, which is a
-#: snapshot of whenever the environment was last built and would report a stale
-#: list as a failure of this file.
-RUNTIME_PINS: Final[Mapping[str, str]] = {
-    **AAP_RUNTIME_PINS,
-    **DECLARED_RUNTIME_PINS,
 }
 
 #: An exact pin, and the only form either manifest may use (AAP 0.7: "exact
@@ -2599,10 +2885,9 @@ def test_requirements_pins_the_whole_runtime_list_exactly(
     scripts and the ``Makefile`` - so an unpinned or floating entry would make
     a run irreproducible without anything else noticing.  It is asserted as an
     exact mapping in both directions: the seven distributions AAP 0.5.1
-    tabulates must be present at the versions it pins, the one further
-    declaration must be the directly-imported ``MarkupSafe`` at its resolved
-    version (see :data:`DECLARED_RUNTIME_PINS`), and an eighth name arriving
-    from anywhere else fails here.
+    tabulates must be present at the versions it pins, exactly, and an eighth
+    name arriving from anywhere - a transitive distribution promoted to a
+    direct pin included - fails here.
 
     ``pyproject.toml`` no longer restates the list, and that is the point of
     the second half: it declares ``dependencies`` **dynamic** and derives the
@@ -2624,12 +2909,8 @@ def test_requirements_pins_the_whole_runtime_list_exactly(
             assert token not in lowered, f"{line!r} carries {token!r}"
         pins[match.group("name").lower()] = match.group("version")
 
-    assert pins == dict(RUNTIME_PINS)
-    # Stated separately so a failure says which half moved: a version the AAP
-    # pins, or the one declaration made beyond its table.
+    assert pins == dict(AAP_RUNTIME_PINS)
     for name, version in AAP_RUNTIME_PINS.items():
-        assert pins.get(name) == version, f"{name} is not pinned at {version}"
-    for name, version in DECLARED_RUNTIME_PINS.items():
         assert pins.get(name) == version, f"{name} is not pinned at {version}"
 
     project = _pyproject(repo_root)["project"]
@@ -2856,92 +3137,90 @@ def test_jenkins_keeps_the_publisher_and_stage_invariants(
 
 
 def test_jenkins_matches_its_era_exactly(repo_root: Path) -> None:
-    """The pipeline's command surface, pinned to the whole of one era.
+    """AAP 0.4.1: the pipeline's command surface, pinned to the ported contract.
 
-    The four changes AAP 0.4.1 makes to ``Jenkins`` - ``checkout scm``,
-    ``sh "sh scripts/run_tests.sh"``,
-    ``bat "powershell -ExecutionPolicy Bypass -File scripts\\run_tests.ps1"``
-    and the publisher narrowed to ``target/cucumber.json`` - land in a
-    different work unit's checkout in this same batch, so this repository can
-    legitimately be on either side of them while that work is in flight.  The
-    assertion is therefore not "the file is updated" but "**the file is
-    entirely one era or the other**": whichever era the Maven-or-Python
-    discriminator finds, all four of that era's literals must be present and
-    none of the other era's may be.
+    The four changes AAP 0.4.1 makes to ``Jenkins`` are the whole of its
+    command surface, and all four are pinned here: ``checkout scm`` in place of
+    the hard-coded reference clone, ``sh "sh scripts/run_tests.sh"`` on the
+    POSIX arm, the PowerShell runner on the Windows arm, and the publisher glob
+    narrowed to ``target/cucumber.json``.  No Maven-era literal may survive
+    anywhere in the file, so a half-applied update - a retargeted checkout
+    still running ``mvn``, a runner script stage still publishing ``**/*.json``
+    - fails rather than passing as some intermediate state.
 
-    That makes the test strict in both directions rather than permissive in
-    either.  A half-applied update - a retargeted checkout still running
-    ``mvn``, a Python runner still publishing ``**/*.json``, a glob narrowed
-    while the commands still build with Maven - is a state no era admits, and
-    is exactly the drift w019-F16 exists to catch.  Once the pipeline update
-    is merged the post-port branch is the only reachable one, and from then on
-    this test pins the final AAP contract literally.
+    The narrowed glob is asserted together with the absence of ``**/*.json``
+    because that absence is the reason it was narrowed: a run writes per-worker
+    intermediate JSON under ``target/.workers/``, and the recursive glob would
+    have had the publisher ingest every one of them alongside the real report.
 
-    The invariants the update leaves untouched - the stage names, the
-    ``isUnix()`` branch, the six ``-1`` thresholds and alphabetical sorting -
-    are asserted unconditionally by the test above, so they hold in both eras
-    and this test adds the command surface to them.
+    The Windows arm is asserted as a command made of required parts rather than
+    as one literal string, because it carries invocation hardening on top of
+    the AAP's spelling: the interpreter is named by its absolute System32 path,
+    so ``PATH`` cannot decide which ``powershell`` runs, and ``-NoLogo``,
+    ``-NoProfile`` and ``-NonInteractive`` stop the Jenkins account's profile
+    and the all-user profiles from executing ahead of the tracked script on an
+    unattended agent.  ``-File`` stays last, since PowerShell passes everything
+    after it to the script.  Flag order otherwise is not part of the contract;
+    the executable, the three hardening flags, the execution policy and the
+    script file are.  Every path separator is matched as one or two
+    backslashes throughout, because a backslash is a Groovy string escape and
+    either spelling reaches ``cmd`` as one.
+
+    The invariants this update leaves untouched - the three stage names and
+    their order, the ``isUnix()`` branch, the single publisher call, the six
+    ``-1`` thresholds and alphabetical sorting - are asserted by the test
+    above, so this test adds the command surface to them.
     """
     text = (repo_root / "Jenkins").read_text("utf-8")
 
-    # Each era as the complete set of things that defines it, expressed as
-    # patterns rather than as raw literals for one reason only: the Windows
-    # arm's path separator is a Groovy escape, so the file may legitimately
-    # spell it with one backslash or two.  Everything else about each command
-    # is pinned exactly - the tool, its flags and the file it runs.
-    post_port = {
-        "checkout scm": re.compile(r"^\s*checkout scm\s*$", re.MULTILINE),
-        "the POSIX runner": re.compile(
-            r"""^\s*sh\s+"sh\s+scripts/run_tests\.sh"\s*$""", re.MULTILINE
-        ),
-        "the PowerShell runner": re.compile(
-            r"""^\s*bat\s+"powershell\s+-ExecutionPolicy\s+Bypass\s+-File\s+"""
-            r"""scripts[\\/]{1,2}run_tests\.ps1"\s*$""",
-            re.MULTILINE,
-        ),
-        "the narrowed publisher glob": re.compile(
-            r"fileIncludePattern:\s*'target/cucumber\.json'"
-        ),
-    }
-    pre_port = {
-        "the hard-coded reference checkout": re.compile(
-            r"git\s+'https://github\.com/BalamiRR/Upgenix-QA\.git'"
-        ),
-        "the POSIX Maven command": re.compile(
-            r"""^\s*sh\s+"mvn\s+clean\s+test"\s*$""", re.MULTILINE
-        ),
-        "the Windows Maven command": re.compile(
-            r"""^\s*bat\s+"mvn\s+clean\s+test"\s*$""", re.MULTILINE
-        ),
-        "the recursive publisher glob": re.compile(
-            r"fileIncludePattern:\s*'\*\*/\*\.json'"
-        ),
-    }
+    assert re.search(r"^\s*checkout scm\s*$", text, re.MULTILINE) is not None, (
+        "the pipeline does not take its repository from the job configuration"
+    )
+    assert (
+        re.search(r"""^\s*sh\s+"sh\s+scripts/run_tests\.sh"\s*$""", text, re.MULTILINE)
+        is not None
+    ), "the POSIX arm does not run scripts/run_tests.sh"
 
-    # The discriminator is the build tool the stage runs, because that is what
-    # the port replaces and it cannot be ambiguous: a pipeline either invokes
-    # Maven or it invokes this repository's runner scripts.
-    runs_maven = re.search(r"^\s*(?:sh|bat)\s+\"mvn\b", text, re.MULTILINE) is not None
-    expected, forbidden = (pre_port, post_port) if runs_maven else (post_port, pre_port)
-
-    era = "Maven" if runs_maven else "Python"
-    for description, pattern in expected.items():
-        assert pattern.search(text) is not None, (
-            f"the pipeline is in the {era} era but does not carry "
-            f"{description} ({pattern.pattern})"
-        )
-    for description, pattern in forbidden.items():
-        assert pattern.search(text) is None, (
-            f"the pipeline mixes eras: it is in the {era} era and still "
-            f"carries {description}"
+    windows = re.search(r"""^\s*bat\s+"([^"]+)"\s*$""", text, re.MULTILINE)
+    assert windows is not None, "the pipeline declares no Windows command"
+    command = windows.group(1)
+    for description, pattern in (
+        (
+            "the absolute System32 PowerShell executable",
+            r"^%SystemRoot%[\\/]{1,2}System32[\\/]{1,2}WindowsPowerShell"
+            r"[\\/]{1,2}v1\.0[\\/]{1,2}powershell\.exe\b",
+        ),
+        ("-NoLogo", r"\s-NoLogo\b"),
+        ("-NoProfile", r"\s-NoProfile\b"),
+        ("-NonInteractive", r"\s-NonInteractive\b"),
+        ("-ExecutionPolicy Bypass", r"\s-ExecutionPolicy\s+Bypass\b"),
+        (
+            "-File scripts\\run_tests.ps1 last, so later arguments reach the script",
+            r"\s-File\s+scripts[\\/]{1,2}run_tests\.ps1\s*$",
+        ),
+    ):
+        assert re.search(pattern, command, re.IGNORECASE) is not None, (
+            f"the Windows command does not carry {description}: {command!r}"
         )
 
-    if not runs_maven:
-        # Stated separately because it is the reason the glob was narrowed: the
-        # per-worker intermediates a run writes under target/.workers/ must
-        # never be ingested by the publisher, and the recursive glob would have
-        # taken every one of them.
-        assert "**/*.json" not in text
+    assert (
+        re.search(r"fileIncludePattern:\s*'target/cucumber\.json'", text) is not None
+    ), "the publisher glob is not narrowed to the one report artifact"
+    assert "**/*.json" not in text, (
+        "the recursive publisher glob would ingest the per-worker intermediates"
+    )
+
+    for description, pattern in (
+        (
+            "the hard-coded reference checkout",
+            r"git\s+'https://github\.com/BalamiRR/Upgenix-QA\.git'",
+        ),
+        ("a Maven command", r"""^\s*(?:sh|bat)\s+"mvn\b"""),
+        ("a Maven build reference", r"\bmvn\s+clean\s+test\b"),
+    ):
+        assert re.search(pattern, text, re.MULTILINE) is None, (
+            f"the pipeline still carries {description}, which the port removes"
+        )
 
 
 def test_the_readme_documents_the_python_port(repo_root: Path) -> None:

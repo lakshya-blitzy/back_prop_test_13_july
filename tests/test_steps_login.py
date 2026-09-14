@@ -1,84 +1,34 @@
 """Per-method parity tests for ``features/steps/login_steps.py``.
 
-The module that discharges AAP 0.4.1's per-module obligation for the Login
-area: *"for each of the ten step modules, ``tests/test_steps_<area>.py`` drives
-the module against a stubbed driver and asserts, for every step method in the
-corresponding Java class, that the port performs the same observable
-operations in the same order"*.  The corresponding Java class is
-``LoginSD.java`` at the pinned reference revision
+AAP 0.4.1's per-module obligation for the Login area: drive the module against
+a stubbed driver and assert, for every step method of ``LoginSD.java``, that
+the port performs the same observable operations in the same order - the same
+navigation target and its property source, the same locators, wait target and
+timeout, the same literals, and the same assertion subjects and message text.
+:data:`JAVA_METHODS` is transcribed from the Java class rather than read back
+from the registry, so a definition the port loses, gains or renames fails.
+
+Java authority
+--------------
+``src/main/java/com/testinium/step_definitions/LoginSD.java:14-69`` and
+``src/main/java/com/testinium/pages/LoginP.java:8-33``, at pinned revision
 ``47e9d697e4a9a85da889f94a846fdf47af28a240``, which AAP 0.2.1 holds REFERENCE
-and never modifies, and whose 68 lines are therefore the specification every
-expectation below is written against.
+and this port never modifies.  Every expectation names the line it rests on,
+and each locator is checked twice: as the ``LoginPage`` constant a step must
+reach, and as that constant's pair against the ``@FindBy`` value it ports.
 
-Where the expectations come from
---------------------------------
-**The Java source, never the Python implementation.**  A parity test that
-restates the port proves only that the port equals itself.  Every assertion
-here names the ``LoginSD.java`` or ``LoginP.java`` line it pins, and the nine
-entries of :data:`JAVA_METHODS` are an independent census of that class -
-transcribed from it, not derived from the registry - so that a definition the
-port loses, gains or renames fails a test rather than quietly agreeing with a
-shorter list.
+The wait contract
+-----------------
+``LoginSD.java`` builds one ``WebDriverWait`` (``:17``, 3 seconds) and uses it
+once, at ``:43``.  That call passes the page object's upper-case locator
+constant, so ``visibility_of_element_located`` does the lookup inside the wait
+and the 3 seconds govern it; the lower-case accessor would resolve the element
+first, leaving the lookup to the 10-second implicit wait of ``Driver.java:34``.
+The wait is intercepted in the step module's own globals, and its target is
+asserted by identity with :attr:`LoginPage.DASHBOARD`.
 
-=====  ==========  ====================================================
-Java   Annotation  Body
-=====  ==========  ====================================================
-``19`` ``Given``   ``:22`` reads ``web.table.url``; ``:23`` navigates
-``26`` ``When``    ``:28`` ``inputEmail.sendKeys``
-``31`` ``When``    ``:33`` ``inputPassword.sendKeys``
-``36`` ``When``    ``:38`` ``button.click``
-``41`` ``Then``    ``:43`` wait 3s on ``dashboard``, ``:44-46`` title
-``49`` ``Then``    ``:51`` ``assertTrue(alertErrorMessage.isDisplayed())``
-``54`` ``Then``    ``:56`` direct ``By.name("login")``, ``:57`` 2-arg equals
-``60`` ``Then``    ``:62`` ``bulletPass.getAttribute("type")``
-``65`` ``When``    ``:67`` ``button.click`` again - no key is pressed
-=====  ==========  ====================================================
-
-How a step body is reached
---------------------------
-Through ``tests/conftest.py`` alone, which owns every fixture this suite has:
-:fixture:`resolve_step` hands back the registered definition behind a Gherkin
-phrase, :fixture:`fake_context` stands in for behave's ``Context``, and
-:fixture:`stub_driver` - the same recorder, published as ``context.driver`` -
-keeps one ordered log of every navigation, lookup, element operation and page
-read.  Nothing here adds a fixture of its own to that file, launches a
-browser, touches the network, sleeps, or writes anything anywhere.
-
-Two techniques are load-bearing and are documented where they are used
-----------------------------------------------------------------------
-1. **The explicit wait is intercepted in the step module's own globals.**
-   behave's ``load_step_modules`` execs each step file with a private globals
-   dict, and a step body resolves ``wait...`` through that dict, so replacing
-   the entry is what stops ``app/automation/waits.py`` reaching for a real
-   session.  The name is *discovered* rather than hard-coded, and every
-   assertion is about the wait's **target locator, its timeout value and its
-   position in the ordered log** - never about which helper was called, how
-   many arguments it took, or whether the timeout arrived positionally.  That
-   is deliberate: the visibility-wait call sites are being revised elsewhere in
-   this checkpoint, and the parity fact ``LoginSD.java:17`` fixes is the
-   3-second timeout on ``loginP.dashboard``, not a Python function signature.
-2. **Locator expectations close the chain Java -> constant -> operation.**
-   Each locator is stated as the ``LoginPage`` constant, *and* that constant's
-   own ``(strategy, selector)`` pair is asserted against the ``@FindBy`` value
-   in ``LoginP.java``.  ``INPUT_PASSWORD`` and ``BULLET_PASS`` are the same
-   selector under two names (``LoginP.java:16-17`` and ``:31-32``), so the two
-   steps that read them are additionally discriminated by *accessor*, which a
-   selector comparison cannot do.
-
-What this module deliberately does not assert
----------------------------------------------
-JUnit's ``expected:<...> but was:<...>`` framing: AAP deviation 16 preserves
-assertion **subjects and message text** and nothing around them, so the
-failure-path tests pin ``AssertionError.args`` - the byte-exact message where
-Java supplies one, and its absence where Java does not.  Nor does it assert
-anything about a browser locale: the French required-field string at
-``Login.feature:89`` is carried byte-for-byte and AAP 0.6 leaves the locale
-unresolved, so the string is pinned and no locale key is invented.
-
-Everything this module reads is read-only to it: ``features/steps/``,
-``app/**``, ``features/Login.feature`` and ``tests/conftest.py`` are all
-authored elsewhere, and a parity defect found here is reported rather than
-accommodated.
+Fixtures come from ``tests/conftest.py``; nothing here sleeps, reaches the
+network or starts a browser.
 """
 
 from __future__ import annotations
@@ -207,14 +157,26 @@ CONFIGURATION: Final[Mapping[str, str]] = {
     "EmplTitle": "Employees",
 }
 
+#: Destinations ``app/config.py``'s navigation policy refuses, one per class
+#: that matters at this call site: a scheme that reads the worker's own disk,
+#: an origin that would be handed the sign-in form, a value that forges a
+#: second record in a log or a request, and the cloud instance-metadata
+#: address.  ``LoginSD.java:22-23`` reached ``driver.get`` with any of them.
+HOSTILE_URL_VALUES: Final[tuple[tuple[str, str], ...]] = (
+    ("file-scheme", "file:///etc/passwd"),
+    ("userinfo", "https://qa:secret@credential-sink.example/web/login"),
+    ("newline", "https://login.invalid/web/login\nX-Injected: 1"),
+    ("metadata-address", "http://169.254.169.254/latest/meta-data/"),
+)
+
 
 # --------------------------------------------------------------------------
 # The nine-method census
 #
-# Transcribed from ``LoginSD.java`` - method name, annotation, declaration
-# line and body lines - and paired with the behave pattern that must carry it
-# and one concrete use taken from ``features/Login.feature``.  This table, not
-# the registry, is what "nine" means in this module.
+# Transcribed from ``LoginSD.java:19-68`` - method name, annotation,
+# declaration line and body lines - and paired with the behave pattern that
+# must carry it and one concrete use taken from ``features/Login.feature``.
+# This table, not the registry, is what "nine" means in this module.
 # --------------------------------------------------------------------------
 
 PATTERN_NAVIGATE: Final[str] = "User is on the upgenix login page"
@@ -245,7 +207,7 @@ USE_ENTER_BUTTON: Final[str] = PATTERN_ENTER_BUTTON
 
 
 class JavaMethod(NamedTuple):
-    """One ``LoginSD.java`` step method, as the census records it."""
+    """One step method of ``LoginSD.java:19-68``, as the census records it."""
 
     #: The Java method name, which the ported function must carry unchanged so
     #: that a failure names the same thing in both languages.
@@ -256,10 +218,12 @@ class JavaMethod(NamedTuple):
     #: this column is what that claim is checked against.
     annotation: str
 
-    #: Declaration line in ``LoginSD.java``.
+    #: The ``public void`` declaration's line in ``LoginSD.java``, one line
+    #: below its annotation, within the class body at ``:14-69``.
     declared_at: int
 
-    #: Body lines in ``LoginSD.java``.
+    #: The statement lines of the body in ``LoginSD.java``, between the
+    #: declaration and the closing brace, within ``:19-68``.
     body_at: str
 
     #: The behave pattern - the text inside the ``@step`` decorator.
@@ -270,7 +234,7 @@ class JavaMethod(NamedTuple):
     use: str
 
 
-#: The census.  Nine entries, in ``LoginSD.java`` declaration order.
+#: The census.  Nine entries, in ``LoginSD.java:19-68`` declaration order.
 JAVA_METHODS: Final[tuple[JavaMethod, ...]] = (
     JavaMethod(
         "user_is_on_the_upgenix_login_page",
@@ -583,9 +547,12 @@ def _string_constants() -> tuple[str, ...]:
 # --------------------------------------------------------------------------
 # Wait interception
 #
-# Discovery by prefix, and by prefix only: the helper the dashboard step
-# reaches may be renamed or re-shaped elsewhere in this checkpoint, and
-# ``LoginSD.java:17`` fixes a 3-second timeout on a target - not a signature.
+# The binding is discovered by prefix, because interception happens in the
+# step module's globals and any wait helper of ``app/automation/waits.py``
+# resolves there under a ``wait`` name.  What the parity facts are is settled:
+# ``LoginSD.java:17`` fixes 3 seconds, ``:43`` fixes the target, and a
+# visibility wait receives that target as a locator, so the lookup happens
+# inside ``visibility_of_element_located`` where the 3 seconds cover it.
 # --------------------------------------------------------------------------
 
 #: Prefix every wait helper ``app/automation`` exports begins with.
@@ -610,47 +577,41 @@ def _is_locator(value: Any) -> bool:
     )
 
 
-def _wait_target(arguments: Iterable[Any]) -> Any:
-    """The single wait argument that names an element or a locator.
+def _wait_target(arguments: Iterable[Any]) -> tuple[str, str]:
+    """The single wait argument that names the target locator.
 
-    Accepts either call shape: a located element, which carries the
-    ``locator`` attribute ``StubElement`` publishes, or a raw
-    ``(strategy, selector)`` pair.
+    A locator pair is the only target shape a visibility wait accepts.
+    ``wait_visible_element`` hands its argument to
+    ``visibility_of_element_located``, so the lookup runs inside the wait and
+    the 3 seconds of ``LoginSD.java:17`` govern it - which is what ``:43``
+    does, its ``loginP.dashboard`` field being a ``PageFactory`` proxy
+    (``LoginP.java:9-11``) that re-locates on every touch inside
+    ``wait.until``.  An element resolved before the call would be looked up
+    before the wait exists, leaving that lookup to the 10-second implicit wait
+    of ``Driver.java:34`` instead, so it is rejected here rather than accepted
+    as an alternative shape.
+
+    The argument is returned as supplied, not rebuilt, so that a test can
+    compare it by identity with the ``LoginPage`` attribute.
 
     :param arguments: Every argument the wait received, positional and keyword
         values alike.
     :returns: The one argument that identifies the wait's target.
-    :raises AssertionError: If none or several do, which means the call shape
-        changed in a way this module cannot read - report it rather than guess.
+    :raises AssertionError: If the call carries no locator pair, or several -
+        an element-shaped target lands here as "none", and is reported as the
+        shape error it is rather than resolved for the call site.
     """
-    candidates = [
-        value
-        for value in arguments
-        if getattr(value, "locator", None) is not None or _is_locator(value)
-    ]
+    values = list(arguments)
+    candidates = [value for value in values if _is_locator(value)]
 
     assert len(candidates) == 1, (
-        f"expected exactly one element-or-locator argument in the wait call, "
-        f"found {candidates!r}"
+        f"expected exactly one (strategy, selector) locator argument in the "
+        f"wait call, found {candidates!r} among {values!r}: LoginSD.java:43 "
+        f"waits on a locator resolved inside visibility_of_element_located, "
+        f"never on a pre-resolved element"
     )
 
     return candidates[0]
-
-
-def _target_locator(target: Any) -> tuple[str, str]:
-    """The ``(strategy, selector)`` pair a wait target resolves to.
-
-    :param target: An element carrying ``locator``, or a locator pair.
-    :returns: The pair, normalised to a tuple.
-    """
-    locator = getattr(target, "locator", None)
-
-    if locator is None:
-        locator = target
-
-    pair = tuple(locator)
-    assert _is_locator(pair), f"not a (strategy, selector) pair: {pair!r}"
-    return pair
 
 
 def _wait_timeout(arguments: Iterable[Any]) -> float:
@@ -684,9 +645,9 @@ def _install_wait_recorder(
 
     The recorder appends ``(WAIT_OPERATION, (args, kwargs))`` to the driver's
     own log, which is what puts the wait in sequence with the lookups and page
-    reads around it, and returns the wait's target - the value
-    ``visibility_of`` resolves to - so a call site that used the result would
-    still work.
+    reads around it, and hands back the target locator it was given - standing
+    in for the element ``visibility_of_element_located`` resolves to - so a
+    call site that used the result would still work.
 
     :param monkeypatch: pytest's patcher; ``setitem`` restores the real helper
         after the test, so nothing leaks into the session-scoped registry.
@@ -724,6 +685,10 @@ def _install_wait_recorder(
 def _wait_calls(driver: Any) -> tuple[tuple[tuple[str, str], float], ...]:
     """The target locator and timeout of every wait the driver recorded.
 
+    The locator is the object the call site passed, not a copy of it, so a
+    caller can assert identity with the ``LoginPage`` attribute and not merely
+    equality with a pair of the same two strings.
+
     :param driver: The recorder.
     :returns: One ``((strategy, selector), timeout)`` pair per wait, in call
         order.
@@ -736,28 +701,22 @@ def _wait_calls(driver: Any) -> tuple[tuple[tuple[str, str], float], ...]:
 
         args, kwargs = entry
         arguments = (*args, *kwargs.values())
-        calls.append(
-            (_target_locator(_wait_target(arguments)), _wait_timeout(arguments))
-        )
+        calls.append((_wait_target(arguments), _wait_timeout(arguments)))
 
     return tuple(calls)
 
 
-def _operations_except(driver: Any, *ignored: str) -> tuple[str, ...]:
-    """The ordered operation names, with *ignored* operations dropped.
+def _operations(driver: Any) -> tuple[str, ...]:
+    """The recorded operation names, in order and complete.
 
-    Used to state a sequence that must hold whichever way the wait is called:
-    an element-form wait resolves its element first and logs a
-    ``find_element``, a locator-form wait does not, and neither shape changes
-    the parity fact that the wait precedes the title read.
+    Nothing is filtered out: the log is the sequence the step produced, so a
+    lookup the body does not make shows up as an extra entry rather than
+    disappearing into an exclusion list.
 
     :param driver: The recorder.
-    :param ignored: Operation names to leave out.
-    :returns: The remaining operation names, in order.
+    :returns: Every operation name, in call order.
     """
-    return tuple(
-        operation for operation, _ in driver.calls if operation not in ignored
-    )
+    return tuple(operation for operation, _ in driver.calls)
 
 
 # --------------------------------------------------------------------------
@@ -1238,6 +1197,45 @@ def test_navigation_step_passes_a_missing_url_through_unguarded(
 
 
 @pins(PATTERN_NAVIGATE)
+@pytest.mark.parametrize(
+    "value",
+    [pytest.param(value, id=case) for case, value in HOSTILE_URL_VALUES],
+)
+def test_navigation_step_refuses_a_destination_outside_the_policy(
+    value: str,
+    request: pytest.FixtureRequest,
+    resolve_step: Callable[[str], Any],
+    fake_context: Any,
+    stub_driver: Any,
+) -> None:
+    """A refused ``web.table.url`` raises at ``:22`` and never reaches ``:23``.
+
+    The complement of the two tests above: a *present* destination outside
+    ``app/config.py``'s navigation policy - a ``file:`` URL that would read a
+    local file, an origin carrying user information, a value bearing a
+    newline, the cloud instance-metadata address - raises out of the accessor
+    on the read, so the local is never bound and the recorder logs no
+    navigation at all.  The value is installed through the real userdata
+    channel rather than by patching the accessor, because it is the accessor's
+    decision that is under test; the ``None`` tolerance directly above is
+    unaffected, which is why both live here side by side.
+    """
+    _install_configuration(request, {**CONFIGURATION, WEB_TABLE_URL_KEY: value})
+
+    with pytest.raises(ValueError) as excinfo:
+        resolve_step(USE_NAVIGATE).run(fake_context)
+
+    assert stub_driver.calls == [], (
+        f"a refused destination reached the browser: {stub_driver.calls}"
+    )
+
+    message = str(excinfo.value)
+    assert WEB_TABLE_URL_KEY in message, "the message must name the key"
+    assert "not navigable" in message, "the raise is not the policy's"
+    assert value not in message, "the refused destination was reported back"
+
+
+@pins(PATTERN_NAVIGATE)
 def test_navigation_step_body_matches_java() -> None:
     """``:22-23`` is a local and a navigation - and ``:21`` stays unported.
 
@@ -1381,9 +1379,15 @@ def test_dashboard_step_waits_three_seconds_then_reads_the_title(
     * the title is read **after** the wait, from the session, once;
     * nothing else happens - no click, no typing, no second wait.
 
-    Any element lookup is dropped from the sequence assertion, because whether
-    one occurs depends on whether the wait is given an element or a locator,
-    and neither shape changes the order of the wait and the title read.
+    The sequence is asserted whole, with nothing excluded, and the wait's
+    target is pinned by identity against
+    :attr:`LoginPage.DASHBOARD <app.pages.login_page.LoginPage>` rather than
+    against an equal-valued pair.  Together those two fix the call's shape: the
+    step hands the locator to the wait, so no ``find_element`` precedes the
+    wait entry at all and the lookup happens inside
+    ``visibility_of_element_located``, where the 3 seconds cover it.  A body
+    that resolved the element first would show that extra lookup here, and
+    would leave it to the 10-second implicit wait of ``Driver.java:34``.
     """
     match = resolve_step(USE_DASHBOARD)
     _install_wait_recorder(monkeypatch, match.func, stub_driver)
@@ -1392,12 +1396,13 @@ def test_dashboard_step_waits_three_seconds_then_reads_the_title(
     match.run(fake_context)
 
     assert _wait_calls(stub_driver) == ((LOCATOR_DASHBOARD, 3),)
-    assert _operations_except(stub_driver, "find_element") == (
-        WAIT_OPERATION,
-        "title",
+    assert _wait_calls(stub_driver)[0][0] is LoginPage.DASHBOARD, (
+        f"LoginSD.java:43's wait was given {_wait_calls(stub_driver)[0][0]!r} "
+        f"rather than LoginPage.DASHBOARD itself"
     )
+    assert _operations(stub_driver) == (WAIT_OPERATION, "title")
     assert stub_driver.count_of("title") == 1
-    assert set(stub_driver.calls_of("find_element")) <= {LOCATOR_DASHBOARD}
+    assert stub_driver.calls_of("find_element") == ()
     assert [
         operation
         for operation, _ in stub_driver.calls
@@ -1411,13 +1416,22 @@ def test_dashboard_step_discards_the_wait_result() -> None:
 
     The statement is a bare call, so a timeout propagates as itself and
     nothing downstream depends on what the wait resolved to.  The callee is
-    identified by prefix only: which visibility helper the call site names is
-    not a parity fact, whereas discarding its result is.
+    identified by prefix only - which visibility helper of
+    ``app/automation/waits.py`` the call site names is not a parity fact,
+    whereas discarding its result is - but the argument it is given is a parity
+    fact, and it is read here from the source: the upper-case ``DASHBOARD``
+    constant, never the lower-case ``dashboard`` accessor, which would resolve
+    the element before the wait was entered.
     """
     statements = _body_statements("user_should_see_the_dashboard")
 
     assert len(statements) == 4
     assert statements[0].startswith(WAIT_NAME_PREFIX)
+    assert ".DASHBOARD," in statements[0], (
+        f"LoginSD.java:43's wait is written as {statements[0]!r}; its target "
+        f"has to be LoginPage.DASHBOARD so that the lookup runs inside "
+        f"visibility_of_element_located"
+    )
     assert statements[1:] == (
         f"expected_dashboard = {EXPECTED_TITLE!r}",
         "actual_dashboard = context.driver.title",
@@ -1662,6 +1676,7 @@ def test_dashboard_assertion_fails_with_the_trailing_space_message(
     assert TITLE_ASSERTION_MESSAGE.endswith("! ")
     assert TITLE_ASSERTION_MESSAGE != TITLE_ASSERTION_MESSAGE.rstrip()
     assert _wait_calls(stub_driver) == ((LOCATOR_DASHBOARD, 3),)
+    assert _wait_calls(stub_driver)[0][0] is LoginPage.DASHBOARD
 
 
 @pins(PATTERN_DASHBOARD)
@@ -1893,11 +1908,13 @@ def test_module_import_boundary_is_closed() -> None:
 
 
 def test_module_holds_no_fixed_delay() -> None:
-    """``LoginSD.java`` calls no ``Thread.sleep`` - AAP 0.4.1.
+    """``LoginSD.java:14-69`` calls no ``Thread.sleep`` - AAP 0.4.1.
 
-    Seventeen fixed delays exist across five step classes and none of them is
-    here, so neither a delay nor the means to one may appear: the five classes
-    that do have them are Calendar, Contacts, Crm, EmployeeStage and Notes.
+    The suite's seventeen fixed delays are at ``Calendar.java:99`` and ``:155``,
+    ``Contacts.java:19``, ``:25``, ``:57``, ``:64`` and ``:98``,
+    ``Crm.java:117``, ``EmployeeStage.java:48``, ``:62``, ``:68``, ``:70``,
+    ``:95``, ``:97``, ``:100`` and ``:103``, and ``Notes.java:23``.  None of
+    them is in this class, so neither a delay nor the means to one may appear.
     """
     assert "sleep" not in _called_attribute_names()
     assert not [

@@ -1,40 +1,37 @@
 r"""Explicit waits - the port of the nine per-class ``WebDriverWait`` fields.
 
-Every Java step class of the reference suite constructed a ``WebDriverWait``
-of its own and used it for each gated interaction in that class.  Nine such
-fields exist across the eleven step classes at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240``, which AAP 0.2.1 holds as
-REFERENCE and this port never modifies.  AAP 0.4.1 maps all nine onto this one
-module - *"Explicit waits with the timeout supplied per call site"* - and
-0.4.2 fixes the shape of the surface it exposes: *"the wait helpers from
-waits.py, each taking an explicit timeout."*
+Every Java step class constructed a wait of its own for each gated interaction,
+nine fields in all.  AAP 0.4.1 maps them onto this module - *"Explicit waits
+with the timeout supplied per call site"* - and 0.4.2 fixes the surface: nine
+thin wrappers over :func:`_until`, the only place in the port that builds one.
 
-Nine thin wrappers over a single private core is the whole of the design.
-Each wrapper names one ``expected_conditions`` predicate, hands it to
-:func:`_until`, and returns what the wait resolved to.  The core is the only
-place in this port where a ``WebDriverWait`` is ever constructed.
+The nine construction sites, whose timeouts AAP 0.8 freezes: 2 s in
+``Calendar.java:15`` and ``Crm.java:18``; 3 s in ``LoginSD.java:17``,
+``LogOutSD.java:13`` and ``EmployeeStage.java:14``; 4 s in ``Sales.java:17``;
+20 s in ``Contacts.java:15``, ``Inventory.java:13`` and ``Notes.java:19``.
+``Session.java`` constructs none, which is why
+``features/steps/session_steps.py`` imports nothing from here.
 
-The nine construction sites and their timeouts
-----------------------------------------------
-These are frozen: AAP 0.8 lists the nine explicit waits, together with the
-seventeen fixed delays covered by exclusion 2 below, among the observable
-contracts that must not change.  (Paraphrased rather than quoted, so that the
-name of the Java delay primitive appears nowhere in this file - see exclusion
-2 for why that matters.)
+That list is the only place those numbers appear in this file.  ``timeout`` is
+a required parameter of every helper - no constant, no default, so omitting it
+is a ``TypeError`` from Python itself - and each step module passes its own
+Java class's number at every call site, since a default here would let a call
+site silently acquire another class's timeout.  The suite's seventeen fixed
+delays stay at their own call sites per AAP 0.4.1, so nothing here pauses.
 
-========  ===================================================================
-Timeout   Java construction site
-========  ===================================================================
-2 s       ``Calendar.java:15``, ``Crm.java:18``
-3 s       ``LoginSD.java:17``, ``LogOutSD.java:13``, ``EmployeeStage.java:14``
-4 s       ``Sales.java:17``
-20 s      ``Contacts.java:15``, ``Inventory.java:13``, ``Notes.java:19``
-========  ===================================================================
+Nothing else is embellished: no retry, no stale-element recovery, no capture on
+expiry, no logging.  An expiry propagates as the binding's ``TimeoutException``
+and fails the step as it fails the Java one; the resolved element, list or
+boolean comes back untouched; timeouts are seconds on both sides; and the
+ten-second implicit wait ``driver.py`` sets underneath can inflate the effective
+timeout, which is the source's timing and is not corrected here.
 
-``Session.java`` constructs no wait whatever, which is why
-``features/steps/session_steps.py`` imports nothing from this module.  That
-asymmetry is real and survives the port: a wait helper reaching that one step
-module would be a divergence, not a tidy-up.
+Every helper resolves its session through :func:`get_driver`; the keyword-only
+``driver`` parameter is a test seam no step module or page object passes.  Two
+helpers share ``visibility_of_element_located``: :func:`wait_visible_element`
+ports ``visibilityOf`` over a ``PageFactory`` field, whose proxy re-located
+inside the predicate on every poll, so it takes a locator, not a resolved
+element; :func:`wait_visible` ports the locator form AAP 0.4.2 names.
 
 Exclusion 1 - no default timeout, and no timeout constant
 ---------------------------------------------------------
@@ -170,12 +167,13 @@ rereading the Java source.  Every item is reachable with a stubbed driver.
 6. **The seam works as documented** - with no ``driver`` argument,
    :func:`get_driver` is called exactly once; with one, it is not called at
    all.
-7. **A visibility wait locates inside the predicate** - given a stub driver
-   whose lookup raises ``NoSuchElementException`` for the first few polls and
-   then answers a visible element, :func:`wait_visible_element` still
-   resolves, and the stub's lookup count is greater than one, which is what
-   distinguishes a locator resolved per poll from an element resolved once
-   before the wait was constructed.
+7. **A visibility wait is handed a locator** - :func:`wait_visible_element`
+   names ``visibility_of_element_located`` by that exact name, over the
+   locator it was given and with nothing else, and looks nothing up itself:
+   the stubbed driver records no operation at all.  Those two together are
+   what place the lookup inside the predicate, under the call site's own
+   timeout, rather than before the wait exists.  Asserted by name rather than
+   by counting polls, because no test in that module performs a real wait.
 
 The public surface
 ------------------
@@ -258,11 +256,6 @@ __all__ = [
     "wait_url_contains",
 ]
 
-#: The locator shape every ``expected_conditions`` predicate expects: a
-#: ``(By.X, "value")`` pair, which ``app/pages/*`` builds from the ``By`` that
-#: the package barrel re-exports.  Deliberately absent from :data:`__all__` -
-#: that list is exactly the helpers - because this alias exists to keep their
-#: signatures readable rather than to widen the surface.
 type Locator = tuple[str, str]
 
 
@@ -273,47 +266,28 @@ def _until[T](
 ) -> T:
     """Resolve the session, run ``condition`` under a wait and return its result.
 
-    The single core every public helper delegates to, and the only place in
-    the port that constructs a ``WebDriverWait``.  Three lines of behaviour,
-    each of them contractual:
-
-    * **The session is resolved once.**  :func:`get_driver` is called only
-      when no ``driver`` was supplied, so a caller using the test seam never
-      reaches the real lifecycle owner, and a caller that does not reach it
-      exactly once.
-    * **The timeout is passed through as given**, in seconds, with no
-      conversion, no clamping, no floor and no default of any kind.
-    * **Nothing is caught.**  Whatever ``until`` resolves to is returned as it
-      is, and whatever it raises - an expiry above all - travels straight out
-      to the step body, where it fails the step exactly as the Java original
-      fails it.
-
-    Private, and staying private: the public helpers name their predicate for
-    the reader, whereas a caller reaching this function directly would be
-    building an ``expected_conditions`` predicate outside this package, which
-    is what the import boundary in the module docstring forbids.
+    The single core every public helper delegates to, and the only place in the
+    port that builds a wait object.  Private and staying private: a caller
+    reaching it directly would be constructing an ``expected_conditions``
+    predicate outside this package, which the import boundary forbids.
 
     :param condition: A predicate of the kind ``expected_conditions`` builds.
         The annotation mirrors the binding's own: a predicate may answer
-        ``False`` to mean "not yet", which the wait absorbs, so ``until``
-        itself never returns that value.
-    :param timeout: Seconds to keep polling for, as supplied by the call site.
-    :param driver: The session to wait on, or ``None`` to use this worker's.
+        ``False`` for "not yet", which the wait absorbs, so ``until`` itself
+        never returns that value.
+    :param timeout: Seconds to keep polling for, passed through exactly as the
+        call site supplied it - no conversion, clamping, floor or default.
+    :param driver: The session to wait on, or ``None`` to resolve this worker's
+        through :func:`get_driver`, which is then called exactly once.
     :returns: Whatever ``condition`` finally resolved to - a web element, a
         list of them, or a boolean, according to the predicate.
     :raises selenium.common.exceptions.TimeoutException: When the condition is
-        still unmet once ``timeout`` has elapsed.  Propagated deliberately.
+        still unmet once ``timeout`` has elapsed.  Nothing is caught here, so
+        this and anything else ``until`` raises reach the step body and fail it
+        as the Java original fails it.
     """
     target = get_driver() if driver is None else driver
     return WebDriverWait(target, timeout).until(condition)
-
-
-# ---------------------------------------------------------------------------
-# The public surface - one wrapper per predicate, in the order the module
-# docstring's surface table lists them.  Each is a single delegation, so that
-# the wrapper adds a name and a type and no behaviour of its own, and each
-# takes its timeout from the call site because no wrapper declares a default.
-# ---------------------------------------------------------------------------
 
 
 def wait_visible(
@@ -341,8 +315,8 @@ def wait_visible_element(
     governed it; this helper therefore takes the locator - a page object's
     upper-case constant, ``page.CALENDAR_BUTTON`` - and not an element already
     resolved through the lower-case accessor, which would be looked up before
-    the wait exists.  The module docstring's surface table explains why the two
-    visibility helpers share one predicate and why both names stay.
+    the wait exists.  The module docstring explains why the two visibility
+    helpers share one predicate and why both names stay.
     """
     return wait_visible(locator, timeout, driver=driver)
 

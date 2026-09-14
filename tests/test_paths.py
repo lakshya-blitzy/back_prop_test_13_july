@@ -1,95 +1,48 @@
 """Tests for ``app/utils/paths.py`` - the port's single owner of every path.
 
-What this module owns, and why it has to exist
-----------------------------------------------
-AAP 0.4.2 assigns one module the whole of the port's filesystem vocabulary:
-*"Artifact paths are owned by ``app/utils/paths.py``.  Every writer, the
-artifact route, the clean step and the per-worker invocation take their paths
-from it, and no other Python module contains a path literal."*  Path drift is
-how this port breaks silently - a writer that spells ``target/cucumber.json``
-itself keeps working right up to the day the owner's value changes - so the
-ownership claim is only worth what a test makes of it.  This module is that
-test, and it carries four responsibilities nothing else in the suite covers:
+AAP 0.4.2: *"Artifact paths are owned by ``app/utils/paths.py``.  Every writer,
+the artifact route, the clean step and the per-worker invocation take their
+paths from it, and no other Python module contains a path literal."*  Path
+drift is how this port breaks silently - a writer that spells its own
+``target/cucumber.json`` keeps working until the owner's value changes - so the
+ownership claim is worth only what a test makes of it.  This module is that
+test, and it is the only one that covers:
 
-1. **The four artifacts at their unchanged locations.**  ``README.md:79-82``
-   quotes the Java runner's plugin list verbatim from ``CukesRunner.java:9-14``:
-   ``html:target/cucumber-reports.html``, ``json:target/cucumber.json``,
-   ``rerun:target/rerun.txt`` and
-   ``me.jvt.cucumber.report.PrettyReports:target/cucumber``.  Those four names
-   are a compatibility surface - the JSON path is also the Jenkins publisher's
-   ``fileIncludePattern`` - so each is pinned here against its accessor.
-2. **The per-worker intermediates.**  ``pom.xml:22-23`` configured surefire
-   with ``parallel=methods`` and ``useUnlimitedThreads``; AAP deviation 4
-   reproduces that as a process pool whose shards write under
-   ``target/.workers/``.  Both halves of the file name are load-bearing and the
-   zero-padded shard index is what makes name order equal numeric order, so the
-   ordering property is asserted rather than mere membership.
-3. **The artifact route's security behaviour.**  AAP 0.3.1 requires
-   ``GET /artifacts/<path:name>`` to serve an allowlisted artifact *only*, and
-   ``.workers/`` "must never be reachable".  ``tests/test_web_routes.py``
-   exercises that over HTTP; the rejection matrix itself - traversal, dot
-   components, Windows separators and drive letters, doubled separators,
-   embedded null bytes, directories, absence and symlink escape - is asserted
-   here, directly against :func:`~app.utils.paths.resolve_artifact`, because
-   that is where the decision is made.
-4. **The sole feature-URI normalization helper.**  The golden fixtures under
-   ``tests/fixtures/`` are stored verbatim with the Java tree's
-   feature-directory prefix, and AAP deviation 1 moved the features while
-   preserving their filenames.  Reconciling the two is production code, and
-   every writer test compares through it.  If that one helper were wrong, every
-   writer test could agree on the same wrong answer, so this module proves the
-   helper *and* proves that the two ``tests/conftest.py`` wrappers delegate to
-   it instead of re-deriving the rule.
-5. **The no-follow artifact I/O surface.**  ``target/`` is generated output
-   that outlives a run, so the owner does not hand a writer a pathname to open:
-   :func:`~app.utils.paths.open_artifact_write`,
-   :func:`~app.utils.paths.open_artifact_read`,
-   :func:`~app.utils.paths.read_artifact_text` and
-   :func:`~app.utils.paths.open_resolved_artifact` create, verify and open
-   every owned component themselves, under a held directory descriptor and with
-   ``O_NOFOLLOW``.  What that buys is a set of refusals no other module can be
-   asked for - a symbolic link at the end of the path or anywhere from
-   ``target`` inward, a hard-linked entry that is also a file elsewhere, a
-   directory or a FIFO where a file belongs, and a destination that changed
-   between the check and the open - and each of them is asserted here against a
-   real filesystem shape, in Sections 11 and 12, because a refusal that is
-   never exercised is indistinguishable from one that is not implemented.
+* the four artifact paths of the Java plugin list (``CukesRunner.java:9-14``,
+  the JSON one also ``Jenkins:15``'s ``fileIncludePattern``) and the
+  PrettyReports sub-tree of AAP 0.3.4;
+* the per-worker intermediates under ``target/.workers/`` - ``pom.xml:22-23``'s
+  ``parallel=methods`` and ``useUnlimitedThreads`` reproduced as a process pool
+  by AAP deviation 4 - whose zero-padded shard index makes name order numeric
+  order, as AAP 0.6's deterministic merge requires;
+* the rejection matrix of :func:`~app.utils.paths.resolve_artifact`, where AAP
+  0.3.1's "allowlisted artifact only" and never-reachable ``.workers/`` are
+  decided (``tests/test_web_routes.py`` exercises the same rules over HTTP);
+* the sole feature-URI normalization helper (AAP deviation 1) every writer test
+  compares through, plus the two ``tests/conftest.py`` wrappers' delegation;
+* the no-follow artifact I/O surface, whose refusals - a symlink at the end of
+  the path or anywhere from ``target`` inward, a hard link, a FIFO, a directory
+  where a file belongs, a destination changed between check and open - are
+  asserted against real filesystem shapes in Sections 11 and 12.
 
-Conventions this module follows
--------------------------------
-* Every path assertion drives production code through its ``base=`` seam with
-  :fixture:`tmp_artifact_root`.  Nothing here writes into the repository's real
-  ``target/``, and nothing here creates ``configuration.properties``.
-* Every assertion here states the **settled contract** and states it
-  unconditionally.  Two of them - ``F02`` and ``F03`` of
-  :data:`CONTESTED_REPORT`, filed against ``app/utils/paths.py`` and owned by
-  the unit that holds that file - therefore fail until that unit's fix is
-  integrated, and one - the ownership scan of Section 10 - fails until the
-  production path literals it lists are rephrased.  That is intended: a
-  behaviour-dependent skip condition re-measures in every future pytest
-  process, so a regression to the defective behaviour would silently restore
-  the skip and this module would stop protecting anything.  The only
-  conditional cases in the file are :data:`SYMLINKS_AVAILABLE`,
-  :data:`FIFOS_AVAILABLE` and :data:`HARD_LINKS_AVAILABLE`, each of which is a
-  platform capability and not a behaviour under test: a platform that cannot
-  create the shape cannot be attacked through it either.
-* A refusal that no real filesystem shape can produce is driven through the
-  module attribute the owner's own code reads - :mod:`app.utils.paths`'s
-  ``_NO_FOLLOW_SUPPORTED``, ``_O_NOFOLLOW`` and ``_O_DIRECTORY`` flags, or
-  :func:`os.open` - and never by calling a private helper directly.  Those
-  three flags *are* the owner's portability seam (``getattr(os, "O_NOFOLLOW",
-  0)`` and friends), so clearing one reproduces a platform that lacks the
-  primitive rather than faking a result; every such test says in its docstring
-  why the seam and not a shape.  Anything a link, a FIFO, a hard link or a
-  directory can produce is driven by building that shape instead.
-* ``app/utils/paths.py`` is the only module allowed to spell a path literal, so
-  the literal ``"src/main/resources/features/"`` appears in this file - the
-  module that proves the rewrite - and nowhere else under ``tests/``.
+Conventions: every path assertion drives production code through its ``base=``
+seam with :fixture:`tmp_artifact_root`, so nothing here writes into the real
+``target/``; every assertion states one settled outcome unconditionally, the
+only conditional cases being :data:`SYMLINKS_AVAILABLE`,
+:data:`FIFOS_AVAILABLE` and :data:`HARD_LINKS_AVAILABLE`, which are platform
+capabilities rather than behaviours under test; a refusal no real filesystem
+shape can produce is driven through the owner's own portability seam
+(``_NO_FOLLOW_SUPPORTED``, ``_O_NOFOLLOW``, ``_O_DIRECTORY``) or
+:func:`os.open`, never by calling a private helper; and because the owner is
+the only module permitted to spell a path literal, the literal
+``"src/main/resources/features/"`` appears here - the module that proves the
+rewrite - and nowhere else under ``tests/``.
 """
 
 from __future__ import annotations
 
 import ast
+import contextlib
 import errno
 import inspect
 import io
@@ -111,7 +64,7 @@ from app.utils import paths
 #
 # The values below are spelled out rather than derived from the module under
 # test: a test that builds its expectation out of the same constant it is
-# checking cannot fail.  Their authority is ``README.md:79-82``, which quotes
+# checking cannot fail.  Their authority is the Java runner's plugin list at
 # ``CukesRunner.java:9-14``, plus AAP 0.3.4 for the PrettyReports sub-tree.
 # --------------------------------------------------------------------------
 
@@ -124,7 +77,7 @@ EXPECTED_FEATURES_DIR: Final[str] = "features"
 #: ``.workers`` - the per-worker intermediate directory (AAP 0.4.1).
 EXPECTED_WORKERS_DIR: Final[str] = ".workers"
 
-#: The PrettyReports plugin's output directory (``README.md:82``).
+#: The PrettyReports plugin's output directory (``CukesRunner.java:13``).
 EXPECTED_PRETTY_DIR: Final[str] = "cucumber"
 
 #: Where the generator puts its pages and assets (AAP 0.3.4).
@@ -133,13 +86,14 @@ EXPECTED_PRETTY_SUBDIR: Final[str] = "cucumber-html-reports"
 #: The PrettyReports overview page (AAP 0.3.1).
 EXPECTED_PRETTY_INDEX: Final[str] = "overview-features.html"
 
-#: ``README.md:79`` - the single self-contained HTML report.
+#: ``CukesRunner.java:10`` - the single self-contained HTML report.
 EXPECTED_HTML_NAME: Final[str] = "cucumber-reports.html"
 
-#: ``README.md:80`` - the JSON report, and ``Jenkins:15``'s include pattern.
+#: ``CukesRunner.java:11`` - the JSON report, and ``Jenkins:15``'s include
+#: pattern.
 EXPECTED_JSON_NAME: Final[str] = "cucumber.json"
 
-#: ``README.md:81`` - the rerun manifest.
+#: ``CukesRunner.java:12`` - the rerun manifest.
 EXPECTED_RERUN_NAME: Final[str] = "rerun.txt"
 
 #: The feature-directory prefix the Java tree used and the golden fixtures
@@ -147,7 +101,7 @@ EXPECTED_RERUN_NAME: Final[str] = "rerun.txt"
 #: because this file is what proves the rewrite.
 EXPECTED_LEGACY_PREFIX: Final[str] = "src/main/resources/features/"
 
-#: The four artifact keys in plugin order (``README.md:79-82``).
+#: The four artifact keys in plugin order (``CukesRunner.java:9-14``).
 EXPECTED_ARTIFACT_KEYS: Final[tuple[str, ...]] = (
     EXPECTED_HTML_NAME,
     EXPECTED_JSON_NAME,
@@ -188,14 +142,23 @@ REQUIRED_PATH_CONSUMERS: Final[tuple[str, ...]] = (
 #: Import roots ``app/utils/paths.py`` may use.  AAP 0.4.2 requires the module
 #: to import nothing from the ``app`` package so that a worker process which
 #: never builds a Flask application can still resolve its own output path.
-#: ``errno``, ``io`` and ``stat`` are here because the owner now opens and
+#: ``errno``, ``io`` and ``stat`` are on the list because the owner opens and
 #: verifies the components of a path itself -- descriptor-relative and
 #: ``O_NOFOLLOW`` -- and needs the error numbers, the buffered wrappers and the
 #: mode predicates to do it; every one of them is in the standard library,
 #: which is the property the test additionally asserts by name so a future
 #: addition cannot smuggle a third-party dependency in behind this list.
 ALLOWED_OWNER_IMPORT_ROOTS: Final[frozenset[str]] = frozenset(
-    {"errno", "io", "os", "pathlib", "stat", "typing"}
+    {
+        "collections",
+        "contextlib",
+        "errno",
+        "io",
+        "os",
+        "pathlib",
+        "stat",
+        "typing",
+    }
 )
 
 #: Heavyweight modules importing the owner must not drag in, asserted in a
@@ -209,36 +172,45 @@ FORBIDDEN_TRANSITIVE_IMPORTS: Final[tuple[str, ...]] = (
     "jinja2",
 )
 
-#: Names that would make this module a deletion tool.  Its docstring is explicit
-#: that emptying ``target/`` and tearing down ``target/.workers/`` belong to
-#: ``app/cli.py``: *"Do not add a delete helper here."*
+#: Calls that remove a filesystem entry.  Confined by the module docstring to
+#: the publication scratch helpers: emptying ``target/`` belongs to
+#: ``app/cli.py`` and the per-worker directory lifecycle to
+#: ``app/services/test_run_service.py`` (AAP 0.4.1).
 FORBIDDEN_OWNER_CALLS: Final[frozenset[str]] = frozenset(
     {"rmtree", "unlink", "rmdir", "remove", "removedirs"}
 )
 
-
-# --------------------------------------------------------------------------
-# The two contracts whose production fix is owned elsewhere
-#
-# A code review filed both findings against ``app/utils/paths.py``; the unit
-# that owns that file is fixing them in its own clone.  Both cases assert the
-# settled contract unconditionally: no probe, no skip and no tolerance branch,
-# because a condition measured at import time re-measures in every future
-# pytest process, and a regression to the defective behaviour would silently
-# restore the skip instead of failing.  Until the owning unit's fix is
-# integrated these two cases fail, and each names its finding and that unit in
-# its docstring so the failure is self-diagnosing.
-# --------------------------------------------------------------------------
-
-#: The review that raises the two findings.  Named in both docstrings so a
-#: failing run points at the authority rather than at an opinion.
-CONTESTED_REPORT: Final[str] = (
-    "/tmp/blitzy/qa/reports/078e7083-d870-4d30-b966-73c2ed5036ec/README.md/cr/"
-    "review/o000_d38bb343672e95a9.md"
+#: The only owner definitions permitted to contain one of those calls.  The
+#: first is the descriptor-relative, no-follow scratch removal; the second is
+#: the fallback branch's disposal, which removes only what needs no descent and
+#: renames the rest aside; the third removes the temporary of a failed
+#: :func:`publish_artifact_file`; and the class is where a publication's own
+#: staging and renamed-aside trees are discarded - each of which refuses a name
+#: that is not its own scratch.
+ALLOWED_OWNER_REMOVAL_FUNCTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "_remove_tree_relative",
+        "_detach_tree_by_name",
+        "_discard_temporary",
+        "ArtifactDirectoryPublication",
+    }
 )
 
+
+# --------------------------------------------------------------------------
+# Hostile path input
+#
+# ``ArtifactSpec`` is a plain NamedTuple, so any caller can build one; the
+# owner therefore does not trust a supplied spec to describe its own location
+# and looks it up by its own ``key``, requiring equality with the canonical
+# member of ``ARTIFACT_SPECS`` (``app/utils/paths.py``, ``artifact_path``).
+# The relpaths below are the four shapes that would otherwise escape - two
+# traversals, one traversal behind a legitimate first component, and one
+# absolute path - and each is asserted to be rejected outright.
+# --------------------------------------------------------------------------
+
 #: Relative paths a caller-supplied :class:`~app.utils.paths.ArtifactSpec`
-#: must not be able to reach.  The first is the review's own example.
+#: must not be able to reach, whether by traversal or by absolute path.
 HOSTILE_SPEC_RELPATHS: Final[tuple[str, ...]] = (
     "../../etc/passwd",
     "../escaped.json",
@@ -624,38 +596,71 @@ def test_importing_the_owner_pulls_in_no_framework() -> None:
     )
 
 
-def test_owner_creates_directories_but_deletes_nothing() -> None:
-    """The owner holds no deletion helper (module docstring, AAP 0.4.1).
+def _owner_functions_performing(calls: frozenset[str]) -> dict[str, list[str]]:
+    """Map each owner function that calls one of ``calls`` to the calls it makes.
 
-    *"This module creates directories but never deletes anything ... AAP 0.4.1
-    assigns emptying ``target/`` (the ``--clean`` step) and tearing down
-    ``target/.workers/`` to ``app/cli.py``."*  Both halves are checked: no
-    exported name advertises a removal, and no call in the file performs one.
+    Attribute and bare calls are both counted, and a call inside a nested
+    function or a method is attributed to the enclosing top-level definition,
+    which is the unit the deletion boundary is stated in.
+
+    :param calls: Call names to look for, such as ``{"unlink", "rmdir"}``.
+    :returns: Top-level function or class name to the calls found inside it.
+    """
+    tree = ast.parse(_owner_source())
+    found: dict[str, list[str]] = {}
+    for top in tree.body:
+        if not isinstance(top, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for node in ast.walk(top):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            called = (
+                func.attr
+                if isinstance(func, ast.Attribute)
+                else func.id
+                if isinstance(func, ast.Name)
+                else ""
+            )
+            if called in calls:
+                found.setdefault(top.name, []).append(f"{called} at line {node.lineno}")
+    return found
+
+
+def test_owner_removes_only_its_own_publication_scratch() -> None:
+    """Removal is confined to the publication helpers (module docstring).
+
+    *"The only thing this module ever removes is scratch it created itself ...
+    no published artifact, no ``target/`` and no ``target/.workers/``."*  The
+    fourth artifact is a directory, so it can only be published by building a
+    staging tree and swapping it in, and the cleanup of that scratch has to run
+    under the same verified descriptors as the rest of the publication - which
+    is why the deletion boundary is *where* rather than *whether*.  AAP 0.4.1's
+    allocation is unchanged by it: emptying ``target/`` stays with
+    ``app/cli.py`` and the per-worker directory lifecycle with
+    ``app/services/test_run_service.py``.
+
+    Two halves are checked: no exported name advertises a general-purpose
+    removal, and every removal call in the file sits in one of the three
+    private helpers that implement scratch cleanup.
     """
     advertised = [
         name
         for name in paths.__all__
-        for verb in ("clean", "delete", "remove", "purge", "rmtree")
+        for verb in ("clean", "delete", "purge", "rmtree")
         if verb in name.lower()
     ]
     assert advertised == [], f"the owner advertises a deletion helper: {advertised}"
 
-    tree = ast.parse(_owner_source())
-    performed: list[str] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        called = (
-            func.attr
-            if isinstance(func, ast.Attribute)
-            else func.id
-            if isinstance(func, ast.Name)
-            else ""
-        )
-        if called in FORBIDDEN_OWNER_CALLS:
-            performed.append(f"{called} at line {node.lineno}")
-    assert performed == [], f"the owner deletes filesystem entries: {performed}"
+    performed = _owner_functions_performing(FORBIDDEN_OWNER_CALLS)
+    assert set(performed) <= ALLOWED_OWNER_REMOVAL_FUNCTIONS, (
+        "the owner removes filesystem entries outside its publication "
+        f"helpers: { {k: v for k, v in performed.items() if k not in ALLOWED_OWNER_REMOVAL_FUNCTIONS} }"
+    )
+    assert "rmtree" not in _owner_source(), (
+        "the owner must not delegate a removal to shutil.rmtree, which follows "
+        "no rule about what it descends"
+    )
 
 
 def test_owner_holds_no_module_level_mutable_state() -> None:
@@ -681,8 +686,8 @@ def test_owner_holds_no_module_level_mutable_state() -> None:
 # ==========================================================================
 # Section 2 - Name components and the POSIX relative-path strings
 #
-# Contract: README.md:79-82 quoting CukesRunner.java:9-14, Jenkins:15 for the
-# JSON include pattern, AAP 0.3.4 for the PrettyReports sub-tree.
+# Contract: the plugin list at CukesRunner.java:9-14, Jenkins:15 for the JSON
+# include pattern, AAP 0.3.4 for the PrettyReports sub-tree.
 # ==========================================================================
 
 
@@ -708,7 +713,7 @@ def test_name_component_has_its_source_value(attribute: str, expected: str) -> N
     """Each name component equals the value its authority fixes.
 
     The three artifact file names and the PrettyReports directory come from the
-    plugin list at ``README.md:79-82`` (``CukesRunner.java:9-14``); the
+    plugin list at ``CukesRunner.java:9-14``; the
     PrettyReports sub-directory and overview page from AAP 0.3.4; the feature
     directory and its two prefixes from AAP deviation 1.  These are a
     compatibility surface, not an internal spelling, so each is pinned.
@@ -733,8 +738,9 @@ def test_relpath_string_is_posix_and_matches_the_plugin_list(
 
     They are strings rather than paths because ``target/cucumber.json`` is the
     exact value of the Jenkins publisher's ``fileIncludePattern`` (``Jenkins:15``)
-    and all four are quoted in ``README.md:79-82``.  A backslash here would
-    break both the publisher glob and the document.
+    and all four are quoted in the plugin list of ``CukesRunner.java:9-14`` and
+    named in the README's artifact table.  A backslash here would break both
+    the publisher glob and the document.
     """
     value = getattr(paths, attribute)
     assert value == expected
@@ -792,7 +798,7 @@ def test_accessor_appends_its_components_to_the_supplied_base(
     The expectation is spelled out component by component rather than rebuilt
     from the constants the accessor itself uses, so a mis-wired accessor - the
     JSON path pointing at the rerun name, say - fails here instead of agreeing
-    with itself.  Authority: ``README.md:79-82`` and AAP 0.3.4.
+    with itself.  Authority: ``CukesRunner.java:9-14`` and AAP 0.3.4.
     """
     assert accessor(tmp_artifact_root) == tmp_artifact_root.joinpath(*components)
     assert name in paths.__all__
@@ -988,15 +994,15 @@ def test_package_locator_takes_no_base_and_ignores_the_working_directory(
 # ==========================================================================
 # Section 5 - The four artifacts: ARTIFACT_SPECS and artifact_path
 #
-# Contract: README.md:79-82 in plugin order; the keys double as the allowlisted
-# names of GET /artifacts/<path:name> (AAP 0.3.1); an unknown key is a
-# programming error and is raised loudly.  F02 of CONTESTED_REPORT applies to
-# the ArtifactSpec input form and is asserted unconditionally below.
+# Contract: the four plugin targets of CukesRunner.java:9-14, in plugin order;
+# the keys double as the allowlisted names of GET /artifacts/<path:name> (AAP
+# 0.3.1); an unknown key - or a hand-built ArtifactSpec that is not one of the
+# four canonical members - is a programming error and is raised loudly.
 # ==========================================================================
 
 
 def test_artifact_specs_are_the_four_plugin_targets_in_order() -> None:
-    """The spec list reproduces the plugin list of ``README.md:79-82`` exactly.
+    """The spec list reproduces the plugin list of ``CukesRunner.java:9-14``.
 
     Order is part of the contract - *"The ``GET /`` route lists them in this
     order"* - and so is the html, json, rerun, pretty sequence of
@@ -1089,10 +1095,11 @@ def test_artifact_path_accepts_a_canonical_spec(
 ) -> None:
     """A canonical spec resolves exactly as its key does.
 
-    The four members of :data:`ARTIFACT_SPECS` are the legitimate spec input,
-    and they must keep working whichever shape the F02 fix takes - the review's
-    own resolution allows either validating supplied specs against the canonical
-    table or accepting keys only, and a canonical member satisfies both.
+    The four members of :data:`ARTIFACT_SPECS` are the only legitimate spec
+    input - the owner looks a supplied spec up by its own ``key`` and requires
+    equality with the canonical member - so this is the half of that rule which
+    must keep working: the ``GET /`` route passes whole specs while the writers
+    pass keys, and both have to land on the same path.
     """
     assert paths.artifact_path(spec, base=tmp_artifact_root) == paths.artifact_path(
         spec.key, base=tmp_artifact_root
@@ -1132,48 +1139,43 @@ def test_artifact_path_defaults_to_the_working_directory(
     )
 
 
-# F02 of CONTESTED_REPORT: ``artifact_path`` trusts a caller-supplied
-# ``ArtifactSpec`` without canonicalizing it, so ``ArtifactSpec("x",
-# "../../etc/passwd", False)`` currently returns a path outside the artifact
-# root and outside ``base``.  The settled contract is the invariant that holds
-# under both of the review's disjunctive resolutions: reject, or stay confined.
 def test_artifact_path_cannot_be_driven_outside_the_artifact_root(
     tmp_artifact_root: Path,
 ) -> None:
-    """A hostile spec is rejected, or confined to ``target/`` - unconditionally.
+    """A hostile spec is rejected outright - one outcome, for every shape.
 
-    AAP 0.4.2 makes ``app/utils/paths.py`` the single source of artifact paths
-    and requires that path construction cannot escape the artifact root.  This
-    case asserts that settled contract with no probe and no skip: either
-    resolution the review offers - canonicalize and validate a supplied
-    :class:`~app.utils.paths.ArtifactSpec`, or remove that input form - passes
-    the assertion below, so the case survives the fix whichever shape it takes.
-    Every hostile relative path is driven in one test so the whole matrix is
-    reported together.
+    AAP 0.4.2 makes ``app/utils/paths.py`` the single source of artifact paths,
+    so path construction must not be steerable by its caller.  A supplied
+    :class:`~app.utils.paths.ArtifactSpec` is looked up by its own ``key`` and
+    required to equal the canonical member of :data:`ARTIFACT_SPECS`, which
+    makes every one of :data:`HOSTILE_SPEC_RELPATHS` a ``KeyError``: no path is
+    built from caller text at all, whether the escape is a traversal, a
+    traversal behind a legitimate first component, or an absolute path.
 
-    **If this test fails, the production fix has not landed yet.**  The defect
-    is ``F02`` of :data:`CONTESTED_REPORT`: ``artifact_path`` joins a
-    caller-supplied ``relpath`` unchecked, so ``ArtifactSpec("x",
-    "../../etc/passwd", False)`` returns a path outside the artifact root.  The
-    fix belongs to the unit that owns ``app/utils/paths.py``, not to this
-    module; the failure message names every relative path that escaped and the
-    path it produced.  Nothing here is to be weakened, skipped or xfailed to
-    make the run green - this assertion is what makes the fix provable and what
-    stops a later regression from passing unnoticed.
+    The message is asserted too, in both directions: it names the four
+    canonical keys, because the caller that sees it is a developer, and it
+    never echoes the supplied ``relpath``, which would reflect attacker-chosen
+    text into a log line for no diagnostic gain.  The containment check inside
+    the ``raises`` block is the guard against the other possible regression: if
+    a later change answered instead of raising, that assertion fails the case
+    rather than letting an escaping path pass as an answer.
     """
-    escapes: list[str] = []
     for relpath in HOSTILE_SPEC_RELPATHS:
         spec = paths.ArtifactSpec(key="hostile", relpath=relpath, is_dir=False)
-        try:
-            candidate = paths.artifact_path(spec, base=tmp_artifact_root)
-        except (KeyError, TypeError, ValueError):
-            continue
-        if not _within(candidate, paths.target_root(tmp_artifact_root)):
-            escapes.append(f"{relpath!r} -> {candidate}")
 
-    assert escapes == [], "artifact_path escaped the artifact root with:\n" + "\n".join(
-        escapes
-    )
+        with pytest.raises(KeyError) as failure:
+            answered = paths.artifact_path(spec, base=tmp_artifact_root)
+            # Unreachable while the owner rejects.  An ``AssertionError`` is not
+            # a ``KeyError``, so if this line is ever reached with an escaping
+            # path the case fails here instead of passing inside ``raises``.
+            assert _within(answered, paths.target_root(tmp_artifact_root)), (
+                f"{relpath!r} resolved outside the artifact root: {answered}"
+            )
+
+        message = str(failure.value)
+        for key in EXPECTED_ARTIFACT_KEYS:
+            assert key in message
+        assert relpath not in message, f"the rejection echoed {relpath!r}"
 
 
 def test_artifact_path_rejects_a_spec_whose_key_cannot_even_be_looked_up(
@@ -1242,9 +1244,9 @@ def test_artifact_path_refuses_a_spec_table_that_escapes_the_artifact_root(
 # Contract: pom.xml:22-23 (parallel=methods, useUnlimitedThreads) reproduced as
 # a process pool by AAP deviation 4; the file name is unique by both pid and
 # shard index; the zero-padded index makes name order numeric order, which
-# AAP 0.6 needs for a deterministic merge.  F03 of CONTESTED_REPORT applies to
-# the error handling of iter_worker_result_paths and is asserted unconditionally
-# below.
+# AAP 0.6 needs for a deterministic merge.  iter_worker_result_paths reads only
+# a missing or non-directory worker directory as absence and propagates every
+# other OSError, which is asserted below.
 # ==========================================================================
 
 
@@ -1468,31 +1470,24 @@ def test_iter_worker_result_paths_skips_an_entry_whose_target_is_gone(
     assert paths.iter_worker_result_paths(tmp_artifact_root) == (kept,)
 
 
-# F03 of CONTESTED_REPORT: a blanket ``except OSError`` turns a permission or
-# I/O failure into "no results", hiding completed shards and the real
-# infrastructure error.  The settled contract suppresses benign absence only.
+# Only a missing or non-directory worker directory is absence.  A blanket
+# ``except OSError`` would turn a permission or I/O failure into "no results",
+# hiding completed shards and the real infrastructure error behind a success.
 def test_iter_worker_result_paths_surfaces_a_real_io_failure(
     tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A non-benign ``OSError`` reaches the caller - unconditionally.
 
-    The settled contract, quoted from ``F03`` of :data:`CONTESTED_REPORT`:
-    *"Return ``()`` only for ``FileNotFoundError`` and ``NotADirectoryError``.
-    Propagate or explicitly log other ``OSError`` subclasses so the run service
-    can identify the directory failure and apply its nonzero error contract."*
-    A shard whose results exist but cannot be read must not be reported as a
-    shard that produced none.  The failure is injected by patching
-    :meth:`pathlib.Path.iterdir`, because this suite runs as root, where a
-    ``chmod 000`` directory is still listable.
-
-    **If this test fails, the production fix has not landed yet.**  The defect
-    is ``F03``: a blanket ``except OSError`` in ``iter_worker_result_paths``
-    collapses a permission or I/O failure into "no results", hiding completed
-    shards and the real infrastructure error.  Narrowing that handler belongs
-    to the unit that owns ``app/utils/paths.py``, not to this module.  The
-    assertion is deliberately unguarded - no probe, no skip, no ``xfail`` - so
-    that the fix is provable and a later widening of the handler fails here
-    instead of quietly disabling the case.
+    The owner returns ``()`` for ``FileNotFoundError`` and
+    ``NotADirectoryError`` and propagates every other ``OSError`` subclass, so
+    that ``app/services/test_run_service.py`` can name the directory failure
+    and apply its non-zero exit class (AAP 0.4.1) instead of merging an empty
+    result set.  A shard whose results exist but cannot be read must not be
+    reported as a shard that produced none.  The failure is injected by
+    patching :meth:`pathlib.Path.iterdir`, because this suite runs as root,
+    where a ``chmod 000`` directory is still listable.  The assertion carries
+    no probe, no skip and no ``xfail``: a later widening of that handler has to
+    fail here rather than quietly disable the case.
     """
     _write(paths.worker_result_path(0, pid=31, base=tmp_artifact_root), "{}")
 
@@ -1509,9 +1504,10 @@ def test_iter_worker_result_paths_surfaces_a_real_io_failure(
 # ==========================================================================
 # Section 7 - Directory creation
 #
-# Contract: the owner creates directories and never deletes anything; a writer
-# that cannot create its output directory must fail the run per the exit
-# contract in AAP 0.4.1 rather than carry on silently.
+# Contract: the owner creates directories and removes nothing but the scratch
+# its own publication API created; a writer that cannot create its output
+# directory must fail the run per the exit contract in AAP 0.4.1 rather than
+# carry on silently.
 # ==========================================================================
 
 
@@ -2159,9 +2155,9 @@ def test_resolve_artifact_follows_the_base_convention(
 #
 # Contract: AAP deviation 1 moved the features from the Java tree's directory
 # to features/ while preserving filenames; AAP 0.4.1 makes this the single
-# helper and requires that no test hard-code either prefix.  w017-F09 of the
-# cross-check review turns on this section: if the helper were wrong, every
-# writer test that compares through it could agree on the wrong answer.
+# helper and requires that no test hard-code either prefix.  Every writer test
+# compares its output through that helper, so a wrong helper is the one defect
+# they could all agree on - which is why it is proved here, on its own.
 # ==========================================================================
 
 
@@ -2299,12 +2295,11 @@ def test_conftest_uri_helper_delegates_to_the_owner(
 ) -> None:
     """``conftest.normalize_feature_uris`` calls the owner rather than copying it.
 
-    This is the cross-check w017-F09 exists for.  Agreement alone would not
-    prove delegation - two identical implementations agree - so the owner's
-    function is replaced with a marker and the wrapper's output is required to
-    show it.  ``tests/conftest.py`` states the intent: *"The two helpers below
-    *delegate* to it and to nothing else, so this suite contains no second
-    implementation of the rule."*
+    Agreement alone would not prove delegation - two identical implementations
+    agree - so the owner's function is replaced with a marker and the wrapper's
+    output is required to show it.  ``tests/conftest.py`` states the intent:
+    *"The two helpers below *delegate* to it and to nothing else, so this suite
+    contains no second implementation of the rule."*
     """
     marker = "<delegated>"
     monkeypatch.setattr(paths, "normalize_feature_uri", lambda _value: marker)
@@ -2319,9 +2314,9 @@ def test_conftest_rerun_helper_delegates_to_the_owner(
 ) -> None:
     """``conftest.normalize_rerun_manifest`` calls the owner, line by line.
 
-    Same cross-check, for the line-oriented manifest: each non-empty line is
-    handed to the owner whole - which is what preserves the ``:9:24`` suffix -
-    rather than parsed here.
+    The same delegation check for the line-oriented manifest: each non-empty
+    line is handed to the owner whole - which is what preserves the ``:9:24``
+    suffix - rather than parsed here.
     """
     marker = "<delegated>"
     monkeypatch.setattr(paths, "normalize_feature_uri", lambda _value: marker)
@@ -2509,14 +2504,12 @@ def test_no_module_but_the_owner_spells_an_owned_path_literal(repo_root: Path) -
     by a quote, a space or a separator, and ``worker-`` followed by a digit or
     a placeholder, are all still reported.
 
-    **If this test fails, the production prose has not been cleaned up yet.**
-    The offenders are recorded as finding ``F05`` of
-    ``o000_015ce5681f5b33ba`` - 31 literals across 14 modules, to be removed or
-    rephrased so they refer to the owner's constants and accessors
-    symbolically - and that cleanup belongs to the units that hold those
-    modules, not to this one.  The failure message is the worklist: it names
-    every offender by file, line and the fragment it spells, and once the last
-    one is rephrased this assertion passes with nothing carved out of it.
+    The remedy for a failure is always the same, and never a carve-out here: an
+    offending literal is deleted or rephrased to refer to the owner's constant
+    or accessor symbolically.  The failure message is that worklist - every
+    offender by file, line and the fragment it spells - because the invariant
+    covers every module under ``app/`` and ``features/`` and a reader of the
+    failure needs to know which ones.
     """
     offenders: list[str] = []
     owner = Path(paths.__file__).resolve()
@@ -2632,9 +2625,9 @@ TOO_LONG_COMPONENT: Final[str] = "n" * 300
 def test_open_artifact_write_creates_the_artifact_and_its_parent(
     tmp_artifact_root: Path,
 ) -> None:
-    """The write helper is a drop-in for the builtin the writers used to call.
+    """The write helper is a drop-in for the plain builtin.
 
-    *"A drop-in for the plain builtin the writers used to call"*, with the same
+    A writer calls it exactly as it would call :func:`open`, with the same
     three defaults: text mode, UTF-8, and ``newline="\\n"`` so the byte the
     artifacts require is the byte written on every platform.  The parent is
     created on the way, which is what lets a writer run straight after
@@ -2765,12 +2758,12 @@ def test_open_artifact_write_refuses_a_symlinked_destination(
 ) -> None:
     """A destination that is a link is refused before anything is written.
 
-    The whole reason the write helper exists: the writers used to call the
-    builtin on a pathname, which follows a link out of the artifact root and
-    truncates whatever it finds.  Here the entry is tested under the verified
-    parent's descriptor first, so the refusal happens *"in every case nothing
-    has been written or truncated"* - asserted on the link's target, not merely
-    on the exception.
+    This is the refusal the write helper exists for: opening a pathname with
+    the plain builtin follows a link out of the artifact root and truncates
+    whatever it finds.  The helper tests the entry under the verified parent's
+    descriptor first, so the refusal happens *"in every case nothing has been
+    written or truncated"* - asserted on the link's target, not merely on the
+    exception.
     """
     outside = tmp_path / "outside-the-root"
     outside.mkdir(exist_ok=True)
@@ -3244,6 +3237,11 @@ def without_no_follow_support(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setattr(paths, "_NO_FOLLOW_SUPPORTED", False)
     monkeypatch.setattr(paths, "_O_NOFOLLOW", 0)
+    # The publication predicate is the same seam one level up: it additionally
+    # requires descriptor-relative rename and removal, so a platform without
+    # O_NOFOLLOW has neither and the emulation has to clear both or the
+    # publication helpers would take a branch the emulated platform cannot.
+    monkeypatch.setattr(paths, "_PUBLICATION_SUPPORTED", False)
 
 
 def test_fallback_round_trips_an_artifact_through_the_lexical_walk(
@@ -3473,3 +3471,1349 @@ def test_a_linked_component_is_refused_as_a_link_without_o_directory(
     # one, so it is what distinguishes the two answers for the same shape.
     assert "link" in str(failure.value)
     assert failure.value.errno is None
+
+
+# ==========================================================================
+# Section 13 - The creation-mode policy
+#
+# Contract: the permissions section of the owner's module docstring.  The
+# artifacts carry the run's evidence - failure screenshots, step arguments
+# substituted from the Examples tables, the configured URLs - so a generated
+# file is owner-only and a generated directory is owner-only, and a mode
+# argument alone cannot deliver that: it applies only to an object the call
+# creates, so an artifact a previous run left at 0644 keeps those bits unless
+# something tightens it through its own descriptor (CWE-732/CWE-359).
+# ==========================================================================
+
+
+@pytest.fixture(params=[True, False], ids=["primitives", "fallback"])
+def either_branch(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> bool:
+    """Run one assertion against the descriptor-bound branch and the fallback.
+
+    The two branches implement one contract by different means - a held
+    directory descriptor with ``O_NOFOLLOW``, or the bound identity chain of
+    :class:`app.utils.paths._FallbackAnchor` - and a property that holds on
+    only one of them is a property Windows or POSIX does not get.  Cleared
+    through the owner's own portability seams, exactly as
+    :fixture:`without_no_follow_support` does it.
+
+    :param request: pytest's parametrization handle.
+    :param monkeypatch: pytest's attribute patcher, which restores the flags.
+    :returns: ``True`` for the primitive branch, ``False`` for the fallback.
+    """
+    if not request.param:
+        monkeypatch.setattr(paths, "_NO_FOLLOW_SUPPORTED", False)
+        monkeypatch.setattr(paths, "_O_NOFOLLOW", 0)
+        monkeypatch.setattr(paths, "_PUBLICATION_SUPPORTED", False)
+    return bool(request.param)
+
+
+def _mode(path: Path) -> int:
+    """The permission bits of ``path``, without the file type.
+
+    :param path: Entry to inspect.
+    :returns: ``st_mode`` masked to the twelve permission and special bits.
+    """
+    return path.stat().st_mode & 0o7777
+
+
+def _assert_owner_only(path: Path) -> None:
+    """Assert that nothing but the owner can reach ``path``.
+
+    The group and other bits are asserted absent rather than the whole mode
+    asserted equal to ``0o700``: a set-group-id build directory keeps that bit
+    - it grants the group nothing once the access bits are gone - and the
+    policy is about access, not about the exact integer.
+
+    :param path: Entry to check.
+    """
+    mode = _mode(path)
+    assert mode & paths.ARTIFACT_MODE_MASK == 0, (
+        f"{path} is reachable by the group or by others: {oct(mode)}"
+    )
+    assert mode & 0o700, f"{path} is not reachable by its owner: {oct(mode)}"
+
+
+def test_the_mode_policy_constants_are_owner_only_values() -> None:
+    """The three policy constants say owner-only, and agree with each other.
+
+    They are part of the module's published surface because the writers' own
+    tests assert the modes of what they produced, and a test that read the
+    value out of the mode it is checking would pass against any policy.
+    """
+    assert paths.ARTIFACT_DIR_MODE == 0o700
+    assert paths.ARTIFACT_FILE_MODE == 0o600
+    assert paths.ARTIFACT_MODE_MASK == 0o077
+    assert paths.ARTIFACT_DIR_MODE & paths.ARTIFACT_MODE_MASK == 0
+    assert paths.ARTIFACT_FILE_MODE & paths.ARTIFACT_MODE_MASK == 0
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fchmod"),
+    reason="this platform expresses permissions as ACLs, so the policy does not apply",
+)
+def test_open_artifact_write_creates_an_owner_only_artifact_and_tree(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """A written artifact, and every owned directory above it, is owner-only.
+
+    The whole chain is asserted, not just the file: ``target/`` and
+    ``target/.workers/`` are created by the same helpers, and a world-readable
+    directory discloses the names of the shards and the artifacts inside it
+    even where the files themselves are tight.
+    """
+    artifact = paths.worker_result_path(0, pid=4242, base=tmp_artifact_root)
+
+    with paths.open_artifact_write(artifact) as stream:
+        stream.write("{}\n")
+
+    _assert_owner_only(artifact)
+    assert _mode(artifact) == paths.ARTIFACT_FILE_MODE
+    _assert_owner_only(paths.target_root(tmp_artifact_root))
+    _assert_owner_only(paths.workers_dir(tmp_artifact_root))
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fchmod"),
+    reason="this platform expresses permissions as ACLs, so the policy does not apply",
+)
+def test_a_previously_permissive_artifact_is_tightened_before_it_is_rewritten(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """A ``0644`` artifact from an earlier run does not keep those bits.
+
+    This is the case a creation mode cannot cover, and the one the review
+    measured: ``run-tests --no-clean`` rewrites the artifact an earlier run
+    created, so the mode argument does not apply and the file keeps whatever
+    it had.  The tightening is made through the descriptor the write holds and
+    *before* the truncation, so the bits are gone before the new content
+    exists.
+    """
+    artifact = paths.cucumber_json_path(tmp_artifact_root)
+    with paths.open_artifact_write(artifact) as stream:
+        stream.write("[]\n")
+    os.chmod(artifact, 0o644)
+    os.chmod(paths.target_root(tmp_artifact_root), 0o755)
+
+    with paths.open_artifact_write(artifact) as stream:
+        stream.write("[1]\n")
+
+    assert artifact.read_text(encoding="utf-8") == "[1]\n"
+    _assert_owner_only(artifact)
+    _assert_owner_only(paths.target_root(tmp_artifact_root))
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fchmod"),
+    reason="this platform expresses permissions as ACLs, so the policy does not apply",
+)
+def test_reading_an_artifact_leaves_the_modes_it_found(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """The read side applies no policy: reading must not alter the workspace.
+
+    Deliberately asymmetric.  Tightening on a read would make
+    ``GET /artifacts/<name>`` a writer of directory metadata - and the process
+    serving a report may not own the tree it serves - so the policy is applied
+    where the content is produced and nowhere else.
+    """
+    artifact = _write(paths.cucumber_json_path(tmp_artifact_root), "[]")
+    os.chmod(artifact, 0o644)
+    os.chmod(paths.target_root(tmp_artifact_root), 0o755)
+
+    assert paths.read_artifact_text(artifact) == "[]"
+
+    assert _mode(artifact) == 0o644
+    assert _mode(paths.target_root(tmp_artifact_root)) == 0o755
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fchmod"),
+    reason="this platform expresses permissions as ACLs, so the policy does not apply",
+)
+def test_a_write_is_refused_when_the_artifact_cannot_be_tightened(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An artifact that stays group-readable fails the write rather than ships.
+
+    A filesystem that ignores :func:`os.chmod` - some network and FAT mounts -
+    cannot restrict the file, and publishing the run's evidence
+    world-readable is the outcome the policy exists to prevent, so the writer
+    failure is the honest answer.  Driven through :func:`os.fchmod`, which is
+    the call the owner makes, rather than by finding such a filesystem.
+    """
+    artifact = _write(paths.cucumber_json_path(tmp_artifact_root), "[]")
+    os.chmod(artifact, 0o646)
+
+    def refusing(*_args: object, **_options: object) -> None:
+        raise PermissionError(errno.EPERM, "chmod is not supported here")
+
+    monkeypatch.setattr(os, "fchmod", refusing)
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        paths.open_artifact_write(artifact)
+    assert "owner" in str(failure.value)
+    # The refusal happens before the truncation, so the previous artifact is
+    # still the complete one.
+    assert artifact.read_text(encoding="utf-8") == "[]"
+
+
+# ==========================================================================
+# Section 14 - Atomic file publication
+#
+# Contract: :func:`app.utils.paths.publish_artifact_file`.  The single-page
+# HTML artifact may be open in a browser or being archived while the next run
+# rewrites it, so it is published by rename from a temporary in its own
+# verified directory - and the whole sequence, creation to rename, runs under
+# the descriptor that was verified, because a rename resolved from a pathname
+# can land in a directory that has since become a link (CWE-59/CWE-367).
+# ==========================================================================
+
+
+def test_publish_artifact_file_writes_the_bytes_and_leaves_no_temporary(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """The published artifact holds exactly what was written, and stands alone.
+
+    The temporary is dot-prefixed while it exists - so
+    :func:`~app.utils.paths.resolve_artifact` cannot serve it - and it is gone
+    afterwards, because the rename consumed it.  Nothing else is created beside
+    the artifact, which is the single-file contract of this artifact.
+    """
+    artifact = paths.cucumber_reports_html_path(tmp_artifact_root)
+
+    with paths.publish_artifact_file(artifact) as stream:
+        stream.write("<!DOCTYPE html>\n<title>Cucumber</title>\n")
+
+    assert artifact.read_text(encoding="utf-8") == (
+        "<!DOCTYPE html>\n<title>Cucumber</title>\n"
+    )
+    assert _tree_entries(paths.target_root(tmp_artifact_root)) == (
+        EXPECTED_HTML_NAME,
+    )
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fchmod"),
+    reason="this platform expresses permissions as ACLs, so the policy does not apply",
+)
+def test_a_published_artifact_is_owner_only(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """The publication route applies the same mode policy as a plain write.
+
+    The temporary is created ``O_CREAT|O_EXCL`` with
+    :data:`~app.utils.paths.ARTIFACT_FILE_MODE`, and the rename carries that
+    mode onto the destination, so a run cannot loosen an artifact's permissions
+    by publishing it rather than writing it in place.
+    """
+    artifact = paths.cucumber_reports_html_path(tmp_artifact_root)
+
+    with paths.publish_artifact_file(artifact) as stream:
+        stream.write("<html></html>\n")
+
+    assert _mode(artifact) == paths.ARTIFACT_FILE_MODE
+
+
+def test_publish_artifact_file_keeps_the_previous_artifact_on_a_failure(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """A fault mid-write leaves the last complete artifact and no scratch.
+
+    This is the difference from opening the destination: ``"w"`` truncates
+    before the first byte exists, so a failure after that destroys an artifact
+    that was complete.  Here the destination is only ever reached by the
+    rename, which never happens, and the temporary is removed on the way out.
+    """
+    artifact = paths.cucumber_reports_html_path(tmp_artifact_root)
+    with paths.publish_artifact_file(artifact) as stream:
+        stream.write("<html>first</html>\n")
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        with paths.publish_artifact_file(artifact) as stream:
+            stream.write("<html>partial")
+            raise RuntimeError("render failed")
+
+    assert artifact.read_text(encoding="utf-8") == "<html>first</html>\n"
+    assert _tree_entries(paths.target_root(tmp_artifact_root)) == (
+        EXPECTED_HTML_NAME,
+    )
+
+
+def test_publish_artifact_file_accepts_a_binary_stream(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """``binary=True`` yields a byte stream, as the plain builtin's ``"wb"`` does.
+
+    The two HTML artifacts are text, but the parameter exists so that a caller
+    with bytes in hand - an inlined asset, a screenshot - is not forced to
+    decode them merely to publish them.
+    """
+    artifact = paths.target_root(tmp_artifact_root) / "bytes.bin"
+
+    with paths.publish_artifact_file(artifact, binary=True) as stream:
+        stream.write(b"\x89PNG\r\n\x1a\n")
+
+    assert artifact.read_bytes() == b"\x89PNG\r\n\x1a\n"
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create symbolic links, so none can be refused",
+)
+def test_publish_artifact_file_refuses_a_symlinked_destination(
+    tmp_artifact_root: Path, tmp_path: Path, either_branch: bool
+) -> None:
+    """A link standing in for the artifact is refused, and its target survives.
+
+    The publication is the case a symlink check most easily misses: the write
+    itself lands in a temporary, so a link at the *destination* only matters at
+    the rename - where a rename would replace the link rather than follow it,
+    but the entry is still a file elsewhere and the artifact would go missing.
+    Refused before anything is written, with the outside file asserted intact.
+    """
+    victim = _write(tmp_path / VICTIM_NAME, VICTIM_CONTENT)
+    paths.ensure_dir(paths.target_root(tmp_artifact_root))
+    artifact = paths.cucumber_reports_html_path(tmp_artifact_root)
+    artifact.symlink_to(victim)
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        with paths.publish_artifact_file(artifact) as stream:
+            stream.write("<html></html>")
+    assert EXPECTED_HTML_NAME in str(failure.value)
+    assert victim.read_text(encoding="utf-8") == VICTIM_CONTENT
+
+
+@pytest.mark.skipif(
+    not HARD_LINKS_AVAILABLE,
+    reason="this platform cannot create hard links, so none can be refused",
+)
+def test_publish_artifact_file_refuses_a_hard_linked_destination(
+    tmp_artifact_root: Path, tmp_path: Path, either_branch: bool
+) -> None:
+    """An artifact hard-linked to a file outside the root is refused.
+
+    No symbolic link exists anywhere in this path: the entry *is* the outside
+    file, so the link count is the only thing that can tell, and a publication
+    that renamed over it would make the outside file disappear from its own
+    directory's point of view.
+    """
+    victim = _write(tmp_path / VICTIM_NAME, VICTIM_CONTENT)
+    paths.ensure_dir(paths.target_root(tmp_artifact_root))
+    artifact = paths.cucumber_reports_html_path(tmp_artifact_root)
+    os.link(victim, artifact)
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        with paths.publish_artifact_file(artifact) as stream:
+            stream.write("<html></html>")
+    assert "hard link" in str(failure.value)
+    assert victim.read_text(encoding="utf-8") == VICTIM_CONTENT
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create symbolic links, so none can be refused",
+)
+def test_publish_artifact_file_refuses_a_symlinked_owned_component(
+    tmp_artifact_root: Path, tmp_path: Path, either_branch: bool
+) -> None:
+    """A link standing in for ``target/`` is refused, and nothing is written there.
+
+    The review's probe for this finding wrote the report *outside* the artifact
+    root through exactly this shape, so the outside directory is asserted empty
+    afterwards: a refusal that has already created the temporary in the link's
+    destination is not a refusal.
+    """
+    outside = tmp_path / "outside-the-root"
+    outside.mkdir(exist_ok=True)
+    paths.target_root(tmp_artifact_root).symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        with paths.publish_artifact_file(
+            paths.cucumber_reports_html_path(tmp_artifact_root)
+        ) as stream:
+            stream.write("<html></html>")
+    assert EXPECTED_TARGET_DIR in str(failure.value)
+    assert _tree_entries(outside) == ()
+
+
+def test_publish_artifact_file_refuses_a_parent_swapped_while_writing(
+    tmp_artifact_root: Path, tmp_path: Path, without_no_follow_support: None
+) -> None:
+    """On the fallback branch a swapped parent fails the identity check.
+
+    This is what the fallback binds instead of a descriptor.  The swap is made
+    deterministically, inside the caller's own block, which is the window a
+    pathname-based publication leaves open: without the binding the rename
+    would resolve ``target/`` afresh and deposit the artifact in whatever
+    directory now answers to that name.
+    """
+    decoy = tmp_path / "decoy"
+    decoy.mkdir(exist_ok=True)
+    artifact = paths.cucumber_reports_html_path(tmp_artifact_root)
+    target = paths.ensure_dir(paths.target_root(tmp_artifact_root))
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        with paths.publish_artifact_file(artifact) as stream:
+            stream.write("<html></html>")
+            os.rename(target, tmp_path / "stashed-target")
+            os.rename(decoy, target)
+    assert "changed while it was being used" in str(failure.value)
+    assert _tree_entries(target) == ()
+
+
+def test_publish_artifact_file_refuses_an_unbindable_component(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch,
+    without_no_follow_support: None,
+) -> None:
+    """Where identity is unobtainable the fallback fails closed.
+
+    A filesystem reporting ``st_ino == 0`` - some network shares, some FAT
+    volumes - offers nothing to bind, so the alternative to refusing is
+    proceeding on a name alone, which is the defect the binding replaces.
+    Driven through :func:`os.lstat`, the call the owner makes, because no such
+    filesystem can be mounted from a test.
+    """
+    paths.ensure_dir(paths.target_root(tmp_artifact_root))
+    target = paths.target_root(tmp_artifact_root)
+    real_lstat = os.lstat
+
+    def anonymous(path: Any, *rest: Any, **options: Any) -> os.stat_result:
+        info = real_lstat(path, *rest, **options)
+        if str(path) == str(target):
+            fields = list(tuple(info)[:10])
+            fields[1] = 0
+            return os.stat_result(tuple(fields))
+        return info
+
+    monkeypatch.setattr(os, "lstat", anonymous)
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        with paths.publish_artifact_file(
+            paths.cucumber_reports_html_path(tmp_artifact_root)
+        ) as stream:
+            stream.write("<html></html>")
+    assert "no identity" in str(failure.value)
+
+
+def test_a_reparse_point_is_refused_where_a_symlink_check_would_pass(
+    tmp_artifact_root: Path, monkeypatch: pytest.MonkeyPatch,
+    without_no_follow_support: None,
+) -> None:
+    """A junction is refused, which is the shape ``is_symlink()`` answers False for.
+
+    A Windows junction is a directory reparse point that
+    :meth:`~pathlib.Path.is_symlink` reports as no link at all while
+    :func:`os.stat` follows it, so a fallback written against ``S_ISLNK``
+    alone lets one redirect a write out of the artifact root.  No junction can
+    be created on a POSIX host, so the platform's *report* of one is
+    reproduced through :func:`os.lstat` - the owner's own call - and the
+    refusal is the owner's.
+    """
+    target = paths.ensure_dir(paths.target_root(tmp_artifact_root))
+    real_lstat = os.lstat
+
+    class _Junction:
+        """A stat report carrying the reparse attributes POSIX never sets."""
+
+        def __init__(self, info: os.stat_result) -> None:
+            self.st_mode = info.st_mode
+            self.st_ino = info.st_ino
+            self.st_dev = info.st_dev
+            self.st_nlink = info.st_nlink
+            self.st_mtime = info.st_mtime
+            self.st_file_attributes = 0x400
+            self.st_reparse_tag = 0xA000_0003
+
+    def reparse(path: Any, *rest: Any, **options: Any) -> Any:
+        info = real_lstat(path, *rest, **options)
+        if str(path) == str(target):
+            return _Junction(info)
+        return info
+
+    monkeypatch.setattr(os, "lstat", reparse)
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        with paths.publish_artifact_file(
+            paths.cucumber_reports_html_path(tmp_artifact_root)
+        ) as stream:
+            stream.write("<html></html>")
+    assert EXPECTED_TARGET_DIR in str(failure.value)
+    assert "symbolic link" in str(failure.value)
+
+
+# ==========================================================================
+# Section 15 - Directory publication
+#
+# Contract: :class:`app.utils.paths.ArtifactDirectoryPublication` and
+# :func:`app.utils.paths.begin_directory_publication`.  The fourth artifact is
+# a *directory*, so no single atomic write can publish it: the tree is built in
+# a dot-prefixed staging sibling and swapped in by rename.  Every step -
+# staging, page write, asset copy, both renames and the scratch removal - runs
+# against the descriptor verified when the publication began, which is what a
+# path-based staging cannot offer: the review's probe redirected a
+# path-resolved cleanup into a prepared directory outside the artifact root.
+# ==========================================================================
+
+
+#: A page and an asset name, in the two shapes the PrettyReports tree uses: a
+#: file at the root of the tree, and one in a sub-directory the publication has
+#: to create on the way down.
+PUBLISHED_PAGE: Final[str] = EXPECTED_PRETTY_INDEX
+PUBLISHED_ASSET: Final[str] = "css/cucumber.css"
+
+#: Relative names a publication must refuse outright, with the reason each one
+#: is refused.  They come from the writer's own inventory rather than from a
+#: request, so this guards a construction mistake - but it is the guard that
+#: keeps a publication inside its staging tree, so it refuses instead of
+#: normalising.
+UNUSABLE_STAGING_NAMES: Final[tuple[str, ...]] = (
+    "",
+    "/absolute.html",
+    "c:/drive.html",
+    "../escape.html",
+    "css/../../escape.html",
+    "css//doubled.html",
+    ".",
+)
+
+
+def _publish_one_page(
+    final: Path, body: str = "<html>1</html>", *, pid: int | None = None
+) -> Path:
+    """Publish a one-page tree at ``final`` through the owner's own API.
+
+    Used to prepare a *previous generation* for the tests that assert what
+    happens to it, so the state under test is produced by production code
+    rather than by a hand-built directory.
+
+    :param final: The published tree's directory.
+    :param body: Content of the overview page.
+    :param pid: Process id the scratch names carry.
+    :returns: The published directory.
+    """
+    with paths.begin_directory_publication(final, pid=pid) as publication:
+        publication.create_staging()
+        with publication.open(PUBLISHED_PAGE) as page:
+            page.write(body)
+        return publication.publish()
+
+
+def test_a_publication_builds_in_staging_and_swaps_the_tree_into_place(
+    tmp_artifact_root: Path, tmp_path: Path, either_branch: bool
+) -> None:
+    """The whole tree appears at once, and no scratch outlives the call.
+
+    Asserts the sequence end to end: the staging tree is a dot-prefixed
+    sibling while it is being built - unservable, because
+    :func:`~app.utils.paths.resolve_artifact` rejects a dot-prefixed component
+    - the pages and assets land in it, and the swap makes the complete tree
+    visible under the published name in one rename.
+    """
+    source = _write(tmp_path / "cucumber.css", "body{}")
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+
+    with paths.begin_directory_publication(final) as publication:
+        assert publication.published_exists() is False
+        staging = publication.create_staging()
+        assert staging.name.startswith(".")
+        assert paths.PUBLICATION_STAGING_INFIX in staging.name
+        assert staging.is_dir()
+        with publication.open(PUBLISHED_PAGE) as page:
+            page.write("<html>overview</html>")
+        copied = publication.copy_in(source, PUBLISHED_ASSET)
+        assert publication.has_file(PUBLISHED_PAGE) is True
+        assert publication.has_file(PUBLISHED_ASSET) is True
+        assert publication.has_file("report-feature_1.html") is False
+        assert copied == staging / "css" / "cucumber.css"
+        assert publication.publish() == final
+        assert publication.published is True
+        assert publication.moved_aside is False
+
+    assert (final / PUBLISHED_PAGE).read_text(encoding="utf-8") == (
+        "<html>overview</html>"
+    )
+    assert (final / "css" / "cucumber.css").read_text(encoding="utf-8") == "body{}"
+    assert _tree_entries(paths.pretty_reports_dir(tmp_artifact_root)) == (
+        EXPECTED_PRETTY_SUBDIR,
+        f"{EXPECTED_PRETTY_SUBDIR}/css",
+        f"{EXPECTED_PRETTY_SUBDIR}/css/cucumber.css",
+        f"{EXPECTED_PRETTY_SUBDIR}/{PUBLISHED_PAGE}",
+    )
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "fchmod"),
+    reason="this platform expresses permissions as ACLs, so the policy does not apply",
+)
+def test_a_published_tree_is_owner_only_including_a_copied_asset(
+    tmp_artifact_root: Path, tmp_path: Path, either_branch: bool
+) -> None:
+    """Pages, copied assets and the directories holding them are owner-only.
+
+    The copied asset is the case a metadata-preserving copy gets wrong: a
+    vendored file ships ``0644`` in a wheel, and
+    :meth:`~app.utils.paths.ArtifactDirectoryPublication.copy_in` copies the
+    bytes only, so the mode comes from the policy rather than from the source.
+    """
+    source = _write(tmp_path / "cucumber.css", "body{}")
+    os.chmod(source, 0o666)
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+
+    with paths.begin_directory_publication(final) as publication:
+        publication.create_staging()
+        with publication.open(PUBLISHED_PAGE) as page:
+            page.write("<html></html>")
+        publication.copy_in(source, PUBLISHED_ASSET)
+        publication.publish()
+
+    _assert_owner_only(final / PUBLISHED_PAGE)
+    _assert_owner_only(final / "css" / "cucumber.css")
+    _assert_owner_only(final / "css")
+    _assert_owner_only(final)
+    _assert_owner_only(paths.pretty_reports_dir(tmp_artifact_root))
+
+
+def test_a_second_publication_renames_the_previous_generation_aside(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """The previous tree is moved aside, not deleted, and then discarded.
+
+    The two renames are what make the swap possible at all - renaming a
+    directory onto an existing directory fails on POSIX and on Windows alike -
+    and the order matters: between them the published tree is *absent* rather
+    than partial, and the copy aside is the only complete generation there is
+    until the second rename lands.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    _publish_one_page(final, "<html>first</html>")
+
+    with paths.begin_directory_publication(final) as publication:
+        publication.create_staging()
+        with publication.open(PUBLISHED_PAGE) as page:
+            page.write("<html>second</html>")
+        publication.publish()
+        assert publication.moved_aside is True
+        assert publication.superseded.is_dir()
+        assert (publication.superseded / PUBLISHED_PAGE).read_text(
+            encoding="utf-8"
+        ) == "<html>first</html>"
+        publication.discard_scratch(publication.superseded.name)
+        superseded_name = publication.superseded.name
+
+    assert (final / PUBLISHED_PAGE).read_text(encoding="utf-8") == "<html>second</html>"
+    published = (
+        EXPECTED_PRETTY_SUBDIR,
+        f"{EXPECTED_PRETTY_SUBDIR}/{PUBLISHED_PAGE}",
+    )
+    entries = _tree_entries(paths.pretty_reports_dir(tmp_artifact_root))
+    if either_branch:
+        # With the primitives the whole superseded subtree is removed
+        # descriptor-relative, so nothing of it survives the call.
+        assert entries == published
+    else:
+        # Without them the superseded tree is *detached* rather than walked:
+        # disposing of it by name would mean listing a directory that could
+        # have been substituted since it was approved, which is how a cleanup
+        # deletes something outside the artifact tree.  What is left is
+        # dot-prefixed - unservable, and not under either scratch prefix, so no
+        # later publication restores or re-disposes of it - and ``--clean``
+        # removes it with the rest of the build output.
+        assert set(published) <= set(entries)
+        abandoned = [name for name in entries if name.startswith(".")]
+        assert abandoned, "the detached scratch should still be there by name"
+        assert all(
+            not name.startswith((f".{final.name}", superseded_name))
+            for name in abandoned
+        )
+        assert paths.resolve_artifact(
+            f"{EXPECTED_PRETTY_DIR}/{abandoned[0]}", tmp_artifact_root
+        ) is None
+
+
+def test_scratch_entries_tell_this_process_leavings_from_another_process(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """Each scratch entry is reported with what a caller needs to decide on it.
+
+    The distinction is load-bearing rather than cosmetic: a renamed-aside tree
+    may be the only complete generation in existence, and scratch carrying
+    another process's id may belong to a publication that is still running, so
+    a writer that swept everything it found would destroy a concurrent run's
+    work.  The entries are reported; the decision stays with the writer.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    _publish_one_page(final, "<html>previous</html>", pid=999_001)
+    foreign = final.with_name(
+        f".{final.name}{paths.PUBLICATION_SUPERSEDED_INFIX}999002"
+    )
+
+    with paths.begin_directory_publication(final, pid=999_001) as publication:
+        publication.create_staging()
+        paths.ensure_dir(foreign)
+        entries = {entry.name: entry for entry in publication.scratch_entries()}
+
+        assert set(entries) == {publication.staging.name, foreign.name}
+        own = entries[publication.staging.name]
+        assert own.is_own is True
+        assert own.is_superseded is False
+        assert own.is_dir is True
+        assert own.path == publication.staging
+        assert own.modified_at > 0
+        other = entries[foreign.name]
+        assert other.is_own is False
+        assert other.is_superseded is True
+        publication.discard_scratch(publication.staging.name)
+
+    # The foreign entry is still there: nothing in the owner removes another
+    # process's scratch, and ``--clean`` is what eventually does.
+    assert foreign.is_dir()
+
+
+def test_restore_superseded_puts_an_interrupted_publication_back(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """A tree left renamed aside is restored onto the published name.
+
+    This is the recovery that makes the two-rename swap survivable: a process
+    killed between the renames leaves no published tree and one renamed-aside
+    copy, and without this the next run would start from nothing and a reader
+    would have lost a complete generation to an unrelated crash.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    _publish_one_page(final, "<html>complete</html>", pid=999_003)
+    abandoned = final.with_name(
+        f".{final.name}{paths.PUBLICATION_SUPERSEDED_INFIX}999003"
+    )
+    os.rename(final, abandoned)
+
+    with paths.begin_directory_publication(final, pid=999_003) as publication:
+        assert publication.published_exists() is False
+        names = [entry.name for entry in publication.scratch_entries()]
+        assert names == [abandoned.name]
+        publication.restore_superseded(abandoned.name)
+        assert publication.published_exists() is True
+
+    assert (final / PUBLISHED_PAGE).read_text(encoding="utf-8") == "<html>complete</html>"
+    assert not abandoned.exists()
+
+
+def test_a_publication_acts_only_on_scratch_names_it_recognises(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """Neither removal nor restoration accepts a name outside its own scratch.
+
+    The published tree, a sibling artifact and a traversal spelling are all
+    refused by name before any filesystem call is made, so a caller cannot ask
+    a publication to delete or move something that is not its own - which is
+    the whole reason the scratch names carry a fixed prefix.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    _publish_one_page(final)
+
+    with paths.begin_directory_publication(final) as publication:
+        for name in (
+            final.name,
+            EXPECTED_JSON_NAME,
+            f"../{final.name}",
+            f".{final.name}{paths.PUBLICATION_STAGING_INFIX}1/../../escape",
+        ):
+            with pytest.raises(paths.ArtifactPathError, match="scratch name"):
+                publication.discard_scratch(name)
+        # A staging name is scratch, but it is not a *renamed-aside* one, so
+        # restoring it is refused as well: only a superseded tree is a
+        # generation to restore.
+        with pytest.raises(paths.ArtifactPathError, match="scratch name"):
+            publication.restore_superseded(publication.staging.name)
+
+    assert (final / PUBLISHED_PAGE).is_file()
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create symbolic links, so none can be refused",
+)
+def test_discarding_scratch_unlinks_a_planted_link_instead_of_following_it(
+    tmp_artifact_root: Path, tmp_path: Path, either_branch: bool
+) -> None:
+    """A link inside the scratch is removed as a link; its target is untouched.
+
+    The review's probe for this finding turned a path-resolved cleanup into a
+    recursive delete of a prepared directory outside the artifact root.  The
+    removal descends only through a descriptor opened on the entry itself, with
+    ``O_NOFOLLOW``, so a link - a junction included - is unlinked rather than
+    walked into.
+    """
+    outside = tmp_path / "outside-the-root"
+    outside.mkdir(exist_ok=True)
+    keep = _write(outside / "keep.txt", "KEEP")
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+
+    with paths.begin_directory_publication(final) as publication:
+        staging = publication.create_staging()
+        with publication.open(PUBLISHED_PAGE) as page:
+            page.write("<html></html>")
+        (staging / "escape").symlink_to(outside, target_is_directory=True)
+        publication.discard_scratch(staging.name)
+
+        assert not staging.exists()
+
+    assert keep.read_text(encoding="utf-8") == "KEEP"
+    assert _tree_entries(outside) == ("keep.txt",)
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create symbolic links, so none can be refused",
+)
+def test_a_publication_refuses_a_link_where_the_published_tree_belongs(
+    tmp_artifact_root: Path, tmp_path: Path, either_branch: bool
+) -> None:
+    """A link standing in for the tree is refused rather than renamed aside.
+
+    The published tree is a directory this writer produced, so a link in its
+    place is a redirection out of the artifact root - and renaming it aside and
+    publishing over it would leave the redirection in the superseded copy and
+    tell the operator nothing.  Refused before a staging tree is built, with
+    the outside directory asserted untouched.
+    """
+    outside = tmp_path / "outside-the-root"
+    outside.mkdir(exist_ok=True)
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    paths.ensure_dir(final.parent)
+    final.symlink_to(outside, target_is_directory=True)
+
+    with paths.begin_directory_publication(final) as publication:
+        with pytest.raises(paths.ArtifactPathError, match="symbolic link"):
+            publication.published_exists()
+        publication.create_staging()
+        with publication.open(PUBLISHED_PAGE) as page:
+            page.write("<html></html>")
+        with pytest.raises(paths.ArtifactPathError, match="symbolic link"):
+            publication.publish()
+        publication.discard_scratch(publication.staging.name)
+
+    assert _tree_entries(outside) == ()
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create symbolic links, so none can be refused",
+)
+def test_a_publication_refuses_a_symlinked_owned_component(
+    tmp_artifact_root: Path, tmp_path: Path, either_branch: bool
+) -> None:
+    """A link standing in for ``target/`` fails before any page is rendered.
+
+    ``begin_directory_publication`` verifies the tree's parent when it is
+    created, which is deliberately early: the writer renders pages one at a
+    time straight into staging, so a refusal that came at the first write would
+    already have created a directory inside the link's destination.
+    """
+    outside = tmp_path / "outside-the-root"
+    outside.mkdir(exist_ok=True)
+    paths.target_root(tmp_artifact_root).symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        paths.begin_directory_publication(
+            paths.pretty_reports_html_dir(tmp_artifact_root)
+        )
+    assert EXPECTED_TARGET_DIR in str(failure.value)
+    assert _tree_entries(outside) == ()
+
+
+@pytest.mark.parametrize("name", UNUSABLE_STAGING_NAMES)
+def test_a_staging_entry_name_that_could_escape_is_refused(
+    name: str, tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """Every unusable relative name is refused, and nothing is created for it.
+
+    Refusal rather than normalisation: a name the writer did not mean is a
+    construction fault worth reporting, and a publication that silently
+    rewrote one would make the emitted page set differ from the inventory the
+    writer went on to verify.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+
+    with paths.begin_directory_publication(final) as publication:
+        staging = publication.create_staging()
+        with pytest.raises(paths.ArtifactPathError):
+            publication.open(name)
+        assert _tree_entries(staging) == ()
+        publication.discard_scratch(staging.name)
+
+
+def test_a_publication_refuses_to_write_or_publish_before_staging_exists(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """Writing or publishing without a staging tree is refused, not improvised.
+
+    A publication that created its staging directory implicitly on the first
+    write would hide the one ordering the recovery step depends on: scratch
+    left by an interrupted run is examined *before* a new staging tree is
+    built, because building over it would publish a partial generation.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+
+    with paths.begin_directory_publication(final) as publication:
+        with pytest.raises(paths.ArtifactPathError, match="create_staging"):
+            publication.open(PUBLISHED_PAGE)
+        with pytest.raises(paths.ArtifactPathError, match="create_staging"):
+            publication.has_file(PUBLISHED_PAGE)
+        with pytest.raises(paths.ArtifactPathError, match="create_staging"):
+            publication.publish()
+
+    assert not final.exists()
+
+
+def test_a_publication_cannot_be_published_twice(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """A second :meth:`publish` is refused rather than renaming the tree again.
+
+    After the swap the staging name belongs to the published tree, so a second
+    publish would rename the published artifact aside and leave nothing in its
+    place.  The refusal is an :exc:`OSError`, so it reaches the caller's
+    writer-failure handling with no new exception type (AAP 0.4.1).
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+
+    with paths.begin_directory_publication(final) as publication:
+        publication.create_staging()
+        with publication.open(PUBLISHED_PAGE) as page:
+            page.write("<html></html>")
+        publication.publish()
+        with pytest.raises(paths.ArtifactPathError, match="already been published"):
+            publication.publish()
+
+    assert (final / PUBLISHED_PAGE).is_file()
+    assert isinstance(paths.ArtifactPathError("x"), OSError)
+
+
+def test_closing_a_publication_releases_descriptors_and_removes_nothing(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """``close`` is idempotent and leaves every tree exactly where it was.
+
+    What happens to a staging or renamed-aside tree after a failure is the
+    writer's decision - it is the one case where the copy aside may be the only
+    complete generation - so a context manager that swept scratch on the way
+    out would take that decision away.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    publication = paths.begin_directory_publication(final)
+    staging = publication.create_staging()
+    with publication.open(PUBLISHED_PAGE) as page:
+        page.write("<html></html>")
+
+    publication.close()
+    publication.close()
+
+    assert staging.is_dir()
+    assert (staging / PUBLISHED_PAGE).is_file()
+    assert not final.exists()
+
+
+def test_restore_superseded_reports_an_absent_or_unusable_scratch_tree(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """Restoring what is not a tree is reported rather than half-performed.
+
+    Two shapes reach the same decision point and must not be conflated: a
+    renamed-aside name that is not there at all - the ordinary case, a
+    publication that completed and swept its scratch - and a *file* under a
+    renamed-aside name, which is not a generation to publish. The first is an
+    absence and the second a refusal, so a recovery step can tell "nothing to
+    do" from "something is wrong here".
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+    _publish_one_page(final, pid=999_004)
+    absent = f".{final.name}{paths.PUBLICATION_SUPERSEDED_INFIX}999005"
+    impostor = final.with_name(
+        f".{final.name}{paths.PUBLICATION_SUPERSEDED_INFIX}999006"
+    )
+    _write(impostor, "not a tree")
+
+    with paths.begin_directory_publication(final, pid=999_004) as publication:
+        with pytest.raises(FileNotFoundError):
+            publication.restore_superseded(absent)
+        with pytest.raises(paths.ArtifactPathError, match="not a directory"):
+            publication.restore_superseded(impostor.name)
+
+    assert (final / PUBLISHED_PAGE).is_file()
+    assert impostor.read_text(encoding="utf-8") == "not a tree"
+
+
+def test_has_file_answers_false_for_a_missing_sub_directory(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """An inventory check for a page under a directory that was never created.
+
+    The writer verifies its whole inventory over the staging tree before the
+    swap, and an asset whose directory is missing is exactly what that check
+    exists to catch - so the question must answer ``False`` rather than raise
+    the platform's "no such directory" at the writer.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+
+    with paths.begin_directory_publication(final) as publication:
+        staging = publication.create_staging()
+        assert publication.has_file("fonts/FontAwesome.otf") is False
+        with publication.open(PUBLISHED_PAGE) as page:
+            page.write("<html></html>")
+        assert publication.has_file(f"{PUBLISHED_PAGE}/inner.html") is False
+        publication.discard_scratch(staging.name)
+
+
+def test_an_artifact_path_must_name_an_entry_on_either_branch(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """A path with no entry to verify is refused, not treated as a directory.
+
+    ``ensure_parent`` and the write entry points verify a *final component*
+    under its parent, so a bare filesystem root has nothing for them to check;
+    answering it with a created directory would put an artifact somewhere no
+    caller named.
+    """
+    root = Path(tmp_artifact_root.anchor)
+
+    with pytest.raises(paths.ArtifactPathError, match="must name an entry"):
+        paths.ensure_parent(root)
+
+
+def test_publish_artifact_file_tolerates_a_caller_that_closed_the_stream(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """A stream the caller closed still publishes what was written to it.
+
+    Closing through the interpreter has already flushed the bytes, so only the
+    device sync is lost - and failing the publication over that would report a
+    writer failure for an artifact that is complete and correct.
+    """
+    artifact = paths.cucumber_reports_html_path(tmp_artifact_root)
+
+    with paths.publish_artifact_file(artifact) as stream:
+        stream.write("<html>closed early</html>\n")
+        stream.close()
+
+    assert artifact.read_text(encoding="utf-8") == "<html>closed early</html>\n"
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create symbolic links, so none can be refused",
+)
+def test_a_staged_page_name_occupied_by_a_link_is_refused(
+    tmp_artifact_root: Path, tmp_path: Path, either_branch: bool
+) -> None:
+    """A link planted at a page name inside staging is refused, not written through.
+
+    The staging tree is dot-prefixed and short-lived, but it is not private:
+    it sits in the build output, which survives a ``--no-clean`` run, so an
+    entry inside it can be occupied before the writer gets there.  Writing a
+    page through such a link would send a report page - screenshots and failure
+    text included - wherever the link points.
+    """
+    victim = _write(tmp_path / VICTIM_NAME, VICTIM_CONTENT)
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+
+    with paths.begin_directory_publication(final) as publication:
+        staging = publication.create_staging()
+        (staging / PUBLISHED_PAGE).symlink_to(victim)
+        with pytest.raises(paths.ArtifactPathError, match="symbolic link"):
+            publication.open(PUBLISHED_PAGE)
+        assert publication.has_file(PUBLISHED_PAGE) is False
+        publication.discard_scratch(staging.name)
+
+    assert victim.read_text(encoding="utf-8") == VICTIM_CONTENT
+    assert not final.exists()
+
+
+def test_a_staged_page_may_sit_any_number_of_directories_deep(
+    tmp_artifact_root: Path, either_branch: bool
+) -> None:
+    """Intermediate directories are created and verified one component at a time.
+
+    The emitted asset set is one level deep today, so this is the property
+    rather than the current shape: each component is created with the directory
+    mode and opened under the descriptor of its already-verified parent, so a
+    deeper name is neither refused nor resolved in one unchecked join.
+    """
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+
+    with paths.begin_directory_publication(final) as publication:
+        publication.create_staging()
+        with publication.open("a/b/c/page.html") as page:
+            page.write("<html>deep</html>")
+        assert publication.has_file("a/b/c/page.html") is True
+        publication.publish()
+
+    assert (final / "a" / "b" / "c" / "page.html").read_text(
+        encoding="utf-8"
+    ) == "<html>deep</html>"
+    for depth in ("a", "a/b", "a/b/c"):
+        _assert_owner_only(final.joinpath(*depth.split("/")))
+
+
+# ==========================================================================
+# Section 16 - The fallback's parent races, closed deterministically
+#
+# The fallback branch cannot hold a parent open, so what it must do instead is
+# *detect* a substitution before anything crosses the boundary, and never
+# perform an operation whose damage cannot be detected afterwards.  Each case
+# below drives a real swap through the owner's own call - os.open, os.lstat -
+# at a chosen point in the sequence, which is what makes it a test rather than
+# a race: the window is opened deliberately rather than waited for.
+# ==========================================================================
+
+
+def _swapping_directories(
+    trigger: str, first: Path, second: Path, *, restore: bool = False
+) -> Callable[..., int]:
+    """An :func:`os.open` replacement that exchanges two directories mid-open.
+
+    :param trigger: The path whose open performs the swap.
+    :param first: The directory moved out of the way - the artifact root.
+    :param second: The directory moved into its place.
+    :param restore: Whether to put ``first`` back before returning, which is
+        the ABA case: the chain a re-stat sees afterwards is the chain that was
+        bound, while the descriptor holds what ``second`` supplied.
+    :returns: A drop-in replacement for :func:`os.open`.
+    """
+    real_open = os.open
+    stash = first.with_name(f"{first.name}.stashed")
+
+    def opening(path: Any, flags: int, *rest: Any, **options: Any) -> int:
+        named = os.fspath(path) if isinstance(path, (str, os.PathLike)) else None
+        if named != trigger:
+            return real_open(path, flags, *rest, **options)
+        os.rename(first, stash)
+        os.rename(second, first)
+        handle = real_open(path, flags, *rest, **options)
+        if restore:
+            os.rename(first, second)
+            os.rename(stash, first)
+        return handle
+
+    return opening
+
+
+@pytest.mark.parametrize("restore", [False, True], ids=["sustained", "aba"])
+def test_fallback_refuses_a_read_whose_parent_was_substituted(
+    restore: bool,
+    tmp_artifact_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    without_no_follow_support: None,
+) -> None:
+    """A directory swapped around the open discloses nothing, either way round.
+
+    Two shapes, one refusal.  A **sustained** swap leaves the substitute in
+    place, so the name and the object it opened agree - on the attacker's file -
+    and only the bound chain can tell; an **ABA** swap puts the original back
+    before the checks run, so the chain agrees and only the object-to-name
+    comparison can tell.  Both are made before the stream is handed back, so
+    nothing is read from the substituted file in either case.
+    """
+    outside = tmp_path / "outside-the-root"
+    outside.mkdir(exist_ok=True)
+    _write(outside / EXPECTED_JSON_NAME, '{"external": "secret"}')
+    artifact = _write(paths.cucumber_json_path(tmp_artifact_root), VICTIM_CONTENT)
+    monkeypatch.setattr(
+        os,
+        "open",
+        _swapping_directories(
+            str(artifact),
+            paths.target_root(tmp_artifact_root),
+            outside,
+            restore=restore,
+        ),
+    )
+
+    with pytest.raises(paths.ArtifactPathError) as failure:
+        paths.read_artifact_text(artifact)
+    assert "changed while it was being" in str(failure.value)
+
+
+@pytest.mark.parametrize("restore", [False, True], ids=["sustained", "aba"])
+def test_fallback_refuses_a_write_whose_parent_was_substituted(
+    restore: bool,
+    tmp_artifact_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    without_no_follow_support: None,
+) -> None:
+    """The same two shapes on the write side leave the outside file untouched.
+
+    The write is the destructive direction, so the assertion is on the bytes:
+    the external file must still hold what it held, and the artifact the run
+    was rewriting must still hold the previous run's content, because the
+    truncation happens after both checks.
+    """
+    outside = tmp_path / "outside-the-root"
+    outside.mkdir(exist_ok=True)
+    victim = _write(outside / EXPECTED_JSON_NAME, VICTIM_CONTENT)
+    artifact = _write(paths.cucumber_json_path(tmp_artifact_root), "[0]")
+    monkeypatch.setattr(
+        os,
+        "open",
+        _swapping_directories(
+            str(artifact),
+            paths.target_root(tmp_artifact_root),
+            outside,
+            restore=restore,
+        ),
+    )
+
+    with pytest.raises(paths.ArtifactPathError):
+        with paths.open_artifact_write(artifact) as stream:
+            stream.write("[1]")
+    # The sustained swap leaves the substitute standing where the artifact root
+    # was, so the external file is looked up wherever the swap left it: what
+    # matters is that its bytes are the bytes it started with, because the
+    # truncation happens only after both checks have passed.
+    relocated = paths.target_root(tmp_artifact_root) / EXPECTED_JSON_NAME
+    survivor = victim if victim.exists() else relocated
+    assert survivor.read_text(encoding="utf-8") == VICTIM_CONTENT
+
+
+def _substituting_after_the_bind(
+    root: Path, replacement: Path
+) -> Callable[..., os.stat_result]:
+    """An :func:`os.lstat` replacement that swaps the artifact root once bound.
+
+    The swap is performed immediately after the first examination of the root -
+    which is the owner binding the chain, before it resolves anything - and the
+    identity handed back is the genuine root's, so what was bound is what was
+    really there and what every later check sees is the substitute.  That is
+    the exact window the review's probe exploited.
+
+    :param root: The artifact root, moved aside.
+    :param replacement: The directory moved into its place, and left there.
+    :returns: A drop-in replacement for :func:`os.lstat`.
+    """
+    real_lstat = os.lstat
+    examinations = {"root": 0}
+    stash = root.with_name(f"{root.name}.stashed")
+
+    def examining(path: Any, *rest: Any, **options: Any) -> os.stat_result:
+        info = real_lstat(path, *rest, **options)
+        named = os.fspath(path) if isinstance(path, (str, os.PathLike)) else None
+        if named == str(root):
+            examinations["root"] += 1
+            if examinations["root"] == 1:
+                os.rename(root, stash)
+                os.rename(replacement, root)
+        return info
+
+    return examining
+
+
+@pytest.mark.parametrize(
+    "entry_point", ["resolve_artifact", "open_resolved_artifact"]
+)
+def test_fallback_rejects_a_request_whose_parent_was_substituted(
+    entry_point: str,
+    tmp_artifact_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    without_no_follow_support: None,
+) -> None:
+    """Both request entry points reject a root substituted after they bound it.
+
+    Each binds the owned chain **before** it resolves the name and checks
+    containment, and re-establishes it afterwards - the validator before it
+    returns a path, the opener once the file is open - so a directory moved
+    into the root's place inside that window cannot be served under an
+    artifact's name.  A substitute that is itself a plain directory passes
+    resolution and containment, which is why the identity comparison is the
+    check that has to catch it.  Neither entry point raises: every rejection is
+    ``None``.
+    """
+    outside = tmp_path / "outside-the-root"
+    outside.mkdir(exist_ok=True)
+    _write(outside / EXPECTED_JSON_NAME, '{"external": "secret"}')
+    _write(paths.cucumber_json_path(tmp_artifact_root), VICTIM_CONTENT)
+    monkeypatch.setattr(
+        os,
+        "lstat",
+        _substituting_after_the_bind(paths.target_root(tmp_artifact_root), outside),
+    )
+
+    assert getattr(paths, entry_point)(EXPECTED_JSON_NAME, tmp_artifact_root) is None
+
+
+def _substituting_a_directory_for_a_link(
+    subject: Path, replacement: Path
+) -> Callable[..., os.stat_result]:
+    """An :func:`os.lstat` replacement that links ``subject`` away once examined.
+
+    The identity handed back is the genuine directory's, so a caller that
+    stats a name and then operates on that name again - the shape a recursive
+    removal by pathname has to take on this branch - is told it approved a
+    directory while the name has already become a link to somewhere else.
+    That is precisely the window the review's cleanup probe exploited.
+
+    :param subject: The directory whose examination performs the substitution.
+    :param replacement: The directory the link is made to point at.
+    :returns: A drop-in replacement for :func:`os.lstat`.
+    """
+    real_lstat = os.lstat
+    substituted = {"done": False}
+
+    def examining(path: Any, *rest: Any, **options: Any) -> os.stat_result:
+        info = real_lstat(path, *rest, **options)
+        named = os.fspath(path) if isinstance(path, (str, os.PathLike)) else None
+        if named == str(subject) and not substituted["done"]:
+            substituted["done"] = True
+            os.rename(subject, subject.with_name(f"{subject.name}.moved"))
+            subject.symlink_to(replacement, target_is_directory=True)
+        return info
+
+    return examining
+
+
+@pytest.mark.skipif(
+    not SYMLINKS_AVAILABLE,
+    reason="this platform cannot create symbolic links, so none can be substituted",
+)
+def test_fallback_scratch_disposal_never_descends_a_directory(
+    tmp_artifact_root: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    without_no_follow_support: None,
+) -> None:
+    """Disposal cannot delete outside the tree, swapped at the worst moment.
+
+    The review's probe replaced an already-approved staging directory with a
+    link to a prepared directory outside the artifact root, in the window
+    between the stat that approved it and the listing that walked it, and the
+    cleanup followed the link and deleted the prepared directory's contents.
+    Here the substitution is driven through the owner's own stat call, so the
+    window is opened deliberately at exactly that point - and there is no walk
+    left to redirect: a directory that still has contents is renamed aside
+    rather than listed, so the prepared directory keeps every file it had
+    whatever the scratch name points at by the time disposal runs.
+
+    Whether the disposal reports an error is not the property under test - the
+    entry stopped being what it was, so either refusing or disposing of the
+    link itself is honest.  What must hold is that nothing outside the artifact
+    root was touched.
+    """
+    outside = tmp_path / "outside-the-root"
+    outside.mkdir(exist_ok=True)
+    keep = _write(outside / "keep.txt", "KEEP")
+    final = paths.pretty_reports_html_dir(tmp_artifact_root)
+
+    with paths.begin_directory_publication(final) as publication:
+        staging = publication.create_staging()
+        with publication.open(PUBLISHED_PAGE) as page:
+            page.write("<html></html>")
+        monkeypatch.setattr(
+            os, "lstat", _substituting_a_directory_for_a_link(staging, outside)
+        )
+        with contextlib.suppress(OSError):
+            publication.discard_scratch(staging.name)
+
+    assert keep.read_text(encoding="utf-8") == "KEEP"
+    assert _tree_entries(outside) == ("keep.txt",)

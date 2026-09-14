@@ -1,81 +1,36 @@
 """Java parity tests for ``features/steps/session_steps.py``.
 
-The per-module parity obligation AAP 0.4.1 places on every step module, for the
-smallest and most load-bearing of the ten: ``Session.java`` at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240``.  That class is 19 lines long and
-declares exactly one step method, whose four statements are the shared
-sign-in precondition six other features invoke from their ``Background`` - the
-reason AAP 0.4.4 states the port could not be split into phases: *"the shared
-precondition step in ``Session.java`` is invoked by other features'
-backgrounds, so porting any one feature area alone yields undefined steps."*
+Discharges AAP 0.4.1's per-module parity obligation for the smallest and most
+load-bearing of the ten step classes: ``Session.java``, 19 lines declaring one
+step method.  Every expectation is cross-referenced to the Java source and the
+feature files, never to the port - a test written from the implementation would
+agree with it by construction and prove nothing.
 
-The authority, and the direction of every assertion
----------------------------------------------------
-Every expectation below is cross-referenced to the Java source and the feature
-files, never to the Python implementation - a test written from the port would
-agree with it by construction and prove nothing.  The anchor, verbatim
-(``Session.java:10-18``)::
+Three facts make this module weigh more than its size.  It owns the **shared
+sign-in precondition** AAP 0.4.1 names, which reads ``web.table.url``,
+``username`` and ``password`` at ``Session.java:14``, ``:15`` and ``:16`` and
+clicks at ``:17`` - four operations in that order and nothing else, through the
+three ``@FindBy`` fields of ``SessionP.java:14-21``.  Its phrase is declared
+``@When`` at ``Session.java:12`` yet invoked as ``Given`` at six of its seven
+feature-file sites, the measurement AAP 0.5.2 rests deviation 7 on: bound to a
+keyword bucket, those six would report an undefined step, and
+``tests/fixtures/golden_cucumber.json`` holds the JVM's own record of the
+cross-keyword match.  And it is the one step class of the ten that constructs
+**no** ``WebDriverWait`` - ``Session.java:1-19`` imports none and builds none -
+and that sleeps not at all, asserts nothing, branches nowhere and catches
+nothing, so the absences are asserted as directly as the operations and no
+wait assertion belongs here.
 
-    SessionP session = new SessionP();                                  // :10
+``ConfigurationReader.getProperty`` (``ConfigurationReader.java:27-29``)
+answers ``null`` for an absent key, which AAP 0.4.1 keeps so *"failures
+surface at the point of use"*: the port invents no default and no
+validation, and a missing value reaches the browser call unchanged.
 
-    @When("User login to test other features")                          // :12
-    public void user_login_to_test_other_features() {                   // :13
-        Driver.getDriver().get(ConfigurationReader.getProperty("web.table.url"));
-        session.inputLogin.sendKeys(ConfigurationReader.getProperty("username"));
-        session.inputPass.sendKeys(ConfigurationReader.getProperty("password"));
-        session.loginButton.click();                                    // :17
-    }
-
-paired with ``SessionP.java:14-21``::
-
-    @FindBy(id = "login")     public WebElement inputLogin;         // :14-15
-    @FindBy(id = "password")  public WebElement inputPass;          // :17-18
-    @FindBy(xpath = "//button[.='Log in']") public WebElement loginButton;  // :20-21
-
-Four operations, in that order, and nothing else.  The class constructs no
-``WebDriverWait``, declares no assertion, calls no ``Thread.sleep``, touches no
-``Keys`` or ``Actions``, prints nothing and catches nothing - so the negative
-half of this module carries as much weight as the positive half, and is
-asserted just as directly.  ``ConfigurationReader.getProperty`` returns
-``null`` for an absent key, which AAP 0.4.1 keeps deliberately so that
-*"failures surface at the point of use"*; the port must therefore invent no
-default, no validation and no message, and a missing value must reach the
-browser call unchanged.
-
-What is pinned here, in the order the tests appear
---------------------------------------------------
-1. **The census.** The Java class's one method, against the definitions the
-   module registers - so an omitted or an invented definition fails rather
-   than passing silently, which is the gap detector AAP 0.4.1 requires.
-2. **Module boundaries, by source inspection.** ``@step`` and not ``@when``
-   (AAP deviation 7, and decisive here: registered under one keyword, the six
-   ``Given`` call sites would report an undefined step); the three imports the
-   module's contract closes at; no browser library, no ``By``, nothing from
-   ``app.automation``, no properties module; and no branch, assertion, delay
-   or error path.
-3. **The four operations**, their order, their three configuration sources and
-   their key names, read through ``app/config.py``.
-4. **The locators**, as ``SessionP.java``'s ``@FindBy`` annotations declare
-   them - ``By.ID`` for both inputs, which is *not* ``LoginP.java:13``'s
-   ``By.NAME`` for the same field, and the discrimination is asserted
-   explicitly because conflating the two is the standing trap on this form.
-5. **The absences**: no wait, no fixed delay, no assertion, no extra driver
-   operation, no session created or quit, nothing attached, nothing stored.
-6. **The cross-keyword reach**: seven invocation sites parsed out of
-   ``features/*.feature`` - six ``Given`` against a ``@When`` declaration -
-   each resolving to the one definition, corroborated by the committed
-   baseline artifact.
-7. **``features/Session.feature``** itself: ``Feature: Default``, one
-   scenario, no tag, and the pinned digest of a file that carries no
-   terminating newline.
-
-Constraints this module observes
---------------------------------
-No network, no browser, no sleep and no live ``configuration.properties``.
-The session is :fixture:`stub_driver`, a recorder; the context is
-:fixture:`fake_context`; configuration is driven through ``app/config.py``'s
-own public override API or through the step module's own accessor bindings,
-per test and never process-wide.  Nothing here writes to disk.
+Nothing here touches a network, a browser, a clock or a live
+``configuration.properties``: the session is :fixture:`stub_driver`, the
+context :fixture:`fake_context`, and configuration arrives through
+``app/config.py``'s override API or the module's own accessor bindings, per
+test and never process-wide.
 """
 
 from __future__ import annotations
@@ -134,7 +89,7 @@ By: Final[Any] = automation.By
 
 
 class JavaStepMethod(NamedTuple):
-    """One step method of ``Session.java``, as the reference declares it."""
+    """One step method of ``Session.java:12-18``, as the reference declares it."""
 
     #: The Java method name, which the port's function name must equal.
     method: str
@@ -142,17 +97,19 @@ class JavaStepMethod(NamedTuple):
     #: The Gherkin phrase inside the method's annotation.
     phrase: str
 
-    #: Line of the ``@When`` annotation in ``Session.java``.
+    #: Line of the ``@When`` annotation in ``Session.java`` - ``:12`` for the
+    #: one method the class declares.
     annotation_line: int
 
     #: Lines of the method's statements, in execution order.
     body_lines: tuple[int, ...]
 
 
-#: The whole of ``Session.java``'s step surface: one method, four statements.
-#: This tuple is the census every registration test is measured against, so a
-#: definition the module registers without an entry here - or an entry with no
-#: definition - is a failure rather than an omission nobody notices.
+#: The whole of ``Session.java``'s step surface, which is ``:12-18``: one
+#: method, four statements at ``:14-17``.  This tuple is the census every
+#: registration test is measured against, so a definition the module registers
+#: without an entry here - or an entry with no definition - is a failure rather
+#: than an omission nobody notices.
 JAVA_STEP_METHODS: Final[tuple[JavaStepMethod, ...]] = (
     JavaStepMethod(
         method="user_login_to_test_other_features",
@@ -282,6 +239,20 @@ SESSION_CONFIGURATION: Final[dict[str, str]] = {
     KEY_PASSWORD: PASSWORD_VALUE,
 }
 
+#: Destinations ``app/config.py``'s navigation policy refuses, one per class
+#: that matters at *this* call site.  This step is the only place in the port
+#: that sends the configured user name and password to the page a configured
+#: address answers with, so what each of these would do if it reached the
+#: browser is concrete: read a local file, hand the credentials to an attacker
+#: origin, forge a second record in the log or the request, or read the cloud
+#: instance-metadata service from the CI worker.
+HOSTILE_URL_VALUES: Final[tuple[tuple[str, str], ...]] = (
+    ("file-scheme", "file:///etc/passwd"),
+    ("userinfo", "https://qa:secret@credential-sink.example/web/login"),
+    ("newline", "https://sut.example/web/login\nX-Injected: 1"),
+    ("metadata-address", "http://169.254.169.254/latest/meta-data/"),
+)
+
 
 # --------------------------------------------------------------------------
 # The module-boundary authority (AAP 0.4.2)
@@ -307,11 +278,14 @@ ALLOWED_IMPORTS: Final[frozenset[tuple[str, str]]] = frozenset(
 #: Import roots the step module may not reach, each for a stated reason:
 #: the browser library and its driver manager (only ``app/automation`` may),
 #: ``app.automation`` itself (no wait, no ``By``, no driver accessor, no
-#: interaction helper - ``Session.java`` uses none of them), ``app.utils``
-#: (``app/config.py`` is the only permitted reader of the properties module),
-#: ``time`` (none of the suite's seventeen fixed sleeps is in this class),
-#: ``parse`` (this phrase takes no parameter and registers no type converter)
-#: and the application's own web, service and reporting layers.
+#: interaction helper - ``Session.java:1-19`` imports none of them and its
+#: body uses none), ``app.utils`` (``app/config.py`` is the only permitted
+#: reader of the properties module), ``time`` (none of the suite's seventeen
+#: fixed sleeps is in this class; they are the two of ``Calendar.java``, five
+#: of ``Contacts.java``, one of ``Crm.java``, eight of ``EmployeeStage.java``
+#: and one of ``Notes.java``), ``parse`` (``Session.java:12``'s phrase takes
+#: no parameter and registers no type converter) and the application's own
+#: web, service and reporting layers.
 FORBIDDEN_IMPORT_ROOTS: Final[tuple[str, ...]] = (
     "selenium",
     "webdriver_manager",
@@ -356,9 +330,10 @@ FORBIDDEN_BINDINGS: Final[frozenset[str]] = frozenset(automation.__all__) | froz
 )
 
 #: Substrings that betray a wait or a delay in a called expression.  Matched
-#: against the *called* expression only, never against a signature, so the
-#: sibling work that is changing visibility-wait call sites elsewhere cannot
-#: make this assertion wrong.
+#: against the *called* expression only and never against its arguments or a
+#: signature, because the subject here is whether ``Session.java:13-18``'s body
+#: calls such a helper at all - which it does not - and not what any helper's
+#: parameters are called.
 FORBIDDEN_CALL_MARKERS: Final[tuple[str, ...]] = ("wait", "sleep", "delay")
 
 
@@ -724,7 +699,7 @@ def test_module_registers_exactly_the_javas_one_step_method(
 
 
 def test_covered_phrase_set_equals_the_java_census(step_registry: Any) -> None:
-    """Every ``Session.java`` phrase is covered, and no phrase is invented.
+    """``Session.java:12``'s one phrase is covered, and no phrase is invented.
 
     The gap detector AAP 0.4.1 requires, asserted as a set equality in both
     directions: a missing definition and a surplus one each fail here.
@@ -853,11 +828,14 @@ def test_module_imports_are_the_three_its_contract_allows() -> None:
 def test_module_imports_no_browser_library_waits_or_properties_module() -> None:
     """None of ``Session.java``'s absent collaborators is imported.
 
-    One assertion per reason it is absent: the browser library belongs to
-    ``app/automation`` alone; the class constructs no wait and uses no ``By``,
-    ``Keys`` or ``Actions``; ``app/config.py`` is the only permitted reader of
-    the properties module; and no fixed delay of the suite's seventeen is
-    here.
+    One assertion per reason it is absent.  ``Session.java:3-6`` imports four
+    names - ``SessionP``, ``ConfigurationReader``, ``Driver`` and ``When`` -
+    and nothing from the browser library, which belongs to ``app/automation``
+    alone; the class constructs no wait and names no ``By``, ``Keys`` or
+    ``Actions`` anywhere in ``:8-19``, unlike ``Notes.java:35`` and
+    ``Sales.java:68`` for keys and ``Notes.java:78`` for an action chain;
+    ``app/config.py`` is the only permitted reader of the properties module;
+    and none of the suite's seventeen fixed delays is in this class.
     """
     imported = _imported_pairs(_step_module_tree())
     modules = {module for module, _ in imported}
@@ -884,9 +862,10 @@ def test_module_namespace_binds_no_wait_delay_or_driver_helper(
     Asserted against the namespace the step body actually resolves its names
     in, and against the automation package's own published surface rather than
     a hand-listed one - so no helper's name or argument shape is pinned here,
-    only the fact that none of them is reachable.  ``Session.java`` builds no
-    ``WebDriverWait``, which makes it the one step class of the ten with no
-    wait at all.
+    only the fact that none of them is reachable.  ``Session.java:8-19``
+    declares one field and builds no ``WebDriverWait``, which makes it the one
+    step class of the ten with no wait at all; the other nine build theirs as
+    a field, as ``EmployeeStage.java:14`` does.
     """
     namespace = set(step_match.func.__globals__)
 
@@ -904,9 +883,11 @@ def test_module_namespace_binds_no_wait_delay_or_driver_helper(
 def test_module_calls_no_wait_or_delay() -> None:
     """No called expression in the module names a wait, a sleep or a delay.
 
-    Matched against callees only.  A call site's arguments are never inspected
-    here, so the concurrent work on the port's visibility-wait signatures
-    cannot make this assertion say anything it does not mean.
+    ``Session.java:13-18`` performs four operations and synchronizes on none of
+    them: it constructs no ``WebDriverWait`` and calls no ``Thread.sleep``, so
+    the port may call no equivalent.  Matched against callees only, because
+    that is precisely the claim - a helper is invoked, or it is not - and an
+    argument's spelling is no part of it.
     """
     called = _called_expressions(_step_module_tree())
     offenders = {
@@ -920,16 +901,17 @@ def test_module_calls_no_wait_or_delay() -> None:
 
 
 def test_module_declares_no_assertion_branch_or_error_path() -> None:
-    """``Session.java`` asserts nothing, branches nowhere and catches nothing.
+    """``Session.java:13-18`` asserts nothing, branches nowhere, catches nothing.
 
     Each node class below stands for an addition that would be a parity break
     rather than an improvement (AAP 0.8, *"Preserve, do not tidy"*): an
-    ``assert`` the Java class has no ``Assert`` import for; an ``if`` or a
-    conditional expression, which is how a default for a missing configuration
-    value would be invented; a ``BoolOp``, which is how ``value or "default"``
-    would be spelled; and ``try``/``raise``, which is the error handling the
-    class does not perform - ``ConfigurationReader`` returning ``null`` is
-    meant to surface at the point of use.
+    ``assert``, for which ``Session.java:1-6`` carries no ``org.junit.Assert``
+    import; an ``if`` or a conditional expression, which is how a default for a
+    missing configuration value would be invented; a ``BoolOp``, which is how
+    ``value or "default"`` would be spelled; and ``try``/``raise``, which is
+    the error handling the four statements of ``:14-17`` do not perform -
+    ``ConfigurationReader.java:27-29`` returning ``null`` is meant to surface
+    at the point of use.
     """
     tree = _step_module_tree()
     forbidden = (ast.Assert, ast.If, ast.IfExp, ast.BoolOp, ast.Try, ast.Raise)
@@ -945,7 +927,7 @@ def test_module_declares_no_assertion_branch_or_error_path() -> None:
 
 
 # --------------------------------------------------------------------------
-# The locators, against SessionP.java's @FindBy annotations
+# The locators, against the three @FindBy annotations of SessionP.java:14-21
 # --------------------------------------------------------------------------
 
 
@@ -1101,9 +1083,10 @@ def test_missing_configuration_reaches_the_browser_unchanged(
 ) -> None:
     """An unset key is ``null`` in Java, and must stay ``None`` all the way down.
 
-    ``ConfigurationReader.getProperty`` returns ``null`` for a missing key and
-    AAP 0.4.1 keeps that so *"failures surface at the point of use"*.  So the
-    port invents no default, raises nothing of its own and skips no operation:
+    ``ConfigurationReader.getProperty`` (``ConfigurationReader.java:27-29``)
+    returns ``null`` for a missing key and AAP 0.4.1 keeps that so *"failures
+    surface at the point of use"*.  So the port invents no default, raises
+    nothing of its own and skips no operation:
     the navigation is attempted with ``None`` and both fields are typed with
     ``None``, leaving the browser to reject them exactly as the Java does.
     """
@@ -1114,6 +1097,54 @@ def test_missing_configuration_reaches_the_browser_unchanged(
 
     assert tuple(stub_driver.calls) == _expected_calls(None, None, None)
     assert stub_driver.operations() == EXPECTED_OPERATIONS
+
+
+@pytest.mark.parametrize(
+    "value",
+    [pytest.param(value, id=case) for case, value in HOSTILE_URL_VALUES],
+)
+def test_a_configured_destination_outside_the_policy_reaches_nothing(
+    value: str,
+    request: pytest.FixtureRequest,
+    step_match: Any,
+    fake_context: Any,
+    stub_driver: Any,
+) -> None:
+    """A ``web.table.url`` outside the policy stops the step before ``:14``.
+
+    The point-of-use half of the configured-navigation contract, and the
+    reason it is asserted in *this* module rather than only in
+    ``tests/test_config.py``: ``Session.java:14-16`` navigates and *then*
+    types the configured user name and password, so a destination the policy
+    refuses must stop the step before the navigation - the credentials leave
+    this process otherwise.
+
+    Three things are asserted, and the third is the one that matters:
+    :class:`ValueError` comes out of the step, the recorder logged **no**
+    operation at all - no ``get``, and in particular no ``send_keys`` - and
+    the message names neither the destination nor either credential.  The
+    values are installed through ``app.config.set_userdata``, the module's own
+    override channel, so the real accessor decides; a recorder patched into
+    the step's namespace would prove nothing about the policy.
+    """
+    request.addfinalizer(lambda: config.set_userdata(None))
+    config.set_userdata({**SESSION_CONFIGURATION, KEY_WEB_TABLE_URL: value})
+
+    with pytest.raises(ValueError) as excinfo:
+        step_match.run(fake_context)
+
+    assert stub_driver.operations() == (), (
+        f"the step reached the browser with a refused destination: "
+        f"{stub_driver.calls}"
+    )
+    assert stub_driver.calls == []
+
+    message = str(excinfo.value)
+    assert KEY_WEB_TABLE_URL in message, "the message must name the key"
+    assert "not navigable" in message, "the raise is not the policy's"
+    assert value not in message, "the refused destination was reported back"
+    assert USERNAME_VALUE not in message
+    assert PASSWORD_VALUE not in message
 
 
 def test_step_returns_none(
@@ -1225,10 +1256,12 @@ def test_step_attaches_nothing_and_stores_nothing_on_the_context(
 ) -> None:
     """The Java records nothing and keeps no state, so neither does the port.
 
-    ``Session.java`` prints nothing - only ``Crm.java`` and ``Sales.java`` do
-    - and attaches nothing; screenshots belong to the scenario-failure hook.
-    The context's attribute set is compared before and after the call, which
-    also demonstrates the module holds no cross-step state.
+    ``Session.java:13-18`` prints nothing - the suite's only
+    ``System.out.println`` calls are ``Crm.java:51-52``, ``:63-64``, ``:97-98``,
+    ``:126-127`` and ``Sales.java:34-35``, ``:74-75``, ``:93-94`` - and
+    attaches nothing; screenshots belong to the scenario-failure hook.  The
+    context's attribute set is compared before and after the call, which also
+    demonstrates the module holds no cross-step state.
     """
     before = set(vars(fake_context))
 

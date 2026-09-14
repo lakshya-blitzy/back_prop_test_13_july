@@ -1,14 +1,12 @@
 """Sales step definitions - the port of ``Sales.java``.
 
-The Java anchor
----------------
-``src/main/java/com/testinium/step_definitions/Sales.java`` at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240``, held REFERENCE by AAP 0.2.1 and
-never modified.  Ninety-nine lines and seven step methods driving the Odoo
-Sales module's customer flow - dashboard, Customers list, new-customer form,
-save, search - over the twenty locators of ``SalesP.java``, ported to
-:class:`app.pages.sales_page.SalesPage`.  Every function below cites the Java
-lines it reproduces, in the order it reproduces them.
+Three of the seven bodies are wrong in ways a reviewer reaches for, and AAP 0.8
+keeps every one of them.  ``Sales.java:66-77`` and ``:87-96`` each build an
+actual and an expected string, print both and end, so neither step can fail on
+a mismatch - only on a lookup or an expiring wait.  ``:31-37`` weighs the
+constant ``"Customers - Odoo"`` against the live title with ``"Customers - "``
+prefixed to it again, under names the wrong way round, so the module's one
+check fails on the very page it exists to confirm.
 
 The seven definitions, in Java declaration order
 ------------------------------------------------
@@ -52,13 +50,21 @@ output, and end.  The comparison their naming plainly intends is absent from the
 Java body, so neither step can fail on a value mismatch - the only ways either
 fails are an element that cannot be located and a wait that expires.
 :func:`user_can_find_his_name_from_search_bar` and
-:func:`user_can_get_the_error` reproduce that exactly: two locals, two lines of
-output, no comparison.  Both locals are kept although nothing reads them
-afterwards, precisely as in Java, and a static-analysis tool flagging them is
-the expected outcome rather than a reason to delete them.  What must not
-disappear is either text read: ``:72`` reads the kanban heading and ``:91`` the
-notification area, and those two reads are the whole of what makes these steps
-able to fail at all.
+:func:`user_can_get_the_error` reproduce that exactly: no comparison, and
+therefore no way for a page value that contradicts the literal to fail them.
+What must not disappear is either text read: ``:72`` reads the kanban heading
+and ``:91`` the notification area, and those two reads are the whole of what
+makes these steps able to fail at all - so each is performed here through
+:func:`_read_element_text`, which states in one place why a read whose value
+goes nowhere is load-bearing.  The two *literals* those bodies bind - ``:71``'s
+``"Lucas"`` and ``:90``'s ``"The following fields are invalid:"`` - do not
+disappear either: AAP 0.4.1 puts "the same hard-coded literals and expected
+values" in the per-module parity obligation, and a value the Java body binds
+and never compares is still a value the Java body carries.  Each is bound here
+at the position its Java statement occupies, ahead of the read that follows it,
+and consumed by nothing, because nothing in the Java body consumes it.  What
+went with the prints is only the *output*; see "The six prints are not
+reproduced" below.
 
 **The Customers-title check has its names the wrong way round, and a doubled
 prefix.**  ``Sales.java:31-32`` binds the constant ``"Customers - Odoo"`` to a
@@ -136,15 +142,61 @@ the suite - the reference fixes 2 seconds in ``Calendar`` and ``Crm``, 3 in
 every one of the eight call sites rather than hidden behind a module constant,
 so it stays exactly as visible as the Java field was.
 
-Standard output is behaviour
-----------------------------
-Six lines reach standard output, from ``Sales.java:34-35``, ``:74-75`` and
-``:93-94``, and their labels keep the Java spelling and spacing - camelCase,
-one space either side of the ``=``.  One of the six is asymmetric: ``:34``
-writes ``actualTitle = `` while ``:35`` writes ``expected = ``, not
-``expectedTitle = ``.  That asymmetry is the source's and is kept.  ``Crm.java``
-and ``Sales.java`` are the only reference classes writing to standard output at
-all - fourteen sites between them, of which six are here.
+The six prints are not reproduced
+---------------------------------
+``Sales.java:34-35``, ``:74-75`` and ``:93-94`` write six lines to standard
+output - the Customers page title, a customer's name read from the kanban
+heading, the notification area's text, and the literals each is paired with.
+This module writes none of them, and sends them nowhere else either: not to a
+logger, not to an attachment and not to a file.
+
+Three of those six values are read live from the system under test, and
+``app/services/test_run_service.py`` relays every worker stdout line into the
+parent logger and from there into the Jenkins console, so each line became a
+durable record of live customer data and PII (CWE-532/359; the security
+review's finding F04).  The statements are removed outright rather than reduced
+to value-free labels, because the relay carries *anything* on stdout: a fixed
+label would still add a line to every CI log while diagnosing nothing.
+
+Removing them costs no parity.  AAP 0.1.2's list of what the port must not
+change covers the artifact paths and schemas, the ``@Smoke`` default, the six
+configuration keys, the Gherkin text and Examples data, the nine explicit waits
+and the seventeen fixed sleeps, the assertion subjects and message strings, and
+the Jenkins stages and thresholds - diagnostic stdout appears nowhere in it.
+AAP 0.4.1's per-module parity obligation enumerates what each step body must
+reproduce - the navigation targets and their property sources, the locators,
+the wait target and timeout, the keyboard keys and action-chain sequences, the
+hard-coded literals and expected values, the assertion subject and message
+text, and the no-ops where a Java body is empty - and diagnostic printing is
+not enumerated there either.
+
+What the removal does *not* touch: every click, every one of the eight waits
+and its 4-second timeout, the single keyboard call, both text reads, the one
+assertion of ``:37`` with its operand order and its message, the two inverted
+names and doubled prefix that assertion depends on, and every hard-coded value
+the six prints happened to carry.  ``actual_title`` at ``:31`` stays, because
+``:37`` compares it; the literals of ``:71`` and ``:90`` stay because AAP 0.4.1
+counts a body's hard-coded literals as parity whether or not anything reads
+them - only the two ``System.out.println`` pairs that happened to read them are
+gone.
+
+**How those two are bound, and why not some other way.**  Each is written
+``_ = "<literal>"`` at the statement position its Java line occupies.  The
+discard target is chosen over the Java form - a named local assigned once and
+never read - because ``pyflakes`` reports that as F841 and this tree carries
+none; ``_`` states in the code what the Java body leaves to inference, that
+nothing consumes the value.  It is chosen over a bare literal expression
+statement for the reason :func:`_read_element_text` gives about a bare
+``page.name_check.text``: an expression statement gives a reader no sign that
+it is deliberate.  And the literal sits in the body rather than in a
+module-level constant, for two measured reasons: every step module of this port
+is held to an exact module-scope inventory and an exact import surface by
+``tests/test_steps_registration.py`` (AAP 0.4.2), so a module constant would
+put ``sales_steps`` into a census that names five other modules, and a
+``Final`` annotation on it would need a ``typing`` import this layer does not
+take - ``crm_steps`` records the same convention.  The body position is also
+the more faithful of the two: ``Sales.java`` binds each literal *inside* the
+method, immediately before the read it precedes.
 
 Feature context
 ---------------
@@ -172,46 +224,40 @@ from app.pages import SalesPage
 
 
 def _page(context) -> SalesPage:
-    """Bind a page object to the session this scenario is running against.
-
-    The stand-in for ``Sales.java:15``'s ``SalesP salesp = new SalesP()``,
-    moved out of module scope for the reason the module docstring gives, and
-    called at the head of all seven bodies below.
-
-    :param context: behave's ``Context``.  Only ``context.driver`` is read -
-        the session ``features/environment.py`` publishes in
-        ``before_scenario`` and clears in ``after_scenario``.
-    :returns: A fresh :class:`~app.pages.sales_page.SalesPage` bound to that
-        session.
-
-    Construction is free of side effects: the page object stores the session
-    and does nothing else, locating no element and touching no browser, so the
-    cost of building one per step is a single attribute assignment.  Each
-    locator accessor on the returned object re-resolves against the live DOM
-    every time it is read, which is what ``PageFactory``'s proxies did for the
-    Java field.
-    """
     return SalesPage(context.driver)
+
+
+def _read_element_text(element) -> str:
+    """Dereference *element* and read its text, for the read itself.
+
+    :param element: A resolved element, handed over by a page accessor - which
+        re-resolves its locator on every access, as ``PageFactory``'s proxies
+        did.
+    :returns: The element's text.  Both call sites discard it, exactly as the
+        two Java bodies discard the locals they bind it to; it is returned
+        rather than swallowed so that this function reads as the value-
+        producing expression it ports and stays usable if a later step needs
+        the value.
+
+    The ``getText()`` half of ``Sales.java:72`` and ``:91``.  Those two reads
+    are the *only* way their steps can fail - neither body compares anything -
+    so the read has to happen at its own position in the body even now that its
+    value feeds nothing: a missing kanban heading or notification area raises
+    ``NoSuchElementException`` here, which is the failure the Java step had, and
+    dropping the read would turn two steps that can fail into two that cannot.
+
+    Reading through this named call is what keeps that intent legible once the
+    prints of ``:74-75`` and ``:93-94`` are gone (module docstring).  The
+    alternatives both read as mistakes: a local assigned and never used is what
+    the Java bodies have and what any reader would delete, and a bare
+    ``page.name_check.text`` statement gives no sign that the dereference is
+    the point.
+    """
+    return element.text
 
 
 @step("User click on the sales dashboard")
 def user_click_on_the_sales_dashboard(context) -> None:
-    """Open the Sales module from the Odoo apps dashboard.
-
-    The port of ``Sales.java:19-23``, whose whole body is two statements:
-
-    * ``:21`` clicks the ``Sales`` entry, the page's one partial-link-text
-      locator,
-    * ``:22`` waits up to 4 seconds for that same element to become visible.
-
-    :param context: behave's ``Context``; supplies the session.
-    :returns: ``None``.
-
-    The order is the source's and stays that way - the click first, the wait
-    second - so what is waited on is an element the click has already acted
-    upon.  Both statements name the same Java field, so both re-resolve the
-    locator here, one lookup each.
-    """
     page = _page(context)
 
     page.sales_partial.click()
@@ -222,10 +268,9 @@ def user_click_on_the_sales_dashboard(context) -> None:
 def user_click_customers_button(context) -> None:
     """Open the Customers list and check the page title it produces.
 
-    The port of ``Sales.java:25-38``: a click, a wait, two locals, two lines of
-    standard output and the module's one check - which, exactly as in Java,
-    weighs a constant against a doubly prefixed live title under names that are
-    the wrong way round.
+    The port of ``Sales.java:25-38``: a click, a wait, two locals and the
+    module's one check - which, exactly as in Java, weighs a constant against a
+    doubly prefixed live title under names that are the wrong way round.
 
     * ``:28`` clicks the Customers menu entry and ``:29`` waits 4 seconds on
       it,
@@ -233,6 +278,8 @@ def user_click_customers_button(context) -> None:
     * ``:32`` binds ``"Customers - "`` followed by the browser's own title to
       ``expectedTitle``,
     * ``:34-35`` write both out, the second under the label ``expected = ``,
+      and are the one part of the body this port does not reproduce; the module
+      docstring records why,
     * ``:37`` compares them with the JUnit helper, whose arguments are the
       message, ``expectedTitle`` and ``actualTitle`` in that order.
 
@@ -255,44 +302,24 @@ def user_click_customers_button(context) -> None:
     actual_title = "Customers - Odoo"
     expected_title = "Customers - " + context.driver.title
 
-    # Sales.java:34-35. The second label reads "expected = ", not
-    # "expectedTitle = "; the asymmetry is in the source.
-    print(f"actualTitle = {actual_title}")
-    print(f"expected = {expected_title}")
+    # Sales.java:34-35 print both strings - the second under the label
+    # "expected = ", an asymmetry of the source - and this port writes neither.
+    # The live browser title is data read from the system under test, and every
+    # worker stdout line is relayed into the parent logger and the Jenkins
+    # console, so each run left that title in durable worker and CI logs
+    # (CWE-532/359, finding F04). The statements are removed rather than
+    # stripped of their values, because the relay carries anything on stdout
+    # and a fixed label would add a CI log line that diagnoses nothing. No
+    # parity is lost: diagnostic stdout is in neither AAP 0.1.2's frozen list
+    # nor AAP 0.4.1's per-step enumeration (module docstring). Both locals stay
+    # - :37 below compares them, with the source's inverted names and doubled
+    # prefix intact.
 
-    # Sales.java:37. Operand order carried over from the JUnit call's
-    # (message, expectedTitle, actualTitle), and the message reproduced without
-    # the trailing space its Login and Logout counterparts carry.
     assert expected_title == actual_title, "The title is not same as the expected!"
 
 
 @step("User can create the customer")
 def user_can_create_the_customer(context) -> None:
-    """Fill the new-customer form, creating a new state along the way.
-
-    The port of ``Sales.java:40-52``, ten statements whose order matters
-    because each one opens what the next one needs:
-
-    * ``:42`` clicks the kanban ``Create`` button and ``:43`` waits 4 seconds
-      on it,
-    * ``:44`` types ``"Lucas"`` into the customer name,
-    * ``:45`` types ``"1 boulevard auguste rodin 75000"`` into the address,
-    * ``:46`` clicks the state autocomplete and ``:47`` its
-      ``Create and Edit...`` entry, which opens the state sub-form,
-    * ``:48`` types ``"Albania"`` as the state name and ``:49`` ``"78"`` as its
-      code,
-    * ``:50`` clicks the sub-form's country field and ``:51`` the country
-      suggestion it offers.
-
-    :param context: behave's ``Context``; supplies the session.
-    :returns: ``None``.
-
-    Four literal sends and no key among them - this class's one key send
-    belongs to :func:`user_can_find_his_name_from_search_bar`.  The wait at
-    ``:43`` is the only one the source has here: the eight statements after it
-    run unguarded in Java, with nothing but the session's ten-second implicit
-    wait (``Driver.java:34``) between them, and they run unguarded here.
-    """
     page = _page(context)
 
     page.create_button.click()
@@ -309,25 +336,6 @@ def user_can_create_the_customer(context) -> None:
 
 @step("User can save the customer")
 def user_can_save_the_customer(context) -> None:
-    """Save the state sub-form, save the customer, and return to the list.
-
-    The port of ``Sales.java:54-63``: the click-then-wait pair three times
-    over, on three different elements and never in the other order.
-
-    * ``:56-57`` the state sub-form's save button,
-    * ``:58-59`` the customer form's save button,
-    * ``:60-61`` the Customers menu entry, which lands the browser back on the
-      list that :func:`user_can_find_his_name_from_search_bar` then searches.
-
-    :param context: behave's ``Context``; supplies the session.
-    :returns: ``None``.
-
-    The third pair repeats the pair of :func:`user_click_customers_button` on
-    the same locator, minus that step's title check - so the two functions
-    share a locator and nothing else, and neither delegates to the other.  Six
-    statements, six lookups: each Java field reference resolves again, here as
-    there.
-    """
     page = _page(context)
 
     page.save_button.click()
@@ -353,9 +361,14 @@ def user_can_find_his_name_from_search_bar(context, name) -> None:
     * ``:69`` waits 4 seconds on the search bar.
     * ``:71`` binds the literal ``"Lucas"`` to ``actualName`` - a constant even
       under the outline, whose single row happens to supply that same value.
-    * ``:72`` reads the kanban heading's text into ``expectedName``.
-    * ``:74-75`` write both to standard output, and the body ends there.  No
-      comparison is made; the module docstring records why none is added.
+      The literal is bound here at that same position, ahead of the read that
+      follows it, and consumed by nothing, because nothing in the Java body
+      consumes it either.
+    * ``:72`` reads the kanban heading's text, which **is** reproduced, through
+      :func:`_read_element_text`: no comparison is made here, so that read is
+      the step's only failure mode besides the wait.
+    * ``:74-75`` write both values to standard output, and the body ends there.
+      Neither line is reproduced; the module docstring records why.
 
     :param context: behave's ``Context``; supplies the session.
     :param name: The customer name to search for, taken from the phrase.
@@ -377,39 +390,34 @@ def user_can_find_his_name_from_search_bar(context, name) -> None:
     press_keys(page.search_bar, "ENTER", text=name)
     wait_visible_element(page.SEARCH_BAR, 4)
 
-    # Sales.java:71-72. Both locals go to standard output below and are never
-    # compared with one another - the source's behaviour, not an omission of
-    # this port.
-    actual_name = "Lucas"
-    expected_name = page.name_check.text
+    # Sales.java:71, actualName = "Lucas", bound at its own position and read
+    # by nothing. AAP 0.4.1's per-module obligation names "the same hard-coded
+    # literals and expected values", so the literal stays even though the
+    # print that was its only reader does not: no comparison exists in
+    # Sales.java:66-77 and this port adds none. The discard target is what
+    # makes the non-consumption deliberate rather than accidental; a named
+    # local would be a pyflakes F841 and this module carries none.
+    _ = "Lucas"
 
-    # Sales.java:74-75.
-    print(f"actualName = {actual_name}")
-    print(f"expectedName = {expected_name}")
+    # Sales.java:72. The read stays exactly where it was, because it is this
+    # step's only failure mode besides the wait: nothing here compares
+    # anything, so a missing heading raising NoSuchElementException is all that
+    # can fail, and the read survives the print's removal for that reason.
+    _read_element_text(page.name_check)
+
+    # Sales.java:74-75 print the two strings this body builds, and neither line
+    # is written here: one of them is a customer's name read live from the
+    # kanban heading, and the worker's stdout is relayed into the parent logger
+    # and the Jenkins console, so printing it put PII into durable worker and
+    # CI logs (CWE-532/359, finding F04). Removed outright rather than made
+    # value-free - the relay carries anything on stdout - and no parity is
+    # lost: diagnostic stdout is in neither AAP 0.1.2's frozen list nor AAP
+    # 0.4.1's per-step enumeration (module docstring). Only the two writes go;
+    # both values they wrote are still built above.
 
 
 @step("User can create new customer")
 def user_can_create_new_customer(context) -> None:
-    """Open a blank new-customer form and try to save it unfilled.
-
-    The port of ``Sales.java:80-85``, the one definition the reference declares
-    with ``@And``:
-
-    * ``:82`` clicks the kanban ``Create`` button and ``:83`` waits 4 seconds
-      on it,
-    * ``:84`` clicks the form's save button on an untouched form, which is what
-      provokes the validation notice :func:`user_can_get_the_error` reads next.
-
-    :param context: behave's ``Context``; supplies the session.
-    :returns: ``None``.
-
-    ``:84`` is the class's only click with no wait after it, and the step ends
-    on it; the session's ten-second implicit wait (``Driver.java:34``) is all
-    that stands between it and the next step's read.  The first two statements
-    repeat those of :func:`user_can_create_the_customer` on the same locator,
-    and are written out again rather than shared, because that is how the two
-    Java bodies are written.
-    """
     page = _page(context)
 
     page.create_button.click()
@@ -425,9 +433,15 @@ def user_can_get_the_error(context) -> None:
     second that compares nothing:
 
     * ``:90`` binds the literal ``"The following fields are invalid:"`` -
-      trailing colon included - to ``actualWarning``,
-    * ``:91`` reads the notification area's text into ``expectedWarning``,
-    * ``:93-94`` write both to standard output, and the body ends.
+      trailing colon included - to ``actualWarning``.  The literal is bound
+      here at that same position, ahead of the read that follows it, and
+      consumed by nothing, because nothing in the Java body consumes it
+      either,
+    * ``:91`` reads the notification area's text, reproduced through
+      :func:`_read_element_text` because that read is the whole of what this
+      step can fail on,
+    * ``:93-94`` write both values to standard output, and the body ends.
+      Neither line is reproduced; the module docstring records why.
 
     :param context: behave's ``Context``; supplies the session.
     :returns: ``None``.
@@ -435,15 +449,32 @@ def user_can_get_the_error(context) -> None:
     No click, no wait, no navigation and no comparison: the read at ``:91`` is
     the only thing this step does to the browser and the only way it can fail.
     Whatever the notification area actually says - the expected sentence, some
-    other Odoo notice, or nothing at all - this step passes, because the two
-    strings it builds are never weighed against each other.
+    other Odoo notice, or nothing at all - this step passes, because it weighs
+    nothing against anything.
     """
     page = _page(context)
 
-    # Sales.java:90-91. Computed, written out, never compared - as in Java.
-    actual_warning = "The following fields are invalid:"
-    expected_warning = page.warning.text
+    # Sales.java:90, actualWarning = "The following fields are invalid:", the
+    # first statement of the Java body and so bound here ahead of the read of
+    # :91, in the source's statement order. AAP 0.4.1 enumerates "the same
+    # hard-coded literals and expected values" per module and this is one of
+    # them; nothing consumes it because Sales.java:87-96 weighs it against
+    # nothing, and the discard target says so where a named local would only be
+    # a pyflakes F841. The trailing colon is the source's and is part of the
+    # literal.
+    _ = "The following fields are invalid:"
 
-    # Sales.java:93-94.
-    print(f"actualWarning = {actual_warning}")
-    print(f"expectedWarning = {expected_warning}")
+    # Sales.java:91. The read stays: it is the only thing this step does to the
+    # browser and its only way to fail, which is why it survives the print that
+    # consumed it.
+    _read_element_text(page.warning)
+
+    # Sales.java:93-94 print both strings this body builds, and neither line is
+    # written here: the notification text is read live from the system under
+    # test, and the worker's stdout is relayed into the parent logger and the
+    # Jenkins console, so each run left that value in durable worker and CI
+    # logs (CWE-532/359, finding F04). Removed outright rather than made
+    # value-free, because the relay carries anything on stdout, and no parity
+    # is lost - diagnostic stdout is in neither AAP 0.1.2's frozen list nor AAP
+    # 0.4.1's per-step enumeration (module docstring). As in the search step,
+    # only the writing goes; both values it wrote are still built above.

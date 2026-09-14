@@ -1,114 +1,48 @@
 r"""Per-method Java-parity tests for ``features/steps/notes_steps.py``.
 
-Java anchor
------------
-``src/main/java/com/testinium/step_definitions/Notes.java`` at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240``, with its two page objects
-``pages/NotesP.java`` and ``pages/InventoryP.java`` and its feature file
-``src/main/resources/features/Notes.feature``.  All four are **REFERENCE** under
-AAP 0.2.1 and are never modified; every expectation in this module is
-transcribed from them into a module constant and carries the Java line it came
-from in a comment, so the suite asserts the source without reading
-``/opt/reference`` at run time and therefore runs on any host.
+Authority: ``step_definitions/Notes.java`` at pinned revision
+``47e9d697e4a9a85da889f94a846fdf47af28a240`` - eleven methods at ``:21-88`` -
+with its page objects ``pages/NotesP.java`` and ``pages/InventoryP.java`` and
+its feature file ``features/Notes.feature``, all four REFERENCE under AAP 0.2.1
+and never modified.  Every expectation is transcribed from them into a module
+constant carrying the Java line it came from, so the suite asserts the source
+without reading ``/opt/reference`` at run time.  ``Notes.feature:1`` is
+mis-titled ``Feature: Testinium app login feature`` although the feature creates
+notes - a quirk AAP 0.4.1 records and AAP 0.8 preserves, so it is asserted as
+written rather than corrected.
 
-What this module discharges
----------------------------
-The per-module obligation of AAP 0.4.1: *"for each of the ten step modules,
-``tests/test_steps_<area>.py`` drives the module against a stubbed driver and
-asserts, for every step method in the corresponding Java class, that the port
-performs the same observable operations in the same order ... A step method with
-no corresponding assertion in its module's test is a gap, and the module test
-enumerates the Java class's methods so an omission fails rather than passes
-silently."*  For ``Notes.java`` that is 11 methods, three 20-second wait sites
-(``Notes.java:19`` builds the one ``WebDriverWait``), exactly one fixed
-two-second delay, two action-chain pauses, three assertions and two page
-objects.
+AAP 0.4.1's per-module obligation - the same observable operations in the same
+order for every method of the Java class, those methods enumerated so an
+omission fails rather than passing silently - is for ``Notes.java`` eleven
+methods, three 20-second wait sites (``:29``, ``:46``, ``:71``, all through the
+``WebDriverWait`` of ``:19``), one two-second delay (``:23``), two action-chain
+pauses (``:79``), three assertions (``:53``, ``:73``, ``:87``) and two page
+objects (``:16``, ``:17``).  :data:`CENSUS` is that inventory, transcribed and
+never populated at run time: its size and consistency are pinned, every row
+must name a parity test that exists here, and the ``@step`` functions AST-parsed
+out of the step module are compared against it in order.
 
-Fail-closed, in three independent directions
---------------------------------------------
-:data:`CENSUS` is the transcribed inventory and nothing populates it at run
-time:
+The headline risk is two identically-selected save buttons.
+``NotesP.java:32-33`` and ``InventoryP.java:23-24`` declare the same XPath, and
+``Notes.java:65`` is where a Notes step reaches across into ``inventoryP`` - a
+copy-paste slip AAP 0.2.2 preserves - so a driver log alone cannot say which
+page object a click came from.  :data:`PageAccess` and :func:`page_operations`
+each answer it independently, at run time and from the syntax tree.
 
-* :func:`test_census_enumerates_exactly_the_eleven_java_methods` pins its size
-  and its internal consistency;
-* :func:`test_every_census_phrase_is_claimed_by_a_test_in_this_module` proves
-  each phrase names a parity test that really exists here, so a method cannot be
-  quietly left unasserted;
-* :func:`test_step_module_declares_exactly_the_census_definitions` compares the
-  ``@step``-decorated functions **AST-parsed out of the step module** against
-  the census, in source order, so a twelfth definition, a renamed function or an
-  unported method fails rather than passing silently.
+Bodies are reached through the registry, never by importing the step module:
+each test resolves a phrase with ``resolve_step`` against the session-wide load
+``tests/conftest.py`` performs, and runs it on the ``fake_context`` /
+``stub_driver`` pair.  ``match.func.__globals__`` is that module's namespace,
+where ``monkeypatch`` replaces and restores four seams - the fixed delay, the
+explicit wait, the action chain and the two page binders - each with its reason
+stated at its own recorder below.
 
-The headline risk: two identically-selected save buttons
---------------------------------------------------------
-``NotesP.java:32-33`` and ``InventoryP.java:23-24`` declare the **same** XPath,
-``//button[@class='btn btn-primary btn-sm o_form_button_save']``.  A driver log
-therefore cannot say which page object a save-button click came from, and
-``Notes.java:65`` is precisely the line where the source reaches across from a
-Notes step into ``inventoryP`` - a copy-paste slip in the original that AAP
-0.2.2 preserves.  Substituting either page object for the other would pass every
-runtime check and still misrepresent the source, so this module proves the
-distinction two ways, and both would break if the two sites were swapped:
-
-* **identity-aware page spies** - the step module's ``_notes`` and
-  ``_inventory`` binders are replaced by recorders that call the real binder and
-  report the class of the object it returned, together with every attribute read
-  off it, in order (:data:`PageAccess`);
-* **AST receiver tracing** - each body's ordered
-  ``(receiver_binder, attribute, operation)`` triples, with the receiver
-  variable traced back to its ``_notes(context)`` / ``_inventory(context)``
-  assignment (:func:`page_operations`).
-
-:func:`test_notes_and_inventory_save_buttons_declare_the_same_xpath` states the
-value identity as a declared fact, so a reader can see why the log alone is
-insufficient.
-
-How a step body is reached
---------------------------
-Through the registry, never by importing the step module: ``tests/conftest.py``
-loads ``features/steps/`` once per session, and a second registration of a
-changed definition raises behave's ``AmbiguousStep``.  So every test resolves a
-phrase with the ``resolve_step`` fixture and runs it against the
-``fake_context`` / ``stub_driver`` pair.  ``match.func.__globals__`` *is* the
-step module's namespace, which is where the four seams are patched with
-``monkeypatch`` - always restored, so no patch outlives a test:
-
-=========================  ===============================================
-Seam                       Why it is replaced
-=========================  ===============================================
-``sleep``                  A real 2-second delay would be 2 seconds of test
-                           time; the recorder also timestamps the delay
-                           *into the driver's own log*, which is what makes
-                           "first in the body, before the click" assertable
-                           rather than merely countable.
-``wait_visible_element``   Pins the literal timeout ``20`` and the waited-on
-                           element.  Recovered tolerantly from ``*args`` and
-                           ``**kwargs`` because a sibling unit may change the
-                           helper's call *shape*; the timeout literal and the
-                           element identity are the parity claims, not the
-                           signature.  The helper takes a **locator** and
-                           resolves it inside its predicate on every poll, so
-                           it performs no lookup of its own - which is why the
-                           recorder also marks the wait *into the driver's own
-                           log*, where its position among the clicks and reads
-                           around it stays assertable.
-``action_chain``           The real ``ActionChains`` rejects a stub element -
-                           ``move_to_element`` raises
-                           ``AttributeError("move_to requires a WebElement")``
-                           - so a duck-typed recording builder stands in.
-``_notes`` / ``_inventory``  Optional identity spies, for the save-button
-                           distinction above.
-=========================  ===============================================
-
-Standing constraints
---------------------
-No network, no browser, no real driver, no real sleeping and nothing written
-into the repository's ``target/``.  ``selenium.webdriver.common.keys.Keys`` *is*
-imported here on purpose: ``Notes.java:35`` sends ``Keys.ENTER``, and asserting
-against the binding's own constant says what ``'\ue007'`` would only encode.
-The no-selenium rule the suite enforces binds ``features/steps/**``, which
+``Keys`` is imported here on purpose: ``Notes.java:35`` sends ``Keys.ENTER`` and
+asserting against selenium's own constant says what ``'\ue007'`` would only
+encode; the no-selenium rule binds ``features/steps/**``, which
 :func:`test_step_module_imports_both_pages_and_no_selenium` checks from this
-side of the boundary.
+side.  No network, no browser, no real driver, no real sleeping, and nothing
+written into the repository's ``target/``.
 """
 
 from __future__ import annotations
@@ -216,7 +150,7 @@ SHARED_SAVE_BUTTON_XPATH: Final[str] = (
     "//button[@class='btn btn-primary btn-sm o_form_button_save']"
 )
 
-#: ``NotesP.java``'s ten ``@FindBy`` declarations, transcribed as
+#: The ten ``@FindBy`` declarations of ``NotesP.java:14-42``, transcribed as
 #: ``{port constant name: (strategy, value)}`` in Java declaration order.  The
 #: strategies are Selenium's own ``By`` values: ``"xpath"`` for
 #: ``@FindBy(xpath = ...)`` and ``"partial link text"`` for
@@ -260,9 +194,11 @@ NEW_TABLE: Final[Locator] = NotesPage.NEW_TABLE
 TODAY_TABLE: Final[Locator] = NotesPage.TODAY_TABLE
 INVENTORY_SAVE_BTN: Final[Locator] = InventoryPage.SAVE_BTN
 
-# The eleven Gherkin phrases, spelled once each.  ``Notes.java``'s annotation
-# text is the contract - Cucumber-JVM matches on text alone - so these are the
-# strings a rename would have to change, and every test names one of them.
+# The eleven Gherkin phrases, spelled once each, from the annotations at
+# ``Notes.java:21``, ``:27``, ``:33``, ``:39``, ``:44``, ``:49``, ``:56``,
+# ``:61``, ``:69``, ``:76`` and ``:82``.  That annotation text is the contract -
+# Cucumber-JVM matches on text alone - so these are the strings a rename would
+# have to change, and every test names one of them.
 CLICK_NOTES_MODULE: Final[str] = "User clicks the Notes module"
 CLICK_CREATE_BUTTON: Final[str] = "User clicks create button in Notes module"
 ENTER_TAG_NAME: Final[str] = "User enters a tag name"
@@ -290,7 +226,9 @@ class Definition(NamedTuple):
     the test it claims fails too.
     """
 
-    #: Line of the ``@When``/``@Then`` annotation in ``Notes.java``.
+    #: Line of the ``@When``/``@Then`` annotation in ``Notes.java``, one of
+    #: ``:21``, ``:27``, ``:33``, ``:39``, ``:44``, ``:49``, ``:56``, ``:61``,
+    #: ``:69``, ``:76`` and ``:82``.
     java_line: int
 
     #: The annotation's text, which is the whole of Cucumber's matching key.
@@ -303,10 +241,11 @@ class Definition(NamedTuple):
     test: str
 
 
-#: The eleven definitions of ``Notes.java``, in source order.  Enumerated here
-#: rather than discovered, so the port is compared against the source instead of
-#: against itself; :func:`test_step_module_declares_exactly_the_census_definitions`
-#: is what closes the loop in the other direction.
+#: The eleven definitions of ``Notes.java:21-88``, in source order.  Enumerated
+#: here rather than discovered, so the port is compared against the source
+#: instead of against itself;
+#: :func:`test_step_module_declares_exactly_the_census_definitions` is what
+#: closes the loop in the other direction.
 CENSUS: Final[tuple[Definition, ...]] = (
     Definition(
         21,
@@ -661,7 +600,7 @@ def assert_nodes(phrase: str) -> tuple[ast.Assert, ...]:
 def local_assignments(phrase: str) -> Mapping[str, ast.expr]:
     """Map each simple local name in a body to the expression assigned to it.
 
-    Used to trace an assertion's operands: ``Assert.assertEquals(actualMessage,
+    Traces an assertion's operands: ``Assert.assertEquals(actualMessage,
     expecgedMessage)`` at ``Notes.java:53`` puts the page read **first** and the
     expected literal second, and that order is only visible by following the two
     locals back to their assignments.
@@ -728,12 +667,14 @@ TIME_MODULE_SEAM: Final[str] = "time"
 WAIT_SEAM: Final[str] = "wait_visible_element"
 CHAIN_SEAM: Final[str] = "action_chain"
 
-#: Keyword names the wait target may arrive under, if a sibling unit changes the
-#: helper's call shape.  Positional remains the form the port uses today.
-WAIT_TARGET_KEYWORDS: Final[tuple[str, ...]] = ("element", "target", "locator")
+#: The keyword name the wait's locator may arrive under: the parameter name of
+#: ``app/automation/waits.py``'s ``wait_visible_element(locator, timeout)``,
+#: which is the only keyword form that signature admits.  The three call sites
+#: pass both arguments positionally.
+WAIT_TARGET_KEYWORDS: Final[tuple[str, ...]] = ("locator",)
 
-#: Keyword names the timeout may arrive under, for the same reason.
-WAIT_TIMEOUT_KEYWORDS: Final[tuple[str, ...]] = ("timeout", "seconds")
+#: The keyword name the timeout may arrive under, for the same reason.
+WAIT_TIMEOUT_KEYWORDS: Final[tuple[str, ...]] = ("timeout",)
 
 #: Sentinel for "this argument was not supplied in any form".
 _MISSING: Final[Any] = object()
@@ -742,9 +683,16 @@ _MISSING: Final[Any] = object()
 def normalise_target(target: Any) -> Any:
     """Reduce a resolved element to the locator that produced it.
 
-    The stub driver's elements carry ``locator``, so a wait on an element and a
-    wait on a locator pair both become the same comparable value and the
-    assertions stay readable whichever shape the helper is called with.
+    For the action-chain recorder only.  ``Notes.java:79`` hands
+    ``clickAndHold`` and ``moveToElement`` the ``PageFactory`` **elements**
+    ``notesP.newTable`` and ``notesP.todayTable``, so the port's chain call site
+    passes resolved elements too; the stub driver's elements carry ``locator``,
+    which is what makes a chain operation comparable with the locator tuples the
+    rest of this module asserts on.
+
+    Explicit waits are a different contract and do not come through here:
+    ``interpret_wait_call`` requires the locator constant itself, because
+    ``visibility_of_element_located`` resolves the target inside the wait.
 
     :param target: An element, a locator pair, or anything else.
     :returns: ``target.locator`` when present, else *target* unchanged.
@@ -755,20 +703,23 @@ def normalise_target(target: Any) -> Any:
 class WaitCall(NamedTuple):
     """One recorded explicit-wait call.
 
-    Carries the raw arguments as well as the interpreted ones, so a failure
-    shows what the step module actually passed rather than only what this
-    module made of it.
+    Carries the arguments as received as well as the interpreted ones, so a
+    failure shows what the step module actually passed rather than only what
+    this module made of it.
     """
 
-    #: The waited-on element, reduced to its locator by :func:`normalise_target`.
+    #: The waited-on locator: the page class attribute itself, the very object
+    #: the call site passed, so an assertion on it can use ``is``.
     target: Any
+
+    #: The name of the page constant :attr:`target` is, as
+    #: ``"<PageClass>.<CONSTANT>"`` - the identity evidence in readable form,
+    #: and the one thing that separates ``NotesPage.SAVE_BTN`` from the
+    #: identically-selected ``InventoryPage.SAVE_BTN``.
+    constant: str
 
     #: The timeout, exactly as the call site supplied it.
     timeout: Any
-
-    #: The waited-on element as it arrived, un-normalised, so the recorder can
-    #: hand it back to the step body the way the real helper does.
-    raw_target: Any
 
     #: Positional arguments as received.
     args: tuple[Any, ...]
@@ -777,21 +728,58 @@ class WaitCall(NamedTuple):
     kwargs: Mapping[str, Any]
 
 
-def interpret_wait_call(args: Sequence[Any], kwargs: Mapping[str, Any]) -> WaitCall:
-    """Recover the waited-on element and the timeout from a call of any shape.
+def page_locator_constant(target: Any) -> str | None:
+    """Name the page locator constant *target* **is**, by identity.
 
-    Tolerant on purpose.  ``app/automation/waits.py`` is owned by another unit
-    and its call *shape* may change - element first and timeout second today,
-    conceivably keyword-supplied tomorrow - while the parity claims are the
-    literal timeout of ``Notes.java:19`` and the identity of the element waited
-    on.  So both are recovered from positional and keyword arguments alike, and
-    a call that carries neither fails loudly here rather than silently
-    recording ``None``.
+    ``BasePage`` builds :attr:`~app.pages.base_page.BasePage.LOCATORS` from its
+    subclass's own class body, so its values are the class attributes
+    themselves and ``is`` answers "did the call site pass the constant, or
+    something merely equal to it".  That distinction is load-bearing twice over
+    here: ``NotesP.java:32-33`` and ``InventoryP.java:23-24`` declare the same
+    XPath, so equality cannot tell the two save buttons apart, and a tuple
+    rebuilt at the call site would spell a selector the page objects already
+    own.
+
+    :param target: A wait target, as the step body passed it.
+    :returns: ``"<PageClass>.<CONSTANT>"``, or ``None`` when *target* is not one
+        of the two page classes' locator constants - which an element resolved
+        through a lower-case accessor never is.
+    """
+    for page in (NotesPage, InventoryPage):
+        for name, locator in page.LOCATORS.items():
+            if target is locator:
+                return f"{page.__name__}.{name}"
+
+    return None
+
+
+def interpret_wait_call(args: Sequence[Any], kwargs: Mapping[str, Any]) -> WaitCall:
+    """Recover the waited-on locator and the timeout from one wait call.
+
+    ``Notes.java:29``, ``:46`` and ``:71`` wait on
+    ``ExpectedConditions.visibilityOf`` applied to a ``PageFactory`` field
+    (``NotesP.java:11``), a proxy that re-located on every touch: the lookup
+    happened inside the predicate, once per poll, governed by the 20 seconds of
+    the ``WebDriverWait`` at ``Notes.java:19``.  ``app/automation/waits.py``'s
+    ``wait_visible_element`` reproduces that with
+    ``visibility_of_element_located``, which takes the **locator**, so the
+    target must be the page object's upper-case constant.  An element resolved
+    first - through a lower-case accessor - would be looked up before the wait
+    exists, under the session's 10-second implicit wait rather than the call
+    site's 20 seconds, and is therefore rejected here rather than reduced to a
+    locator.
+
+    Both arguments are read from the positional and keyword forms that
+    ``wait_visible_element(locator, timeout)`` admits, so a call carrying
+    neither fails loudly instead of silently recording ``None``.
 
     :param args: Positional arguments the step module passed.
     :param kwargs: Keyword arguments the step module passed.
-    :returns: The interpreted call.
-    :raises AssertionError: If no target or no timeout can be recovered.
+    :returns: The interpreted call, with the target object left exactly as it
+        arrived so that identity survives into the assertions.
+    :raises AssertionError: If no target or no timeout can be recovered, or if
+        the target is not a locator constant of ``NotesPage`` or
+        ``InventoryPage``.
     """
     positional = list(args)
     target = positional.pop(0) if positional else _MISSING
@@ -819,10 +807,20 @@ def interpret_wait_call(args: Sequence[Any], kwargs: Mapping[str, Any]) -> WaitC
         f"{WAIT_TIMEOUT_SECONDS}"
     )
 
+    constant = page_locator_constant(target)
+
+    assert constant is not None, (
+        f"the wait target {target!r} is not a locator constant of NotesPage or "
+        f"InventoryPage. Notes.java:29,46,71 wait on a locator that "
+        f"visibility_of_element_located resolves inside the wait, so the call "
+        f"site passes the upper-case constant itself and never an element it "
+        f"resolved first"
+    )
+
     return WaitCall(
-        target=normalise_target(target),
+        target=target,
+        constant=constant,
         timeout=timeout,
-        raw_target=target,
         args=tuple(args),
         kwargs=dict(kwargs),
     )
@@ -1061,8 +1059,6 @@ class NotesStepProbe:
         monkeypatch.setitem(self.namespace, WAIT_SEAM, self._record_wait)
         monkeypatch.setitem(self.namespace, CHAIN_SEAM, self._build_chain)
 
-    # -- the seams --------------------------------------------------------- #
-
     def _record_sleep(self, seconds: float) -> None:
         """Record a fixed delay in the shared timeline instead of sleeping.
 
@@ -1073,18 +1069,22 @@ class NotesStepProbe:
         self.driver.calls.append((SLEEP_MARKER, (seconds,)))
 
     def _record_wait(self, *args: Any, **kwargs: Any) -> Any:
-        """Record an explicit wait and return the element, as the helper does.
+        """Record an explicit wait without performing it.
+
+        The real ``wait_visible_element`` returns the element
+        ``visibility_of_element_located`` resolved; the locator is returned here
+        instead, which is enough because none of the three call sites
+        (``Notes.java:29``, ``:46``, ``:71``) uses the return value - each
+        reaches its element through the page accessor on the following line.
 
         :param args: Positional arguments from the call site.
         :param kwargs: Keyword arguments from the call site.
-        :returns: The waited-on element, un-normalised, so the body may keep
-            using it - which ``app/automation/waits.py`` also does, since
-            ``visibilityOf`` resolves to the element it was given.
+        :returns: The locator the wait was given.
         """
         call = interpret_wait_call(args, kwargs)
         self.waits.append(call)
         self.driver.calls.append((WAIT_MARKER, (call.target, call.timeout)))
-        return call.raw_target
+        return call.target
 
     def _build_chain(self, *args: Any, **kwargs: Any) -> RecordingActionChain:
         """Return a fresh recording builder and note its construction.
@@ -1117,8 +1117,6 @@ class NotesStepProbe:
             return PageSpy(original(context), self.page_accesses)
 
         return bind
-
-    # -- driving a body ---------------------------------------------------- #
 
     def run(self, phrase: str, *, spy_pages: bool = False) -> None:
         """Run the definition matching *phrase* against the stub driver.
@@ -1158,8 +1156,6 @@ class NotesStepProbe:
         self.chains.clear()
         self.page_accesses.clear()
         self.binder_calls.clear()
-
-    # -- reading the result ------------------------------------------------ #
 
     @property
     def timeline(self) -> tuple[Call, ...]:
@@ -1278,8 +1274,8 @@ def test_step_module_declares_exactly_the_census_definitions() -> None:
     Parsed out of ``features/steps/notes_steps.py`` rather than imported, and
     compared both ways: an extra definition, a missing one, a renamed function
     and a reordered file all fail.  Source order is asserted too, because the
-    port keeps ``Notes.java``'s method order and a reader comparing the two
-    files side by side depends on it.
+    port keeps the method order of ``Notes.java:21-88`` and a reader comparing
+    the two files side by side depends on it.
     """
     declared = step_function_nodes()
 
@@ -1298,7 +1294,8 @@ def test_every_census_phrase_resolves_to_one_definition_in_notes_steps(
     one definition, so calling it is itself the uniqueness assertion - the
     ambiguity risk AAP deviation 7 accepts in exchange for keyword-agnostic
     matching.  The pattern is compared with the phrase as well, which is what
-    holds the registered text to ``Notes.java``'s annotations.
+    holds the registered text to the eight ``@When`` and three ``@Then``
+    annotations of ``Notes.java:21-82``.
     """
     for definition in CENSUS:
         match = resolve_step(definition.phrase)
@@ -1490,6 +1487,8 @@ def test_definition_02_waits_on_then_clicks_the_kanban_create_button(
     assert [(wait.target, wait.timeout) for wait in notes_probe.waits] == [
         (CREATING_NOTES, WAIT_TIMEOUT_SECONDS)
     ]
+    assert notes_probe.waits[0].target is NotesPage.CREATING_NOTES
+    assert notes_probe.waits[0].constant == "NotesPage.CREATING_NOTES"
     assert notes_probe.sleeps == []
     assert page_operations(CLICK_CREATE_BUTTON) == (
         PageOperation(NOTES_BINDER, "CREATING_NOTES", None),
@@ -1579,6 +1578,10 @@ def test_definition_05_waits_on_and_clicks_the_notes_save_button(
     assert [(wait.target, wait.timeout) for wait in notes_probe.waits] == [
         (SAVE_BTN, WAIT_TIMEOUT_SECONDS)
     ]
+    # The equality above cannot tell the two save buttons apart - the XPaths are
+    # identical - so the wait target is pinned by identity as well.
+    assert notes_probe.waits[0].target is NotesPage.SAVE_BTN
+    assert notes_probe.waits[0].constant == "NotesPage.SAVE_BTN"
     assert notes_probe.binder_calls == [NOTES_BINDER]
 
     # Both reads are off the **Notes** page: the first is the locator constant
@@ -1717,6 +1720,8 @@ def test_definition_09_waits_clicks_then_asserts_the_notes_menu_is_displayed(
     assert [(wait.target, wait.timeout) for wait in notes_probe.waits] == [
         (NOTES_MODULE, WAIT_TIMEOUT_SECONDS)
     ]
+    assert notes_probe.waits[0].target is NotesPage.NOTES_MODULE
+    assert notes_probe.waits[0].constant == "NotesPage.NOTES_MODULE"
     assert notes_probe.sleeps == []
     assert page_operations(SEE_NOTES_LIST) == (
         PageOperation(NOTES_BINDER, "NOTES_MODULE", None),
@@ -1820,6 +1825,11 @@ def test_the_three_wait_sites_are_the_java_ones_at_timeout_twenty(
     ``saveBtn`` and ``:71`` on ``notesModule``.  A fourth wait anywhere, a
     missing one, or a retimed one fails here even if every individual
     definition's own sequence were somehow still satisfied.
+
+    Every one of the three is a locator constant of ``NotesPage``, asserted by
+    the constant's name and therefore by identity: the three call sites pass the
+    upper-case attribute, which is the target
+    ``visibility_of_element_located`` resolves inside the wait.
     """
     notes_probe.driver.set_text(CREATED_MESSAGE, CREATED_MESSAGE_LITERAL)
     notes_probe.driver.set_text(TODAY_TABLE, TODAY_TABLE_LITERAL)
@@ -1831,6 +1841,11 @@ def test_the_three_wait_sites_are_the_java_ones_at_timeout_twenty(
         CREATING_NOTES,
         SAVE_BTN,
         NOTES_MODULE,
+    ]
+    assert [wait.constant for wait in notes_probe.waits] == [
+        "NotesPage.CREATING_NOTES",
+        "NotesPage.SAVE_BTN",
+        "NotesPage.NOTES_MODULE",
     ]
     assert {wait.timeout for wait in notes_probe.waits} == {WAIT_TIMEOUT_SECONDS}
 
@@ -1935,10 +1950,12 @@ def test_walking_every_definition_prints_nothing(
 ) -> None:
     """``Notes.java`` writes nothing to standard output, and neither does the port.
 
-    Unlike ``Crm.java`` (eight ``System.out.println`` calls) and ``Sales.java``
-    (six), this class prints nothing at all, so a diagnostic print added to any
-    of the eleven bodies would be a behavioural addition rather than a
-    convenience.  Asserted over a full walk of the class.
+    Unlike ``Crm.java`` (eight ``System.out.println`` calls, at ``:51-52``,
+    ``:63-64``, ``:97-98`` and ``:126-127``) and ``Sales.java`` (six, at
+    ``:34-35``, ``:74-75`` and ``:93-94``), this class prints nothing at all
+    across ``Notes.java:21-88``, so a diagnostic print added to any of the
+    eleven bodies would be a behavioural addition rather than a convenience.
+    Asserted over a full walk of the class.
     """
     notes_probe.driver.set_text(CREATED_MESSAGE, CREATED_MESSAGE_LITERAL)
     notes_probe.driver.set_text(TODAY_TABLE, TODAY_TABLE_LITERAL)
@@ -1960,7 +1977,8 @@ def test_walking_every_definition_prints_nothing(
 # one parametrized test drive two text comparisons and a visibility check.
 type AssertionCase = tuple[str, int, Callable[[Any, Any], None], Any, Any]
 
-#: The three assertion sites of ``Notes.java``, in source order.
+#: The three assertion sites of ``Notes.java`` - ``:53``, ``:73`` and ``:87`` -
+#: in source order.
 ASSERTION_CASES: Final[tuple[AssertionCase, ...]] = (
     (
         SEE_CREATED_NOTES,
@@ -2347,14 +2365,21 @@ def test_second_scenario_runs_the_new_description_definition_twice(
         (SAVE_BTN, WAIT_TIMEOUT_SECONDS),
         (NOTES_MODULE, WAIT_TIMEOUT_SECONDS),
     ]
+    # Both waits of this scenario are on the Notes page's constants, which the
+    # tuple comparison above cannot establish for the save button.
+    assert [wait.constant for wait in notes_probe.waits] == [
+        "NotesPage.SAVE_BTN",
+        "NotesPage.NOTES_MODULE",
+    ]
 
 
 # =========================================================================== #
 # Section 12 - the seam helpers this module relies on
 #
-# Two helpers exist to survive a change another unit may make to the automation
-# layer's call shapes.  They are tested directly, so neither is an unexercised
-# branch that could quietly stop recording what this module asserts on.
+# The delay seam is found by shape and the wait seam enforces the locator
+# contract of Notes.java:29,46,71.  Both are tested directly, so neither is an
+# unexercised branch that could quietly stop recording - or stop rejecting -
+# what this module asserts on.
 # =========================================================================== #
 
 
@@ -2363,11 +2388,11 @@ def test_sleep_seam_is_patched_in_the_shape_the_step_module_uses(
 ) -> None:
     """The fixed-delay seam is found as a callable in the module namespace.
 
-    ``features/steps/notes_steps.py`` does ``from time import sleep``
-    (``Notes.java:23``'s call site), so that is the shape expected today; the
-    helper reports which shape it patched, and this test pins it, so a silent
-    switch to ``import time`` shows up as a changed seam rather than as a real
-    two-second delay inside the unit suite.
+    ``features/steps/notes_steps.py`` does ``from time import sleep`` for
+    ``Notes.java:23``'s 2000 ms delay, so that is the shape the port uses; the
+    helper reports which shape it patched, and this test pins it, so a switch to
+    ``import time`` shows up as a changed seam rather than as a real two-second
+    delay inside the unit suite.
     """
     assert notes_probe.sleep_seam_shape == SLEEP_SEAM
 
@@ -2414,25 +2439,26 @@ def test_sleep_recorder_installs_against_either_import_shape(
     [
         ((NotesPage.SAVE_BTN, WAIT_TIMEOUT_SECONDS), {}),
         ((NotesPage.SAVE_BTN,), {"timeout": WAIT_TIMEOUT_SECONDS}),
-        ((), {"element": NotesPage.SAVE_BTN, "timeout": WAIT_TIMEOUT_SECONDS}),
-        ((), {"locator": NotesPage.SAVE_BTN, "seconds": WAIT_TIMEOUT_SECONDS}),
+        ((), {"locator": NotesPage.SAVE_BTN, "timeout": WAIT_TIMEOUT_SECONDS}),
     ],
-    ids=["positional", "keyword-timeout", "keyword-element", "keyword-aliases"],
+    ids=["positional", "keyword-timeout", "keyword-locator"],
 )
 def test_wait_interpretation_recovers_target_and_timeout_from_any_shape(
     args: tuple[Any, ...], kwargs: Mapping[str, Any]
 ) -> None:
-    """The wait recorder reads the timeout whatever shape the helper is called in.
+    """The recorder reads a wait in each shape its signature admits.
 
-    ``app/automation/waits.py`` belongs to another unit and its signature may
-    change; the parity claims are ``Notes.java:19``'s literal 20 and the
-    identity of the element waited on, so both are recovered from positional and
-    keyword forms alike.  That tolerance is load-bearing, so it is tested
-    rather than assumed.
+    ``wait_visible_element(locator, timeout)`` takes two parameters, either of
+    which the caller may name, so those three forms are the whole space and the
+    recorder must read the same call out of each: the locator constant and
+    ``Notes.java:19``'s literal 20.  The target arrives as the page class
+    attribute in every form, which is what ``is`` checks below - the shape of
+    the *arguments* may vary, the shape of the *target* may not.
     """
     call = interpret_wait_call(args, kwargs)
 
-    assert call.target == NotesPage.SAVE_BTN
+    assert call.target is NotesPage.SAVE_BTN
+    assert call.constant == "NotesPage.SAVE_BTN"
     assert call.timeout == WAIT_TIMEOUT_SECONDS
 
 
@@ -2450,15 +2476,53 @@ def test_wait_interpretation_rejects_a_call_it_cannot_read() -> None:
         interpret_wait_call((NotesPage.SAVE_BTN,), {})
 
 
+def test_wait_interpretation_rejects_a_target_that_is_not_a_page_constant(
+    stub_driver: Any,
+) -> None:
+    """A wait target that is not the page constant itself fails the recorder.
+
+    The locator contract of ``Notes.java:29,46,71``, enforced rather than
+    described.  Three targets an equality comparison would have accepted are
+    each rejected:
+
+    * an element resolved through a lower-case accessor, which would have moved
+      the lookup out of ``visibility_of_element_located`` and under the
+      session's implicit wait;
+    * a tuple rebuilt at the call site with the same two strings, which would
+      spell a selector ``NotesP.java`` already owns;
+    * ``InventoryPage.SAVE_BTN``, whose XPath is identical to
+      ``NotesPage.SAVE_BTN``'s (``InventoryP.java:23-24`` against
+      ``NotesP.java:32-33``): it is a page constant, and the step module binds
+      that page object (``Notes.java:16``), so the recorder reads it - but it is
+      reported under its own name and never as ``NotesPage.SAVE_BTN``.
+    """
+    element = stub_driver.find_element(*NotesPage.SAVE_BTN)
+    rebuilt = tuple([*NotesPage.SAVE_BTN])
+
+    with pytest.raises(AssertionError, match="not a locator constant"):
+        interpret_wait_call((element, WAIT_TIMEOUT_SECONDS), {})
+
+    with pytest.raises(AssertionError, match="not a locator constant"):
+        interpret_wait_call((rebuilt, WAIT_TIMEOUT_SECONDS), {})
+
+    assert rebuilt == NotesPage.SAVE_BTN
+    assert (
+        interpret_wait_call((InventoryPage.SAVE_BTN, WAIT_TIMEOUT_SECONDS), {}).constant
+        == "InventoryPage.SAVE_BTN"
+    )
+
+
 def test_target_normalisation_reduces_an_element_to_its_locator(
     stub_driver: Any,
 ) -> None:
     """:func:`normalise_target` turns a resolved element back into its locator.
 
-    Both the wait recorder and the action-chain recorder compare against locator
-    tuples, and what a step body hands them is an element the page object just
-    resolved.  This is the one-line bridge between the two, checked on a real
-    stub element and on a pair that is already a locator.
+    The action-chain recorder compares against locator tuples while
+    ``Notes.java:79`` hands ``clickAndHold`` and ``moveToElement`` the elements
+    themselves, so this one-line bridge is what makes the chain's operands
+    assertable.  Checked on a real stub element and on a pair that is already a
+    locator.  Explicit waits do not pass through here: their target must be the
+    constant, which :func:`interpret_wait_call` requires.
     """
     element = stub_driver.find_element(*NotesPage.NEW_TABLE)
 

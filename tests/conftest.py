@@ -1,104 +1,42 @@
 """Shared fixtures for the unit suite of the Testinium-QA Python port.
 
-This module is the foundation of ``tests/``: every other test module in the
-suite reaches its collaborators through the fixtures defined here, and it
-contains **no test functions of its own**.  A failure here is a failure of the
-whole suite, which is why the surface below is explicit, side-effect-free and
-built entirely out of the seams the production modules already publish.
+Every module under ``tests/`` reaches its collaborators through this file, and
+this file defines no test of its own, so a defect here fails the whole suite.
+In source order it owns: the import-path bootstrap ``pytest.ini`` delegates
+here; the Flask application and its client; the WebDriver and behave-context
+stand-ins; the artifact-path fixtures; the golden baselines and their loaders;
+the behave step registry; the autouse state isolation; and
+:func:`normalize_volatile`.
 
-Why this suite exists
----------------------
-Neither this repository at its base revision nor the authoritative Java
-reference contains any test code - the reference ``src/`` holds only ``main``.
-This suite therefore preserves no source behaviour; it exists under the
-specification's *"Standards for code this port writes"* exception (AAP 0.1.3),
-which applies the coverage targets to ``tests/**`` **and only there**, and it is
-recorded as AAP deviation 13.  Discovery is owned by the repository-root
-``pytest.ini`` (``testpaths = tests``), which carries test selection only; the
-four per-package coverage gates - ``app/utils`` 90, ``app/pages`` 85,
-``app/automation`` 80, ``app/reporting`` 80 - live in the ``Makefile``'s
-``coverage`` target, which runs pytest once per scope and stops at the first
-miss.  Nothing in this file measures or gates coverage.
+Six constraints hold over every fixture below, each enforced here or nowhere:
 
-What the suite asserts: structure, never bytes
-----------------------------------------------
-Byte-stability across runs is impossible and no test may demand it (AAP 0.6).
-The merged Cucumber JSON report carries a per-scenario ``start_timestamp`` and
-measured nanosecond durations; failure text embeds a Python traceback; both
-HTML outputs surface timing; and screenshot bytes differ from one capture to
-the next.  What *is* deterministic, and therefore what the suite pins, is
-**structure**:
+* **No network and no browser.**  Nothing here launches a driver;
+  :class:`StubDriver` is the duck-typed recorder standing in for one.
+* **No selenium at module scope.**  ``app/automation`` is the only package in
+  this port that imports selenium, and ``app/reporting/screenshots.py`` takes
+  its driver duck-typed, so an import here would make that invariant
+  untestable; :func:`isolate_process_state` imports the one module that needs
+  selenium inside its own body.
+* **No live Odoo instance and no populated ``configuration.properties``.**  A
+  missing properties file is tolerated by design
+  (``ConfigurationReader.java:21-24``), and every fixture works without one.
+* **No leaked global state.**  The autouse fixture restores the two
+  process-global holders - the properties cache and the worker-local driver
+  slot - around every test.
+* **No writing into the repository's own build output.**  Path-taking code is
+  reached through the ``base=`` seam with :fixture:`tmp_artifact_root`.
+* **Structure, never bytes.**  Byte-stability across runs is impossible and no
+  test may demand it (AAP 0.6); :func:`normalize_volatile` canonicalises the
+  volatile fields alone, so a diff that survives it is a real difference.
 
-* features in source order, and scenarios in line order within a feature;
-* the Background repeated in the same position among a feature's elements;
-* rerun-manifest entries grouped one line per feature, with line numbers
-  ascending;
-* an identical PrettyReports page set for identical inputs.
+There is deliberately no ``tests/__init__.py``: the AAP 0.3.1 target tree does
+not name one, and without a package marker pytest's *prepend* import mode puts
+``tests/`` itself on ``sys.path``, keeping a sibling module importable by name.
 
-:func:`normalize_volatile` is the shared helper that makes those comparisons
-possible: it canonicalises exactly the volatile fields and leaves every
-structural one alone, so a diff that survives it is a real difference.  No test
-compares a whole generated artifact byte for byte.
-
-A note for anyone adding an ordering assertion: ``sortingMethod:
-'ALPHABETICAL'`` in ``Jenkins`` is a **publisher display option**.  It imposes
-nothing whatsoever on the artifacts this port writes, so no writer sorts on its
-account and no test may expect it to.
-
-Standing constraints on every fixture here
-------------------------------------------
-The two user-specified rules for this project carry no actionable directive -
-neither names a file, a standard, a pattern or a prohibition - so neither
-governs this file.  Their silence is not licence to lower the bar; ordinary
-enterprise practice for this stack governs instead, and for this module it
-means:
-
-* **No network access, and no browser.**  Nothing here launches a driver.  The
-  WebDriver stand-in is :class:`StubDriver`, a duck-typed recorder.
-* **No selenium import.**  Only ``app/automation/{driver,waits,interactions}.py``
-  may import selenium in this port, and ``app/reporting/screenshots.py`` is
-  deliberately selenium-free because it takes its driver duck-typed.  Importing
-  selenium here would quietly make that invariant untestable.
-* **No dependency on a live Odoo instance and none on a populated
-  ``configuration.properties``.**  A missing properties file is tolerated by
-  design (``ConfigurationReader:21-24``), and every fixture below works without
-  one.
-* **No leaked global state.**  The one autouse fixture returns the two
-  process-global holders - the properties cache and the worker-local driver slot
-  - to their pre-test state around every test.
-* **No writing into the repository's real build output.**  Path-taking code is
-  driven through the ``base=`` seam with :fixture:`tmp_artifact_root`.
-
-Import path ownership
----------------------
-``pytest.ini`` states plainly that making ``import app`` and
-``import features.steps.<module>`` resolve from the repository root is this
-file's job, and that splitting it across two files would leave neither of them
-the answer.  The bootstrap immediately below is that job, and it does it in
-three steps: it *probes* whether the project already resolves from the installed
-environment, *publishes* that answer as
-:data:`PROJECT_IMPORTABLE_FROM_ENVIRONMENT` and
-:fixture:`project_importable_from_environment`, and only then *falls back* to
-the checkout root.  Putting the probe first is what keeps a broken editable
-install or a broken ``pyproject.toml`` package mapping *visible* instead of
-being papered over by a source-tree import; see the bootstrap's own comment for
-the detail.
-
-The Gherkin tree is covered by the same fallback rather than by an entry of its
-own.  It is not part of the installed distribution - ``pyproject.toml`` excludes
-``features*`` - so no installation can ever supply it, and
-:func:`load_step_registry` does not need one: it hands behave the
-``features/steps`` **directory**, which the engine execs each module from
-exactly as a real run does.  A test that nonetheless writes
-``import features.<module>`` is served by the working-directory entry
-``python -m pytest`` prepends - the invocation form the ``Makefile`` and both
-runner scripts use - and, under a bare ``pytest`` that prepends no such entry,
-by the fallback, whose condition names this second case explicitly.
-
-There is deliberately **no** ``tests/__init__.py``.  The AAP 0.3.1 target tree
-does not name one and its absence is load-bearing: with no package marker,
-pytest's *prepend* import mode puts ``tests/`` itself on ``sys.path``, so a
-sibling module such as ``test_paths`` remains importable as a top-level module.
+Authorities: AAP 0.1.3 for the standards exception this suite is written under
+(deviation 13), AAP 0.4.2 for ``create_app()`` as an application's only source,
+AAP 0.6 for what a run does not get to choose; each fixture reproducing Java
+behaviour carries its own reference file and line.
 """
 
 from __future__ import annotations
@@ -147,11 +85,12 @@ if TYPE_CHECKING:  # pragma: no cover - read by type checkers, never at runtime
 # Step 2, publish.  The answer becomes :data:`PROJECT_IMPORTABLE_FROM_ENVIRONMENT`
 # and the session fixture :fixture:`project_importable_from_environment`, which
 # is what turns a packaging defect into an observable value a test can assert on.
-# That ordering is the whole point: an unconditional insertion - what this file
-# did before - lets the suite import the source tree even when the required
-# installation or the package mapping is broken, and a green run then says
-# nothing about whether the distribution this project ships is importable at all.
-# Nothing here repairs a broken install, and nothing here hides one.
+# Publishing before step 3 is what the ordering is for: an insertion made
+# unconditionally would let the suite import the source tree even when the
+# required installation or the package mapping is broken, and a green run would
+# then say nothing about whether the distribution this project ships is
+# importable at all.  Nothing here repairs a broken install, and nothing hides
+# one.
 #
 # Step 3, fall back, and only then.  When the project does not resolve from the
 # environment, the checkout root is inserted at position 0, because an
@@ -321,9 +260,9 @@ from app.utils import paths, properties  # noqa: E402
 # --------------------------------------------------------------------------- #
 # Fixture-data locations
 #
-# The three files are written by the ``tests/fixtures/`` agent and are read
-# **by path** here - never reproduced as literal content in this file, which
-# would fork the baseline the moment either copy was edited.
+# The three files live under ``tests/fixtures/`` and are read **by path** here,
+# never reproduced as literal content in this file, which would fork the
+# baseline the moment either copy was edited.
 # --------------------------------------------------------------------------- #
 
 #: Directory holding the golden baselines and the hand-built result set.
@@ -381,14 +320,26 @@ TIMESTAMP_KEYS: Final[frozenset[str]] = frozenset(
     {"start_timestamp", "started_at", "generated_at"}
 )
 
-#: A deterministic, non-empty, genuinely well-formed 1x1 PNG.  Returned by
-#: :meth:`StubDriver.get_screenshot_as_png` by default so that a test exercising
-#: ``app/reporting/screenshots.py`` gets bytes that survive its defensive
-#: emptiness check and that a base64 round-trip can be asserted against without
+#: A deterministic, non-empty, genuinely well-formed 1x1 PNG: one opaque red
+#: pixel, truecolour with alpha at eight bits per sample, stored in a single
+#: ``IDAT`` and ended by ``IEND``.  Returned by
+#: :meth:`StubDriver.get_screenshot_as_png` by default so that a test
+#: exercising ``app/reporting/screenshots.py`` gets bytes that survive its
+#: validation and that a base64 round-trip can be asserted against without
 #: pinning a platform-dependent value.
+#:
+#: **Every chunk's CRC is correct and the image data inflates to the five
+#: bytes its header declares**, which is what the word "well-formed" above
+#: means and what this constant has to be for its purpose.  The widely-copied
+#: seventy-byte "1x1 PNG" blob that stood here before is *not* well-formed: its
+#: ``IDAT`` CRC is ``0xabce3689`` where its data gives ``0x5f2c8f77``, and the
+#: compressed stream fails its own Adler-32 check, so no strict decoder reads
+#: it -- browsers render it only because they ignore both checks.  A fixture
+#: standing for a screenshot has to be a screenshot, or every test that drives
+#: it is asserting against a payload the production validator refuses.
 DEFAULT_SCREENSHOT_PNG: Final[bytes] = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/"
-    "q842iQAAAABJRU5ErkJggg=="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP4z8DwHwAFAAH/"
+    "VscvDQAAAABJRU5ErkJggg=="
 )
 
 #: Default tag name reported by a :class:`StubElement` that was not programmed
@@ -557,11 +508,21 @@ def flask_app(request: pytest.FixtureRequest) -> Flask:
 def client(flask_app: Flask) -> Iterator[FlaskClient]:
     """A test client for :fixture:`flask_app`, with its context torn down.
 
-    Entered as a context manager, which is what keeps the request and
-    application contexts of the last request alive for the duration of the test
-    - so an assertion may inspect them after a call - and what guarantees they
-    are popped afterwards even when the test fails.  A client left un-entered
-    would leak a context onto the next test in the same process.
+    Entered as a context manager, because that is what makes the application
+    and request contexts of the *last* request available to an assertion made
+    after the call.  Flask preserves them only for an entered client: the
+    client asks for preservation by putting ``werkzeug.debug.preserve_context``
+    into the WSGI environ while it is entered, so the application hands it the
+    live contexts instead of dropping them when the request ends, and the
+    client re-enters them for the rest of the block.  Leaving the block closes
+    that preserved stack, and it closes on the failure path too - which is the
+    second reason for the ``with``: a test that fails mid-block still pops what
+    it preserved, so nothing reaches the next test.
+
+    An un-entered client is not a leak - it never requests preservation and
+    Flask pops each request's contexts as that request ends - it simply offers
+    a route test nothing to inspect afterwards.  Entering is therefore about
+    what an assertion can reach, not about containment.
 
     Every route in this port is read-only: no request this client can make
     writes to disk and none starts a test run (AAP 0.3.1).
@@ -669,8 +630,6 @@ class StubElement:
         self.index = index
         self._element_id = element_id
 
-    # -- identity ---------------------------------------------------------- #
-
     @property
     def id(self) -> str:
         """A stable synthetic element id.
@@ -692,8 +651,6 @@ class StubElement:
             several, the index.
         """
         return f"<StubElement {self.locator!r} index={self.index}>"
-
-    # -- operations, each one logged --------------------------------------- #
 
     def click(self) -> None:
         """Record a click.
@@ -897,8 +854,6 @@ class StubDriver:
         self._elements: dict[Locator, list[StubElement]] = {}
         self._next_element_id = 0
 
-    # -- internals shared with StubElement --------------------------------- #
-
     def _record(self, operation: str, *args: Any) -> None:
         """Append one entry to the ordered log.
 
@@ -1015,8 +970,6 @@ class StubDriver:
             error = self._find_errors.get(scope)
             if error is not None:
                 _raise(error)
-
-    # -- the WebDriver surface --------------------------------------------- #
 
     def get(self, url: str) -> None:
         """Record a navigation.
@@ -1200,8 +1153,6 @@ class StubDriver:
         self._record("execute", driver_command, params)
         return self.execute_result
 
-    # -- programming the page's answers ------------------------------------ #
-
     def set_text(
         self, locator: Locator | None, value: str, *, index: int | None = None
     ) -> None:
@@ -1310,8 +1261,6 @@ class StubDriver:
         """
         self._find_errors[locator] = error
 
-    # -- reading the log --------------------------------------------------- #
-
     def operations(self) -> tuple[str, ...]:
         """The operation names in order, with arguments dropped.
 
@@ -1398,7 +1347,8 @@ def _snake_case(name: str) -> str:
 
     ``LoginPage`` becomes ``login_page`` and ``LogOutPage`` becomes
     ``log_out_page`` - the capital ``O`` is preserved as a word boundary
-    because the class name preserves it, mirroring the Java ``LogOutP``.
+    because the class name preserves it, mirroring the Java ``LogOutP``
+    (``LogOutP.java:8``).
 
     :param name: A class name in ``CamelCase``.
     :returns: The same name in ``snake_case``.
@@ -1484,7 +1434,8 @@ class FakeContext:
         and is what ``features/environment.py``'s failure path is asserted on.
         Note the two-argument signature: behave has **no** name parameter, which
         is why the port's event collector supplies the third argument of the
-        Java ``attach`` call - the scenario name - from the scenario it is
+        Java ``attach`` call - ``scenario.attach(screenshot, "image/png",
+        scenario.getName())`` at ``Hooks.java:15`` - from the scenario it is
         already tracking.
 
         :param mime_type: MIME type of the payload, ``"image/png"`` for the
@@ -1573,13 +1524,32 @@ def fake_context(stub_driver: StubDriver) -> FakeContext:
 # suite uses it: a writer test builds its artifacts under a per-test temporary
 # directory, so **no test ever writes into the repository's own build output**.
 #
-# Nothing here changes the working directory, and no test should.  ``chdir``
-# leaks into whatever runs next in the same process - pytest does not restore it
-# between tests - and it would make the suite order-dependent for no gain, since
-# passing ``base=`` is both explicit and local.  It would also silently defeat
-# the one behaviour ``app/utils/paths.py`` documents about its default: the
-# working directory is read fresh on every call, precisely so a worker process
-# that moved sees the move.
+# No fixture in this module changes the working directory, and two things are
+# genuinely forbidden anywhere in the suite:
+#
+#   * an **unmanaged** ``os.chdir``.  Nothing restores it, so it leaks into
+#     whatever runs next in the same process and makes the suite
+#     order-dependent.  pytest restores the working directory only through
+#     ``monkeypatch``, never on its own.
+#   * reaching path-taking code **without the seam it offers**.  Code that
+#     accepts ``base`` is given one, because a call left on the default
+#     resolves against whatever directory the run happens to be in - the
+#     repository root, under every sanctioned invocation - and that is how a
+#     test comes to write into the real build output.
+#
+# ``monkeypatch.chdir`` is the sanctioned way to move, and the suite uses it
+# deliberately in two situations: for code that has no ``base`` parameter to
+# give (``app/cli.py``'s clean, run and report paths resolve ``target_root()``
+# and ``workers_dir()`` from the process working directory, exactly as a real
+# run does), and where the *default* is itself the behaviour under test.  It
+# carries none of the hazard above: ``MonkeyPatch.chdir`` records the directory
+# it left and ``undo()`` returns to it at teardown, per test and on the failure
+# path too, so the move cannot outlive the test that made it.
+#
+# What those tests pin is the one behaviour ``app/utils/paths.py`` documents
+# about its default - the working directory is read fresh on every call,
+# precisely so a worker process, or a test, that moved sees the move - and a
+# fixture-level ``chdir`` here would hide it by moving everything at once.
 # =========================================================================== #
 
 #: Name of the directory created inside pytest's ``tmp_path`` to stand in for a
@@ -2175,16 +2145,18 @@ def _resolve_step_fixture(step_registry: Any) -> Callable[[str], StepMatch]:
 # =========================================================================== #
 # State isolation
 #
-# Two holders in this port are process-global by design, because the Java they
-# port were a static initializer and a thread-local field.  pytest runs every
-# test in one process, so both would otherwise carry a value from one test into
-# the next:
+# Two holders in this port are process-global by design, because each ports a
+# Java construct that is itself process-wide: a static initializer and a
+# thread-local field.  pytest runs every test in one process, so both would
+# otherwise carry a value from one test into the next:
 #
 #   * ``app/utils/properties.py``'s cache, which loads exactly once per process
-#     and then never re-reads - the ``ConfigurationReader`` static-initializer
-#     semantics of ``ConfigurationReader:11``;
+#     and then never re-reads - the static-initializer semantics of
+#     ``ConfigurationReader.java:11-25``, whose ``static { ... }`` block loads
+#     ``configuration.properties`` once at class initialization;
 #   * ``app/automation/driver.py``'s ``_holder``, the worker-local session slot
-#     that ports ``Driver.java:17``'s ``InheritableThreadLocal``.
+#     that ports the ``InheritableThreadLocal<WebDriver> driverPool`` of
+#     ``Driver.java:17``.
 #
 # The autouse fixture below returns both to their pre-test state around every
 # test.  It touches exactly one private name in the whole application -

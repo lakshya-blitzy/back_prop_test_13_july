@@ -1,248 +1,66 @@
 {#-
-  ===========================================================================
-  pretty/_layout.html - the shared page chrome of the generated report tree.
-  ===========================================================================
+  pretty/_layout.html - the shared page chrome every page template in this
+  folder extends: head, navigation bar, build-info table, report-lead region,
+  footer and the one screenshot overlay of the generated report tree.
 
-  The root layout that every page template of the generated report tree
-  extends: overview_features, overview_tags, overview_steps,
-  overview_failures, feature and tag. The chrome held here - the head, the
-  navigation bar, the build-info table, the report lead and the footer - was
-  verified byte-identical across all eight pages of the reference tree, so it
-  lives in one place. Duplicating it six times is precisely how an emitted
-  tree drifts out of agreement with itself.
+  RENDER CONTEXT - supplied by the render call or by a top-level {% set %} in
+  the extending page, and each value read through a guarded lookup so an
+  omitted or null one renders as nothing rather than as the text "None":
+  project_name (the Project cell), build_date_display (already formatted - the
+  formatting decisions belong to app/reporting/pretty_reports.py), active_page
+  ('features' | 'tags' | 'steps' | 'failures' or absent, compared trimmed and
+  lower-cased, so the two detail pages leave all four navigation items plain)
+  and title_suffix (the title text after the fixed prefix).
+  BLOCKS, exactly three: head_extra (inside <head>, where the two charted
+  overviews inject their chart initialisation), lead (each page's single
+  <h1 class="h3">) and content (the page body).
 
-  PROVENANCE
-  ----------
-  This is contract 2 of the port's two HTML artifacts. The Java build produced
-  this tree with me.jvt.cucumber:reporting-plugin 7.2.0 (pom.xml:66-70), which
-  pulls net.masterthought:cucumber-reporting 5.6.1 over
-  org.apache.velocity:velocity-engine-core 2.3 - Velocity, not Mustache; the
-  specification's Mustache claim is wrong and is not used here. Contract 1,
-  the single self-contained page written to the reports HTML artifact by
-  io.cucumber:html-formatter 17.0.0, is a DIFFERENT generator with a different
-  page set and has its own template set under app/templates/artifact/. The two
-  sets are never collapsed into one: the only markup they share is the three
-  partials in app/templates/partials/.
+  STANDALONE ROOT LAYOUT: it does not extend app/templates/base.html, and
+  nothing in this folder may, because that template builds asset links with
+  the framework's static-URL builder, which resolves only while an application
+  serves. Every asset reference and page link here is tree-relative, so an
+  emitted page opens straight from a CI workspace, offline, with no origin or
+  server; detail-page filenames arrive as values and are never computed here.
 
-  TWO ABSOLUTE STRUCTURAL RULES
-  -----------------------------
-  1. This is a STANDALONE root layout. It does not extend
-     app/templates/base.html, and nothing in this folder may. That template
-     builds every asset link with the framework's static-URL builder, which
-     resolves only while an application is serving; these pages are written to
-     disk and opened straight from a Jenkins workspace over the file protocol.
-     base.html says the same thing from its own side.
-  2. NO framework URL building anywhere in this folder. Every asset reference
-     is tree-relative - css/..., js/..., images/... - and every page link is a
-     plain relative filename, because the emitted pages sit beside the copied
-     css/, js/, images/ and fonts/ directories inside one report directory.
-     Every reference in every emitted page therefore resolves inside the tree,
-     offline, with no origin and no server.
+  HEAD ORDER IS LOAD-BEARING. jquery.min.js precedes tablesorter and bootstrap
+  because both need the global and bootstrap's guard throws without it;
+  Chart.min.js keeps its capital C, which a case-sensitive filesystem
+  requires; moment.min.js stays although no page code calls it, because
+  Chart.js reads it off the global for its time scale; css/main.css links
+  after the three vendored stylesheets so it wins on equal specificity. The
+  tablesorter initialisation belongs here, once per page and nowhere else, so
+  app/reporting/pretty_reports.py adds no second copy; both of its options are
+  load-bearing and the inline comments beside them record why.
 
-  THE RENDER CONTEXT - the contract app/reporting/pretty_reports.py renders
-  against. Each value may arrive either in the render context or from a
-  top-level {% set %} in the extending page; both reach this layout through
-  the same context lookup.
+  STATE - three separate concepts. (1) app/static/js/report.js's three runtime
+  classes - report-is-collapsed, report-is-filtered-out and
+  report-lightbox-is-open - are written by that script alone and read by
+  app/static/css/main.css alone; this layout emits none of them, and main.css
+  reads their absence as expanded, visible and closed, so the page is complete
+  with scripting disabled and on paper. (2) One MUTABLE ARIA MIRROR is
+  authored here, at that same default, and maintained thereafter by its owner:
+  aria-expanded with aria-controls on the navigation toggle, which the vendored
+  bootstrap.min.js maintains - the one place in this folder where
+  data-toggle="collapse" is allowed, since every report region belongs to
+  report.js. Everything else ARIA here is STATIC SEMANTICS, which nothing
+  maintains and no rule reads: aria-current on the current navigation link, and
+  the role, aria-modal and accessible name of the imported lightbox overlay.
+  That overlay ships closed carrying no aria-hidden at all - report.js writes
+  that attribute while the overlay is open and removes it on close, restoring
+  the authored absence. (3) The data-report-* attributes are selection
+  rather than state and are page-owned: a page may carry data-report-root on
+  its report container to scope the script, which otherwise falls back to the
+  whole document, so this layout adds no wrapper. No further inline script and
+  no event-handler attribute belongs here.
 
-      project_name         string. The Project cell of the build-info table.
-      build_date_display   string, ALREADY FORMATTED as "07 Sep 2022, 15:39".
-                           Locale, timezone and format decisions belong to
-                           pretty_reports.py; a template must not make them.
-      active_page          'features' | 'tags' | 'steps' | 'failures', or
-                           ABSENT. The navigation item to mark current. The
-                           two detail pages pass nothing: all four items on a
-                           reference detail page are plain, and this layout
-                           handles the absence without raising under a strict
-                           undefined policy.
-      title_suffix         string. The part of the document title that follows
-                           the fixed "Cucumber Reports  - " prefix.
-
-  Every one of those is read through a guarded lookup below, so an omitted or
-  null value renders as nothing at all rather than as the text "None", and a
-  page that forgets one still produces a complete document instead of failing
-  the report writer.
-
-  THE BLOCKS THIS LAYOUT EXPOSES - exactly three, and no others:
-
-      head_extra   inside <head>, after the title. Where overview_features and
-                   overview_tags inject their chart initialisation, which is
-                   where the reference places it.
-      lead         inside the report-lead region, which this layout places
-                   inside the page's one main landmark. Each page fills it with
-                   its own <h1 class="h3"> - the document's single primary
-                   heading, rendered at the measured 24px by a vendored
-                   typography utility - and, where it has one, its
-                   <p>. The measured texts are "Features Statistics", "Tags
-                   Statistics", "Steps Statistics", "Failures Overview",
-                   "Feature Report" and "Tag Report", and each belongs to its
-                   own page, not here. EXACTLY ONE h1 PER PAGE follows from
-                   that: a page fills this block once.
-      content      the page body.
-
-  NO FILENAME AND NO LINK TARGET IS EVER COMPUTED IN THIS FOLDER. The four
-  overview filenames below are fixed navigation targets, not computed ones.
-  Detail-page filenames are numeric hashes - report-feature_<hash>.html and
-  report-tag_<hash>.html - whose algorithm belongs to pretty_reports.py, which
-  derives it from cucumber-reporting 5.6.1 and confirms it against a
-  regenerated baseline; templates receive each target filename as a passed-in
-  value. Because the feature URI moves into features/, the feature-page
-  filenames necessarily change, which is expected.
-
-  THE HEAD, AND WHY ITS ORDER IS NOT NEGOTIABLE
-  ---------------------------------------------
-  Five scripts, in the emitted order, each recording its own reason:
-      1. jquery.min.js               3.4.1. First: the next two need the global.
-      2. jquery.tablesorter.min.js   registers itself onto the jQuery namespace.
-      3. Chart.min.js                2.7.3. The CAPITAL C is mandatory - every
-                                     reference page requests it that way, and a
-                                     lower-case name is a 404 on any
-                                     case-sensitive filesystem, which is every
-                                     Linux build agent.
-      4. moment.min.js               2.24. NOT unused, and never to be dropped
-                                     for looking unused: Chart.js 2.7.3 reads
-                                     it off the global for its time scale and
-                                     throws without it. No page code calls it.
-      5. bootstrap.min.js            3.4.1. Last: it opens with a guard that
-                                     throws outright when jQuery is missing.
-  Three vendored stylesheets follow, in the emitted order and with exactly the
-  measured attribute sets - the third carries NO type attribute, which is
-  measured rather than an oversight - then the shortcut icon.
-
-  Two files of the port's own are added to that block and nothing else is:
-      css/main.css   after the three vendored links, so it wins on equal
-                     specificity. Safe beside the generator's own stylesheet
-                     because every selector it declares is prefixed, with no
-                     bare element, class or id selector anywhere.
-      js/report.js   dependency-free plain script. It is never assumed to
-                     provide any jQuery-dependent behaviour, and it is loaded
-                     without deferral like everything else in this head: it is
-                     written to tolerate evaluation before or after the
-                     document is parsed.
-
-  THE TABLESORTER INITIALISATION LIVES HERE, EXACTLY ONCE PER PAGE. Some
-  sibling notes describe it as something pretty_reports.py "emits into every
-  generated page"; it emits it only in the sense that it renders the page that
-  contains it. THAT MODULE MUST NOT ADD A SECOND COPY. The two options are
-  load-bearing: textAttribute makes duration columns sort on the raw
-  nanosecond attribute the macros emit rather than on displayed text, and
-  selectorHeaders excludes the grouping header row - which is why that row
-  carries the dont-sort class, and it pairs with the vendored stylesheet rule
-  at cucumber.css:198 that advertises the remaining headers as clickable.
-
-  THE TITLE CARRIES A DOUBLE SPACE after "Reports", present in all eight
-  reference titles. It is reproduced deliberately; it is not a typo to tidy.
-
-  THE PRESENTATION-STATE BOUNDARY
-  -------------------------------
-  app/static/js/report.js is the SINGLE owner of report interactivity in this
-  tree - filtering, every collapse and expand, and the screenshot overlay -
-  through its data-report-* selection attributes. The vendored collapse widget
-  drives exactly one thing here, the navigation bar's own toggle below, which
-  no report region competes for; pretty/_element_tree.html records why the two
-  can never share a region (the widget needs its "in" class present to show
-  one, and the script only ever writes its own state class, so a region the
-  widget had collapsed could never be reopened by expand-all).
-
-  This layout emits NO presentation state: none of the script's three runtime
-  state classes and no state attribute of any kind. Their absence is the
-  no-scripting-safe state - detail expanded, rows visible, overlay closed - so
-  the emitted page is complete and correct with scripting disabled and on
-  paper. Selection attributes are a different thing and are allowed; a page
-  may carry data-report-root on its own report container so the script scopes
-  to it, and the script falls back to the whole document when no such ancestor
-  exists, so this layout adds no wrapper of its own.
-
-
-  NO INLINE SCRIPT beyond the tablesorter initialisation below and the chart
-  initialisation the two overview pages inject through head_extra - both of
-  which the reference itself carries - and NO EVENT-HANDLER ATTRIBUTE
-  anywhere in this folder. Collapsing, sorting, charting and the overlay are
-  never reimplemented here.
-
-  THE FOOTER IS A DECISION, TAKEN DELIBERATELY. The reference footer credits
-  the Java generators with four external repository links. This port does not
-  use those generators, so crediting them would be false attribution, and any
-  external link would force a carve-out in the assertion that every link and
-  source in every emitted page resolves inside the tree. The footer therefore
-  states plainly what generated the report and links nowhere.
-
-  WHAT THIS LAYOUT DELIBERATELY DOES NOT EMIT
-  -------------------------------------------
-      the id="report" container   page-owned, and AT MOST ONCE PER PAGE. The
-                                  reference feature page emits it twice, which
-                                  is invalid and makes the collapse selector's
-                                  scope ambiguous; the port emits it once, on
-                                  the element-tree container, and acceptance
-                                  of these artifacts is structural.
-      the <br/> before the footer  measured on five of the eight reference
-                                  pages and absent from three, so it belongs
-                                  to the pages that carry it, not to the
-                                  chrome.
-      the collapse-control chevrons  page-owned, and only on the pages that
-                                  have a collapsible tree.
-      a tqa-root wrapper          the stylesheet's tokens live on that class
-                                  and every var() repeats its value as a
-                                  literal fallback, so partial-based fragments
-                                  render correctly without it. Wrapping the
-                                  whole document would put the navigation bar
-                                  and the vendored tables inside it.
-
-  ESCAPING - Jinja's automatic escaping is relied on for every interpolated
-  value and nothing is ever marked as trusted markup. It matters here: feature
-  names and tag names reach the title, and the project name is free text.
-
-  ACCESSIBILITY
-  -------------
-  Invisible accessibility is applied because it costs nothing visually: real
-  landmark elements, a real list for the navigation, and aria-current on the
-  link of the current page so the state that the active styling shows visually
-  is also announced. Four corrections go further than the measured chrome,
-  each because the measurement recorded a defect rather than a design:
-
-    lang="en" on the document root. The reference omits it on all eight pages
-      and contract 1 declares one; a document with no language gives assistive
-      technology no pronunciation rule to follow, and the attribute changes
-      nothing that renders. Applied, not flagged.
-    the viewport meta element, paired with the navbar toggle below. Without
-      the meta a small screen renders the page at a desktop width, and without
-      the toggle the four navigation links are display:none below Bootstrap's
-      768px breakpoint with no control that can open them - so the measured
-      chrome loses its whole navigation on a phone. Both are emitted, using
-      only classes the vendored bootstrap.min.css already declares
-      (.navbar-toggle, .icon-bar, .sr-only) and the vendored bootstrap.min.js
-      this head already loads, so no stylesheet and no script is added.
-    ONE main landmark per page, wrapping the lead and the page body, and a
-      real <footer> for the footer. The footer is not navigation and was
-      exposed as a second nav landmark, which leaves a reader two
-      indistinguishable "navigation" regions to choose between; the element
-      changes, every visual class stays.
-    a real h1. Each page's lead heading is the document's primary heading and
-      renders through <h1 class="h3">, so the heading hierarchy starts where a
-      reader's "jump to the top heading" expects it while the rendered size
-      stays the measured one. THE UTILITY CLASS IS h3 AND NOT h2, which reads
-      wrong until the cascade is followed: the measured heading was an <h2>,
-      but cucumber.css:8-10 pins `h2 { font-size: 24px }`, a bare type selector
-      that beats bootstrap.min.css's own `.h2,h2{font-size:30px}` on load
-      order. That type selector cannot match an <h1>, so `<h1 class="h2">`
-      keeps Bootstrap's 30px - measured in Chrome at 30px against the
-      reference's 24px, a quarter larger. `.h3,h3{font-size:24px}` is the
-      vendored utility whose size equals the measurement, and cucumber.css
-      declares no h3 rule to disturb it. Verified in Chrome: 24px, weight 500,
-      identical box width and x-position to the reference heading. That h1
-      belongs to each page template's own lead block, not here.
-
-  One measured absence is still deliberate:
-
-  ONE FURTHER VISIBLE CORRECTION IS MADE, and it is a measured contrast
-  failure rather than a preference. Both chrome bars carry tqa-chrome, because
-  the vendored stylesheet renders their ordinary text at #777 on #f8f8f8 -
-  4.217:1, where WCAG 2.1 AA requires 4.5:1 of normal text. The class and its
-  measurements are recorded at the two elements that carry it.
-    BLITZY [A11Y]: no skip-navigation link. The chrome is fixed by measurement
-      and the vocabulary available to these pages declares no class for one,
-      so adding a visible control here would depart from the contract. The
-      main landmark above is what a reader jumps to instead. Flagged for
-      review rather than invented.
+  ACCESSIBILITY. lang="en" on the document root, one <main> per page around
+  the lead and the body, and a <footer> for the footer so it is not a second
+  navigation landmark. The lead heading is <h1 class="h3"> and not class="h2"
+  because the vendored cucumber.css pins a bare `h2` type selector that
+  outranks Bootstrap's own utility and cannot match an <h1>, leaving .h3 as
+  the utility whose size matches the contract. These pages' vocabulary
+  declares no class for a visible skip-navigation control, so the main
+  landmark is the jump target instead.
 -#}
 {%- from 'partials/lightbox.html' import lightbox_overlay -%}
 {#- Context normalisation. Every guard tests definedness FIRST so a strict
@@ -433,20 +251,15 @@ $(document).ready(function() {
 {% block content %}{% endblock %}
 </main>
 
-{# The footer. Factual, and it links nowhere: see the footer note above.
+{# The footer. Factual, and it links nowhere.
 
-{# The footer. Factual, and it links nowhere: see the footer note above.
-
-    IT IS A <footer>, NOT A <nav>. The measured element was a nav, which
-    exposed a region holding one sentence and no links as a second navigation
-    landmark indistinguishable from the real one above. Every visual class the
-    measurement recorded is kept - navbar and navbar-default paint it, and the
-    inner markup is untouched - so only the element name and the landmark it
-    reports change.
-
-    It carries tqa-chrome for the same contrast reason as the navigation bar -
-    its small text is the other element the vendored #777 on #f8f8f8 applied
-    to. #}
+    IT IS A <footer>, NOT A <nav>: a region holding one sentence and no links
+    must not be announced as a second navigation landmark beside the real one
+    above, which would leave a reader two indistinguishable "navigation"
+    regions to choose between. navbar and navbar-default paint it, and it
+    carries tqa-chrome for the same contrast reason as the navigation bar -
+    its small text is the other element the vendored stylesheet renders below
+    the AA contrast threshold. #}
 <footer class="navbar navbar-default tqa-chrome" id="footer">
   <div class="container-fluid">
     <p class="navbar-text navbar-right">

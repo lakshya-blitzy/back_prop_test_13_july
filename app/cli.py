@@ -1,26 +1,34 @@
 """The ``run-tests`` command - this port's single execution entry point.
 
-It replaces two Java runner classes whose entire behaviour lived in
-annotations, verified verbatim at the pinned reference revision:
+It replaces two Java runner classes whose behaviour lived entirely in
+annotations: ``CukesRunner.java:7-20`` (four plugin destinations, a glue
+package, ``dryRun = false``, ``tags = "@Smoke"``, an empty class body) and
+``FailedTestRunner.java:8-12``, whose two load-bearing *absences* - no
+``plugin`` list and no ``tags`` attribute - are what ``--rerun`` reproduces.
+This module owns only the **option surface** and the **exit contract**;
+execution belongs to ``app/services/test_run_service.py``, artifact writing to
+``app/services/report_service.py``, and every path to :mod:`app.utils.paths`,
+which is why no path literal appears here and why the ``--clean`` step reaches
+the build output directory through :func:`~app.utils.paths.target_root` alone.
 
-``CukesRunner.java:7-20``
-    ``@RunWith(Cucumber.class)`` with a four-plugin list, a features root, a
-    glue package, ``dryRun = false`` and ``tags = "@Smoke"`` - and an
-    **empty class body**.  Its four plugin destinations are the four artifact
-    constants :mod:`app.utils.paths` owns; not one of them is named here.
-``FailedTestRunner.java:8-12``
-    ``glue`` plus a ``features`` attribute naming the rerun manifest, and two
-    load-bearing *absences*: **no** ``plugin`` list, so a rerun writes no
-    artifact, and **no** ``tags`` attribute, so a rerun applies no tag filter.
+The six options, their defaults, and what a caller cannot read off them:
 
-``pom.xml:21-29`` supplied the execution semantics - ``parallel=methods``,
-``useUnlimitedThreads=true`` with ``<threadCount>4</threadCount>`` commented
-out at ``pom.xml:24``, and ``testFailureIgnore=true``.  None of it ever ran:
-every runner sits under ``src/main/java`` and surefire's include matches test
-classes only, so the pipeline's own command (``Jenkins:8``, ``Jenkins:10``)
-reports "No tests to run." and BUILD SUCCESS and produces no artifact at all.
-This command implements the intent those annotations encode rather than that
-null result: the suite really runs, and the four artifacts are really written.
+* ``--tags EXPR`` defaults to :data:`DEFAULT_TAG_EXPRESSION`
+  (``CukesRunner.java:18``); it is validated here and evaluated by the run
+  service.
+* ``--browser NAME`` has no literal default - left unset, the ``browser``
+  property decides.  A given value reaches every worker as engine userdata,
+  which ``app/config.py`` resolves ahead of the properties file, and is passed
+  on unvalidated, so an unrecognised value fails at first driver use exactly
+  as ``Driver.java:29-42``'s missing default branch makes it.
+* ``--workers N`` defaults to the CPU count; ``--workers 1`` is sequential.
+* ``--dry-run`` and ``--rerun`` are both off by default.  ``--rerun`` is four
+  coupled behaviours, each from an absence in ``FailedTestRunner.java:9-12``:
+  it clears the tag filter, rejects ``--tags`` as a usage error, writes no
+  artifact and leaves the existing ones untouched, and never cleans.
+* ``--clean/--no-clean`` defaults to ``--clean``, standing in for ``mvn clean
+  test``, and is ignored under ``--rerun``, which must not delete the manifest
+  it reads.
 
 What this file owns, and what it does not
 -----------------------------------------
@@ -98,9 +106,10 @@ A worker process that dies                             ``3``   all four, from
 Artifact production, or the storage it needs, fails:  ``4``   per cause, below
 the merge produces no result set at all, a writer
 fails after earlier writers succeeded, the
-``--clean`` step cannot empty the build output, or
-the run's per-worker intermediate directory cannot
-be prepared or removed
+``--clean`` step cannot empty the build output, the
+run's per-worker intermediate directory cannot be
+prepared or removed, or another run in this checkout
+already holds the build output
 =====================================================  ======  ==============
 
 The concrete values are this file's contract - see :class:`ExitCode` - and
@@ -131,8 +140,16 @@ run service records every signal independently and encodes no order.  It is
 the artifact-and-infrastructure class ``4`` and then the execution-facing
 ``3``: ``4`` describes what the publisher will find, or that the build output
 could not be put into a known state at all, and that outranks a run that
-merely lost a shard.  Every signal is logged whatever the status, so choosing
-a status discards no information.
+merely lost a shard.
+
+Every signal is **reported before** a status is chosen, which is what makes
+that ordering cost no information.  The case that proves it is the one where
+both signals are at their strongest: when every worker dies there is nothing
+to merge, so the run reports the empty merge at ``4`` - and the shard
+identities, their locations and the reason each one produced nothing are the
+only record of what was lost.  Those are emitted by
+:func:`_report_dead_shards` ahead of every precedence return, and the status
+functions add nothing but the line naming the class they return.
 
 Streams
 -------
@@ -195,7 +212,29 @@ The same distinction governs ``--clean``: it empties the build output
 directory but hands the intermediate directory to the run service rather than
 deleting it outright, because only the service can tell an abandoned run's
 leftovers from a running one's working files.  A retained live directory is
-reported and is not a failed clean.
+reported and is not a failed clean, and so is the run lock described next.
+
+One run at a time in one checkout
+---------------------------------
+The clean step, the run and the publication all operate on state the whole
+checkout shares - the four artifact paths, and the intermediate directory
+underneath them - so this command takes one claim on the build output before
+the clean and gives it back after the publication
+(:func:`~app.services.acquire_run_lock`).  Two runs interleaved across those
+phases would empty each other's output and leave a workspace holding a mixture
+of both runs' reports, scenario data and screenshots, with nothing in either
+artifact to say so.  A second run in the same checkout is therefore **refused**
+rather than queued, at class ``4``, having executed nothing and touched
+nothing: a run that holds the lock may be driving a browser suite for many
+minutes, and a CI stage that waited that out would hang instead.  Runs in
+separate checkouts share nothing and never contend.
+
+The claim travels with the merged document into the fan-out, which verifies it
+before each writer publishes, so a run that has somehow lost it stops instead
+of writing into a workspace another run has taken over.  The four artifacts
+are still published one writer at a time and are **not** promoted as an
+all-or-nothing set: the writer-failure row above requires the artifacts
+written before a failure to remain.
 
 Import boundary
 ---------------
@@ -224,13 +263,23 @@ captured separately:
 2. **Each option individually** - each of the six is accepted, appears in
    ``--help`` with its default, and reaches the service layer with the right
    value (patch :func:`~app.services.run_suite` and assert the call keywords).
-   For ``--browser`` and ``--tags`` that assertion carries a second
-   requirement: a value containing a newline or a terminal escape sequence
-   reaches the service **byte-for-byte**, while the "Starting the suite" record
-   shows it quoted, bounded and on one physical line, because those two values
-   are rendered for the record by
-   :func:`~app.logging_config.render_option_value` and by nothing else.  No
-   second record may appear, whatever the value contains.
+   The two forwarded *values* carry a second requirement each, and the two
+   requirements are **opposite**, which is what has to be pinned rather than
+   left to be inferred.  For ``--browser``, a value containing a newline or a
+   terminal escape sequence is **accepted** and reaches the service
+   byte-for-byte, because ``Driver.java``'s switch has no default branch and
+   an unrecognised browser must fail at first driver use.  For ``--tags`` the
+   same value is a **usage error**: :func:`_validate_tag_expression` refuses
+   any character that is neither printable nor a plain space, and refuses an
+   expression longer than :data:`TAG_EXPRESSION_LENGTH_LIMIT`, so exit ``2``
+   with the service never called, nothing written, and the reason on **one**
+   physical line naming the offending character's index or the two lengths -
+   never echoing the text.  An accepted ``--tags`` expression still reaches
+   the service byte-for-byte, unstripped and unnormalised.  Whatever is
+   accepted, the "Starting the suite" record shows it quoted, bounded and on
+   one physical line, because both values are rendered for the record by
+   :func:`~app.logging_config.render_option_value` and by nothing else, and no
+   second record may appear whatever the value contains.
 3. **``--rerun --tags``** - exit ``2``, the service never called, no artifact
    written.
 4. **``--rerun`` semantics** - the tag filter reaching the service is
@@ -339,15 +388,32 @@ import click
 from cucumber_tag_expressions import TagExpressionError, TagExpressionParser
 
 # ``configure_logging`` installs the stream split this module's whole account
-# depends on; ``render_option_value`` is the other half of the same contract -
-# ``app/logging_config.py`` owns what is allowed *onto* the console, so the two
-# option values this command echoes back are rendered there rather than here.
-from app.logging_config import configure_logging, render_option_value
+# depends on; ``render_option_value``, ``render_path`` and ``sanitize_log_text``
+# are the other half of the same contract - ``app/logging_config.py`` owns what
+# is allowed *onto* the console, so the two option values this command echoes
+# back, every artifact path it names and the one third-party message it
+# reflects (a tag-expression parser error, which Click prints itself while
+# logging is not yet configured) are all rendered there rather than here.
+# ``sanitize_log_text`` and the bound it publishes are that same ownership
+# applied to the third kind of text this command did not author: the problems
+# a run tolerated, which arrive on the outcome from the engine, the readers and
+# the workers and are rendered by that one implementation rather than by a
+# second one written here.
+from app.logging_config import (
+    RELAYED_LINE_LIMIT,
+    configure_logging,
+    render_option_value,
+    render_path,
+    sanitize_log_text,
+)
 from app.services import (
     ReportOutcome,
+    RunLock,
     RunOutcome,
+    acquire_run_lock,
     cleanup_workers_dir,
     default_worker_count,
+    delete_verified_entry,
     generate_reports,
     reclaim_workers_root,
     run_suite,
@@ -365,22 +431,14 @@ from app.utils.paths import target_root, workers_dir
 __all__ = [
     "COMMAND_NAME",
     "DEFAULT_TAG_EXPRESSION",
+    "TAG_EXPRESSION_LENGTH_LIMIT",
     "ExitCode",
     "run_tests",
 ]
 
-#: Progress at ``INFO`` reaches stdout and diagnostics at ``ERROR`` reach
-#: stderr through the handler split ``app/logging_config.py`` installs on the
-#: ``app`` package logger.  This module writes to neither stream directly.
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# Command vocabulary
-# --------------------------------------------------------------------------- #
-
-#: The command's name, as ``pyproject.toml`` declares the console script and as
-#: it appears on the Flask CLI group.  Named once so the two cannot disagree.
 COMMAND_NAME: Final[str] = "run-tests"
 
 #: The default tag filter, from ``CukesRunner.java:18``.  It is declared once
@@ -391,61 +449,47 @@ COMMAND_NAME: Final[str] = "run-tests"
 #: cleared outright under ``--rerun``.
 DEFAULT_TAG_EXPRESSION: Final[str] = "@Smoke"
 
+#: The longest ``--tags`` expression this command accepts, in characters.
+#: Generous next to anything the suite can express - its tags are of the form
+#: ``@Smoke`` and ``@UPGN-286``, and the whole suite declares nine of them, so
+#: an expression naming every tag with an operator between each pair is an
+#: order of magnitude short of this - and firm, because the grammar itself
+#: imposes no bound at all: a single expression of hundreds of kilobytes
+#: parses in a fraction of a second, is then copied into the "Starting the
+#: suite" record and into every worker's command line, and is retained for the
+#: whole run.  A caller who needs a wider selection than this expresses names
+#: fewer tags, not more characters.
+TAG_EXPRESSION_LENGTH_LIMIT: Final[int] = 1024
+
 
 class ExitCode(IntEnum):
     """The command's exit statuses - the whole published set.
 
-    Three non-zero members, and exactly three, because AAP deviation 15
-    licenses exactly three classes the source lacks: a CLI usage error, a dead
-    worker, and a merge *or* writer failure.  The last of those is one class,
-    so it is one member - :attr:`ARTIFACT_FAILURE` - with no alias beside it,
-    since a second name for the same number would preserve the appearance of a
-    fourth class in ``--help``, in a log line and in a reader's head.
-
-    ``1`` is absent deliberately: it is what an uncaught exception and an
-    interrupt produce, so reusing it for a defined class would make a status
-    ambiguous.  Every value below is asserted by ``tests/test_cli.py``.
+    Three non-zero members, because AAP deviation 15 licenses exactly three
+    classes the source lacks.  ``1`` is absent deliberately: it is what an
+    uncaught exception or an interrupt produces.
 
     Attributes:
         SUCCESS: The run completed.  **Every test outcome lands here** -
-            failing scenarios, errors, undefined and skipped steps, a browser
-            that fails to start, an unrecognised ``browser`` value, a feature
-            that fails to parse, a missing or malformed rerun manifest, and a
-            tag expression that selected nothing.  ``pom.xml:25`` and the six
-            ``-1`` publisher thresholds (``Jenkins:15``) put a test outcome
-            outside the exit status, and this port preserves that.
+            failures, errors, undefined or skipped steps, a browser that will
+            not start, an unrecognised ``browser`` value, a feature that fails
+            to parse, a missing or malformed rerun manifest, and a tag
+            expression that selected nothing (``pom.xml:25``, ``Jenkins:15``).
         USAGE_ERROR: An unknown or conflicting option, including
-            ``--rerun --tags``, a malformed ``--tags`` expression and a
+            ``--rerun --tags``, a ``--tags`` expression that is malformed,
+            over-long or carries a non-printable character, and a
             non-positive ``--workers``.  Click's own convention for a
             :exc:`click.UsageError`, so the two agree.  Nothing is executed
             and no artifact is written.
         WORKER_DIED: A worker process produced no results.  The artifacts are
             still written from the shards that completed, and every incomplete
             shard is named on stderr.
-        ARTIFACT_FAILURE: This port's own artifact production, or the build
-            output directory it needs, failed.  One status, four causes, and
-            each keeps its own diagnostics and its own artifact behaviour:
-
-            * **The merge produced no result set.**  Scenarios were selected
-              and not one worker result could be read, so there is no document
-              to write; no artifact is written and the build output directory
-              is left as the clean step left it.
-            * **A report writer failed.**  Artifacts written before it remain
-              - nothing is rolled back - and the failing writer is named on
-              stderr.
-            * **The ``--clean`` step could not empty the build output.**  A
-              symlink or a non-directory occupying its path, an entry that
-              could not be removed, or an entry that survived the attempt.
-              Nothing is executed and no writer is reached, because the state
-              of what the publisher would read is unknown.
-            * **The per-worker intermediate directory could not be prepared
-              or removed.**  That directory's whole lifecycle - creating it,
-              handing each worker a path inside it, and removing it - belongs
-              to ``app/services/test_run_service.py``; this member is the
-              published class such a failure is reported under, so an
-              intermediate result document left visible to the publisher
-              (``Jenkins:15`` narrows its glob to the JSON report alone) can
-              never be reported as success.
+        ARTIFACT_FAILURE: One class, four causes, each keeping its own
+            diagnostics: the merge produced no result set (nothing written), a
+            writer failed (earlier artifacts retained, nothing rolled back),
+            the ``--clean`` step could not empty the build output (nothing
+            executed), or this run's per-worker intermediate directory could
+            not be prepared or removed.
     """
 
     SUCCESS = 0
@@ -461,7 +505,29 @@ class ExitCode(IntEnum):
 # before logging is configured, before the clean step and before the run
 # service is reached - which is what the usage-error row of the exit contract
 # requires: "nothing executed", and nothing written or removed either.
+#
+# That "before logging is configured" is also why the ``--tags`` callback does
+# its own rendering.  Click prints a rejected option's reason itself, on
+# stderr, through no handler of this port's, so the sanitizing formatter
+# ``app/logging_config.py`` installs on every handler does not cover a single
+# character of it: whatever the callback puts in a ``click.BadParameter``
+# message reaches the console exactly as written.  A tag-expression parser
+# error is not this port's text - it is a third-party message that quotes the
+# user's own expression back and spans *three physical lines* while doing it -
+# so it is rendered through :func:`~app.logging_config.sanitize_log_text`
+# before it is handed to Click, and the value is bounded and checked for
+# printability before it is ever parsed.
 # --------------------------------------------------------------------------- #
+
+#: How much of a tag-expression parser error is reflected back, in characters.
+#: The grammar's own diagnostics quote the whole expression twice - once in
+#: prose and once under a caret marker - so an accepted-length expression can
+#: produce a message of some kilobytes, and the reason for a rejected option
+#: has to stay short enough to read next to the usage text Click prints under
+#: it.  The bound is applied by :func:`~app.logging_config.sanitize_log_text`,
+#: which appends a notice naming how many characters it dropped, so a
+#: truncated reason is never mistaken for the whole one.
+_TAG_ERROR_MESSAGE_LIMIT: Final[int] = 200
 
 
 def _validate_tag_expression(
@@ -469,7 +535,7 @@ def _validate_tag_expression(
     param: click.Parameter,
     value: str,
 ) -> str:
-    """Reject a malformed ``--tags`` expression as a usage error.
+    """Bound, screen and parse a ``--tags`` expression, or reject it.
 
     The full grammar is supported - ``@Smoke``, ``@Login and not @wip``,
     ``@UPGN-286 or @UPGN-287`` - and the parsed form is deliberately
@@ -477,28 +543,87 @@ def _validate_tag_expression(
     parsing it a second time there is cheap next to the alternative, which is
     a malformed value surfacing as a traceback in the middle of a run.
 
+    Three checks, in this order, and the order is the point:
+
+    1. **Length**, against :data:`TAG_EXPRESSION_LENGTH_LIMIT`, first - so
+       nothing downstream examines, copies, logs or forwards an expression of
+       arbitrary size.  The grammar accepts one of hundreds of kilobytes
+       without complaint, and such a value would then be held for the whole
+       run, echoed in a record and repeated on every worker's command line.
+       The rejection states the limit and the actual length as numbers and
+       quotes none of the text.
+    2. **Printability**, character by character - every C0 control including
+       ``TAB``, ``CR`` and ``LF``, ``DEL``, the C1 range and the Unicode line
+       and paragraph separators ``U+2028``/``U+2029`` are refused, and a plain
+       space is the one non-printable-adjacent character allowed because the
+       grammar's own separator is a space.  This removes nothing that ever
+       worked: a tag is word-shaped, and an expression carrying a newline or a
+       tab already fails to parse.  It does remove two live problems - a
+       terminal escape sequence, which the grammar *accepts* inside a tag and
+       which would then travel into a log record and a worker command line,
+       and any control character reaching the console through Click's own
+       unsanitized error path.  The rejection names the offending character by
+       its index and its escape spelling (``repr`` of the single character,
+       which is printable ASCII by construction) and never echoes the
+       expression, so the reason cannot carry the offence it reports.
+    3. **The grammar**, last.  Its error message is a third party's text
+       spanning several lines and quoting the expression back, so it is
+       rendered through :func:`~app.logging_config.sanitize_log_text` with the
+       :data:`_TAG_ERROR_MESSAGE_LIMIT` bound: one physical line, no control
+       character, no escape sequence, and a notice when anything was dropped.
+
+    Every rejection is a :exc:`click.BadParameter`, so all three share the one
+    outcome the exit contract defines for a bad option value -
+    :attr:`ExitCode.USAGE_ERROR`, nothing executed, nothing written and
+    nothing removed.  ``--browser`` is deliberately *not* screened this way:
+    ``Driver.java``'s switch has no default branch, so an unrecognised browser
+    must reach the driver and fail at first use, and that asymmetry between
+    the two forwarded option values is required rather than incidental.
+
     Args:
         ctx: The Click context, supplied by the parser.  Unused, and named
             because Click calls a callback positionally.
         param: The parameter being processed, used to name it in the error.
         value: The expression as the user wrote it, or the declared default
             when the option was not given.  A callback runs for a default too,
-            which is intentional: it keeps the shipped default honest.
+            which is intentional: it keeps the shipped default honest, and
+            :data:`DEFAULT_TAG_EXPRESSION` passes all three checks.
 
     Returns:
-        ``value`` unchanged, so the expression reaches the service exactly as
-        the user wrote it.
+        ``value`` unchanged - not stripped, not normalised, not rewritten - so
+        an accepted expression reaches the service exactly as the user wrote
+        it.
 
     Raises:
-        click.BadParameter: If the expression cannot be parsed.  Click turns
-            it into :attr:`ExitCode.USAGE_ERROR` and prints the reason on
-            stderr.
+        click.BadParameter: If the expression is longer than
+            :data:`TAG_EXPRESSION_LENGTH_LIMIT`, contains a character that is
+            neither printable nor a plain space, or cannot be parsed.  Click
+            turns it into :attr:`ExitCode.USAGE_ERROR` and prints the reason
+            on stderr, on one physical line.
     """
     del ctx  # The callback signature is Click's; the context is not needed.
+    length = len(value)
+    if length > TAG_EXPRESSION_LENGTH_LIMIT:
+        raise click.BadParameter(
+            f"the expression is {length} characters long, and at most "
+            f"{TAG_EXPRESSION_LENGTH_LIMIT} are accepted",
+            param=param,
+        )
+    for index, character in enumerate(value):
+        if character != " " and not character.isprintable():
+            raise click.BadParameter(
+                f"the expression contains the non-printable character "
+                f"{character!r} at index {index}; a tag expression is made of "
+                f"printable characters separated by spaces",
+                param=param,
+            )
     try:
         TagExpressionParser.parse(value)
     except TagExpressionError as error:
-        raise click.BadParameter(str(error), param=param) from error
+        raise click.BadParameter(
+            sanitize_log_text(str(error), limit=_TAG_ERROR_MESSAGE_LIMIT),
+            param=param,
+        ) from error
     return value
 
 
@@ -524,24 +649,31 @@ def _option_given(ctx: click.Context, name: str) -> bool:
     return ctx.get_parameter_source(name) is not click.ParameterSource.DEFAULT
 
 
-# --------------------------------------------------------------------------- #
-# The clean step
-#
-# ``mvn clean test`` (``Jenkins:8``, ``Jenkins:10``) emptied the build output
-# before every run, and this is that half of the command.  It is the only code
-# in this port that deletes anything the user did not name, so it is written
-# against both of its hostile directions at once:
+# The clean step reproduces ``mvn clean test`` (``Jenkins:8``,
+# ``Jenkins:10``), which emptied the build output before every run.  It is the
+# only code in this port that deletes anything the user did not name, so it is
+# written against both of its hostile directions at once:
 #
 # * **Following a link out of the checkout.**  A build output directory that is
 #   a symlink, or an entry inside it that is one, must never be traversed while
 #   deleting; a plain ``is_dir()`` test is true for a symlink to a directory,
 #   which is how a recursive delete escapes the repository (CWE-59).
+# * **Following a *reparse point* out of the checkout**, which is the same
+#   escape by a route a link test does not see.  A Windows junction is reported
+#   by ``os.lstat`` with the directory bit set and the link bit clear, and with
+#   its own device and inode, so it satisfies every identity check while
+#   ``iterdir`` and ``shutil.rmtree`` walk straight through it - and
+#   ``Path.resolve()`` resolves *through* it too, so a containment test made
+#   against the resolved root would find the external tree's own children
+#   "inside" it and delete them (CWE-22, and CWE-367 for the swap that installs
+#   one mid-operation).  Every indirection is therefore refused by one test,
+#   :func:`_indirection_problem`, applied to the root, to every entry, and
+#   again at each re-check.
 # * **Carrying on over output whose state is unknown.**  A clean that could not
 #   finish leaves obsolete report pages and stale worker intermediates where
 #   the run's own writers may not overwrite them and the publisher will still
 #   read them, so it is an artifact-infrastructure failure and not a cosmetic
 #   one - see :attr:`ExitCode.ARTIFACT_FAILURE`.
-# --------------------------------------------------------------------------- #
 
 #: Whether this platform can enumerate and delete *relative to an open
 #: directory descriptor*, which is what removes the window between checking
@@ -560,11 +692,66 @@ _SUPPORTS_DESCRIPTOR_CLEANING: Final[bool] = (
     and shutil.rmtree.avoids_symlink_attacks
 )
 
-#: How many individual problems a returned clean-failure reason names before
-#: it abbreviates.  Every one of them is logged in full as it is discovered;
-#: this only bounds the single summary line, so one unreadable directory with
-#: two hundred entries cannot turn the status line into a wall of text.
 _MAX_REPORTED_CLEAN_PROBLEMS: Final[int] = 3
+
+
+def _indirection_problem(path: Path, info: os.stat_result) -> str | None:
+    """Return why a path must not be emptied or traversed, or ``None``.
+
+    One test for **every** kind of indirection a directory can be, because two
+    of the three are indistinguishable from an ordinary directory to the tests
+    that preceded this function:
+
+    * A **symbolic link**, which :data:`stat.S_ISLNK` reports on both
+      platforms.  Neither traversed nor unlinked: deleting a link a user
+      deliberately placed is as presumptuous as deleting what it points at,
+      and ``--no-clean`` is the escape hatch for a checkout laid out that way.
+    * A **Windows junction**, which it does not.  ``os.lstat`` reports a
+      junction as a directory, with the link bit clear and with its own device
+      and inode, so it passes a link test and every identity check while
+      ``iterdir`` and :func:`shutil.rmtree` resolve through it into whatever it
+      points at.  It is recognised here through the two Windows-only fields
+      :class:`os.stat_result` carries for reparse points, read with
+      :func:`getattr` so that this is one code path on every platform rather
+      than a Windows-only branch nothing else ever exercises.
+    * Any **other reparse point** - a mounted volume, a cloud-storage or
+      deduplication placeholder - refused for the same reason and stated as
+      such: whatever it redirects to, a deletion that resolves a name cannot
+      be bound to the object that was checked, so this step fails closed
+      instead of deleting something it cannot identify.
+
+    Args:
+        path: The path being considered, named in the returned reason.
+        info: Its :func:`os.lstat` result - never :func:`os.stat`, which
+            resolves the very indirection this looks for.
+
+    Returns:
+        ``None`` when the path may be operated on by name, and otherwise a
+        one-line reason naming what it is and that nothing was removed.  The
+        caller turns a reason into :attr:`ExitCode.ARTIFACT_FAILURE`: a build
+        output whose state cannot be established is an artifact-infrastructure
+        failure, not a cosmetic one.
+    """
+    if stat.S_ISLNK(info.st_mode):
+        return (
+            f"the build output directory {path} is a symbolic link; emptying "
+            "it would delete whatever it points at, which may lie anywhere "
+            "outside this checkout, so it was not traversed and nothing was "
+            "removed - pass --no-clean, or replace the link with a real "
+            "directory"
+        )
+    attributes = getattr(info, "st_file_attributes", 0)
+    tag = getattr(info, "st_reparse_tag", 0)
+    if attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT or tag:
+        return (
+            f"the build output directory {path} is a reparse point (a "
+            "junction or a mounted volume) rather than a plain directory; "
+            "emptying it would recurse into whatever it redirects to, which "
+            "may lie anywhere outside this checkout, so it was not traversed "
+            "and nothing was removed - pass --no-clean, or replace it with a "
+            "real directory"
+        )
+    return None
 
 
 def _workers_dir_name() -> str:
@@ -592,11 +779,12 @@ def _empty_build_output() -> str | None:
     each case emptying the path would destroy something that is not this
     command's build output:
 
-    * **A symlink at the root.**  It is identified with :func:`os.lstat`, so
-      the link itself is examined rather than its target, and it is neither
-      traversed nor unlinked - deleting a link a user deliberately placed is
-      as presumptuous as deleting what it points at.  ``--no-clean`` is the
-      escape hatch for a checkout laid out that way.
+    * **An indirection at the root** - a symlink, a Windows junction, or any
+      other reparse point.  All three are identified with :func:`os.lstat`, so
+      the entry itself is examined rather than its target, and all three are
+      refused by :func:`_indirection_problem` rather than traversed,
+      unlinked or walked.  ``--no-clean`` is the escape hatch for a checkout
+      laid out that way.
     * **A non-directory at the root.**  A file occupying the path cannot be
       emptied, and the writers cannot write into it either.
     * **An entry whose removal fails, and an entry that survives the
@@ -609,28 +797,21 @@ def _empty_build_output() -> str | None:
     (a check-then-use race) and no deletion is ever resolved through a path a
     second time.  Where it does not - Windows - the root's identity is
     re-established before every removal and the step fails closed the moment
-    it changes, which is the same defence by the only means available there.
+    it changes, and each entry is removed by being moved to a private name
+    inside that verified root and re-identified there before anything
+    recursive happens to it
+    (:func:`~app.services.delete_verified_entry`), so a name substituted
+    between the check and the removal is refused rather than followed.
 
     **One entry is not deleted here**: the per-worker intermediate directory
-    is handed to :func:`~app.services.reclaim_workers_root`, because it holds
-    the working files of every run in this checkout and only the run service
-    can tell an abandoned run's leftovers from a live run's results.  What
-    that call retains is reported and is not a failure - a clean that deleted
-    a concurrent run's intermediates would turn its live results into missing
-    worker files, which is the one outcome worse than an entry surviving.
-
-    Failures are **collected rather than returned on the first one**, so a
-    single command reports every reason the build output is not clean instead
-    of one reason per invocation.
+    is handed to :func:`~app.services.reclaim_workers_root`, which alone can
+    tell an abandoned run's leftovers from a live run's results, and what it
+    retains is reported rather than counted a failure.
 
     Returns:
-        ``None`` when the build output directory is known to be empty
-        afterwards, which includes the case where it never existed at all; a
-        one-line reason otherwise, suitable for a log record and naming what
-        could not be done.  The caller turns a reason into
-        :attr:`ExitCode.ARTIFACT_FAILURE` and does not start the suite: the
-        clean step's completion is a precondition of the run, not a detail of
-        it.
+        ``None`` when the directory is known to be empty afterwards, including
+        when it never existed; otherwise a one-line reason, which the caller
+        turns into :attr:`ExitCode.ARTIFACT_FAILURE` without starting the run.
     """
     root = target_root()
 
@@ -645,14 +826,10 @@ def _empty_build_output() -> str | None:
     except OSError as error:
         return f"cannot inspect the build output directory {root}: {error}"
 
-    if stat.S_ISLNK(root_status.st_mode):
-        return (
-            f"the build output directory {root} is a symbolic link; emptying "
-            "it would delete whatever it points at, which may lie anywhere "
-            "outside this checkout, so it was not traversed and nothing was "
-            "removed - pass --no-clean, or replace the link with a real "
-            "directory"
-        )
+    indirection = _indirection_problem(root, root_status)
+    if indirection is not None:
+        logger.error("Clean refused: %s", indirection)
+        return indirection
     if not stat.S_ISDIR(root_status.st_mode):
         return (
             f"the build output directory {root} is not a directory, so it "
@@ -744,8 +921,6 @@ def _empty_through_descriptor(
             _verify_descriptor_empty(root, descriptor, retained=retained)
         )
     finally:
-        # In a ``finally`` because every return above and any unexpected
-        # exception must still give the descriptor back.
         os.close(descriptor)
     return problems
 
@@ -842,14 +1017,16 @@ def _note_retained(retained: Sequence[Path]) -> None:
     entry survived a clean.
 
     Args:
-        retained: The live run directories, from
-            :func:`~app.services.reclaim_workers_root`.  Empty in the normal
-            case of a single run, which is why this is silent then.
+        retained: The entries the run service kept, from
+            :func:`~app.services.reclaim_workers_root` - a live run's
+            directory, and this run's own lock file, which that function never
+            deletes because it is what makes one run exclusive.  Empty only
+            when the intermediate directory held nothing at all.
     """
     if not retained:
         return
     logger.info(
-        "Retained the intermediates of %d run(s) still in progress: %s",
+        "Retained %d entr(y/ies) still in use by a run: %s",
         len(retained),
         ", ".join(str(directory) for directory in retained),
     )
@@ -901,24 +1078,32 @@ def _empty_through_paths(root: Path, expected: os.stat_result) -> list[str]:
 
     The fallback for a platform where :data:`_SUPPORTS_DESCRIPTOR_CLEANING` is
     false - Windows, which AAP §0.8 lists as supported.  It keeps every
-    guarantee the descriptor path keeps except the closing of the check-then-use
-    window, which cannot be closed without descriptor-relative calls: the
-    caller has already refused a symlinked root, a symlinked entry is unlinked
-    and never followed, each directory is confirmed to still resolve directly
-    inside the root before it is walked, and the result is verified.  The
-    residual race is stated rather than hidden: between the containment check
-    and the walk, a privileged concurrent process could still substitute the
-    entry.  A build output directory writable by a hostile process is outside
-    what a build tool can defend, and the platform offers nothing stronger.
+    guarantee the descriptor path keeps: the caller has already refused a
+    symlinked or re-pointed root, a symlinked entry is unlinked and never
+    followed, a reparse point is refused outright, each real directory is
+    confirmed to still resolve directly inside the root before anything is
+    removed through it, and the result is verified.
+
+    **The check-then-use window is closed too, and not by re-checking the
+    name.**  Every removal goes through
+    :func:`~app.services.delete_verified_entry`, which moves a directory to a
+    private random name inside this already-verified root before removing it
+    recursively and re-establishes the object's identity through that private
+    name.  An entry substituted between the containment check and the removal
+    is therefore moved aside and refused rather than followed, and a recursive
+    deletion can no longer be redirected outside this root by replacing a
+    name.  What remains outside what a build tool can defend is a build output
+    directory whose *root* a hostile process can replace faster than each
+    per-entry identity re-check below can read it - which is detected and
+    fails closed, having removed nothing further.
 
     Args:
         root: The build output directory, already established by the caller to
             be a real directory and not a symlink.
         expected: The ``lstat`` result the caller validated.  The root's
-            identity is re-checked against it before **every** removal, which
-            is what keeps a root replaced after that check from being
-            traversed: the substitution is detected and the step fails
-            closed, having removed nothing further.
+            identity is re-checked against it before **every** removal, so a
+            root replaced after that check is detected and the step fails
+            closed rather than traversing it.
 
     Returns:
         Every problem encountered, in discovery order, and an empty list when
@@ -955,8 +1140,6 @@ def _empty_through_paths(root: Path, expected: os.stat_result) -> list[str]:
             and entry.is_dir()
             and not entry.is_symlink()
         ):
-            # The run service's directory - see the descriptor strategy for
-            # why the clean step does not empty it itself.
             reason, live = reclaim_workers_root()
             retained.extend(live)
             if reason is not None:
@@ -966,31 +1149,60 @@ def _empty_through_paths(root: Path, expected: os.stat_result) -> list[str]:
             continue
 
         try:
-            if entry.is_symlink() or not entry.is_dir():
-                # A symlink is removed as the link it is, whatever it points
-                # at, so nothing outside the build output is ever reached.
-                # Its own containment is the root identity check above: the
-                # link sits directly in the checked directory, and unlinking
-                # it never touches what it points at.
-                entry.unlink()
-            else:
-                # A directory is walked, so where it *resolves* matters: a
-                # junction or a link that slipped past the type test, and
-                # anything reached through a relinked component, is refused.
-                containment = _containment_problem(entry, root)
-                if containment is not None:
-                    logger.error("Clean refused: %s", containment)
-                    problems.append(containment)
-                    continue
-                shutil.rmtree(entry)
+            # ``lstat`` first, so what follows is decided about the entry
+            # itself and never about what it points at.
+            entry_status = os.lstat(entry)
         except FileNotFoundError:
-            # Gone between the listing and the removal, from either the type
-            # test or the removal itself.  That is this step's postcondition
-            # and not a failure of it - see the same case in
-            # :func:`_remove_descriptor_entries`.
+            # Gone between the listing and the check, which satisfies this
+            # step's postcondition rather than violating it - see the same
+            # case in :func:`_remove_descriptor_entries`.
             removed += 1
+            continue
         except OSError as error:
-            problem = f"could not remove {entry}: {error}"
+            problem = f"could not inspect {entry}: {error}"
+            logger.error("Clean failed: %s", problem)
+            problems.append(problem)
+            continue
+
+        if stat.S_ISDIR(entry_status.st_mode) and not _entry_is_reparse_point(
+            entry_status
+        ):
+            # Only a *real directory* is walked, so only a real directory has
+            # to resolve inside the root: an entry reached through a relinked
+            # or re-pointed intermediate component is refused before anything
+            # is removed.  A link and a reparse point never reach this test -
+            # the first is unlinked as the link it is, which cannot touch its
+            # target, and the second is refused outright below.
+            try:
+                containment = _containment_problem(entry, root)
+            except FileNotFoundError:
+                removed += 1
+                continue
+            if containment is not None:
+                logger.error("Clean refused: %s", containment)
+                problems.append(containment)
+                continue
+
+        # The removal itself is the run service's one destructive primitive,
+        # shared with the reclaim of the intermediate directory so that this
+        # port has a single implementation of it.  It refuses a link or a
+        # reparse point, and for a directory it moves the entry to a private
+        # random name inside this verified root *before* removing it
+        # recursively, re-establishing the object's identity through that
+        # private name - which is what closes the window a pathname deletion
+        # otherwise leaves open, where an entry verified as a plain directory
+        # is replaced by a junction before ``rmtree`` resolves the name again.
+        problem = delete_verified_entry(
+            root,
+            entry.name,
+            role="entry of the build output",
+            # A link here is an entry of a directory being emptied, so the
+            # link goes and its target is untouched - the asymmetry with a
+            # link *at* the root, which is refused because emptying it would
+            # mean emptying whatever it points at.
+            unlink_links=True,
+        )
+        if problem is not None:
             logger.error("Clean failed: %s", problem)
             problems.append(problem)
         else:
@@ -1020,6 +1232,28 @@ def _empty_through_paths(root: Path, expected: os.stat_result) -> list[str]:
     return problems
 
 
+def _entry_is_reparse_point(info: os.stat_result) -> bool:
+    """Return whether a stat result describes a reparse point.
+
+    The predicate half of :func:`_indirection_problem`, for the places that
+    need the fact rather than a reason phrased about the build output root.
+    Both Windows-only fields are read with :func:`getattr` and default to
+    zero, so this answers ``False`` on POSIX - where the kind does not exist -
+    without a platform branch.
+
+    Args:
+        info: An :func:`os.lstat` result.
+
+    Returns:
+        ``True`` for a junction, a mounted volume, or any other reparse point.
+    """
+    attributes = getattr(info, "st_file_attributes", 0)
+    return bool(
+        attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        or getattr(info, "st_reparse_tag", 0)
+    )
+
+
 def _root_identity_problem(root: Path, expected: os.stat_result) -> str | None:
     """Return why the build output root is no longer the one checked.
 
@@ -1045,10 +1279,19 @@ def _root_identity_problem(root: Path, expected: os.stat_result) -> str | None:
             f"{root} could not be re-checked while it was being emptied "
             f"({error}), so nothing further was removed"
         )
-    if stat.S_ISLNK(current.st_mode) or not stat.S_ISDIR(current.st_mode):
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or _entry_is_reparse_point(current)
+        or not stat.S_ISDIR(current.st_mode)
+    ):
+        # The reparse test makes this re-check symmetrical with the initial
+        # one, so a root that has become an indirection is refused in those
+        # terms wherever it is first observed, rather than being reported as a
+        # changed inode - which is true but describes the wrong hazard, and
+        # would be the *only* thing said about a junction installed here.
         return (
-            f"{root} is no longer a directory, so it was replaced while it "
-            "was being emptied and nothing further was removed"
+            f"{root} is no longer a plain directory, so it was replaced while "
+            "it was being emptied and nothing further was removed"
         )
     if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
         return (
@@ -1063,9 +1306,16 @@ def _containment_problem(entry: Path, root: Path) -> str | None:
 
     The containment test for the path-based fallback: an entry may only be
     walked when it fully resolves to a direct child of the fully resolved
-    root.  A junction or a directory symlink that slipped past the type test,
-    and any entry reached through a relinked intermediate component, fail here
-    and are reported instead of being walked.
+    root.  Any entry reached through a relinked or re-pointed intermediate
+    component fails here and is reported instead of being walked.
+
+    It is reached only for an entry already established to be a plain
+    directory, and only while the root is established to be a plain directory
+    too - both by :func:`_indirection_problem` and its predicate, on every
+    pass.  That ordering is what makes this test meaningful rather than
+    circular: :meth:`~pathlib.Path.resolve` resolves *through* a junction, so
+    a root that was one would resolve to the external tree and every one of
+    that tree's own children would compare as contained.
 
     Args:
         entry: The candidate entry, a direct child of ``root`` by
@@ -1125,31 +1375,78 @@ def _report_survivors(root: Path, survivors: list[str]) -> list[str]:
     return [problem]
 
 
-# --------------------------------------------------------------------------- #
-# Reporting what a finished run reports
-#
 # Each helper below writes what the exit contract requires to be visible, and
-# this file is the **single emitter** of every one of those facts.  The rule
-# the three modules share, stated the same way in each: a fact an outcome
-# carries is reported exactly once, by the command that reads the outcome.
-#
-# So the services return structured facts and do not log them.  A tolerated
-# selection problem arrives on ``RunOutcome.parse_errors``, a dead shard's
-# reason on ``RunOutcome.dead_shards``, the writers left unattempted on
+# this file is the **single emitter** of every one of those facts: a fact an
+# outcome carries is reported exactly once, by the command that reads it.  The
+# services therefore return structured facts and log none of them - a tolerated
+# selection problem on ``RunOutcome.parse_errors``, a dead shard's reason on
+# ``RunOutcome.dead_shards``, the writers left unattempted on
 # ``ReportOutcome.skipped`` and the artifacts that survived on
-# ``ReportOutcome.written`` - and each is named here, beside the exit class it
-# implies, rather than here *and* there.  Emitting from both layers, which is
-# what this command used to do, turned one incident into several ERROR
-# records under two logger names: a reader counting errors over-counted the
-# run, and neither layer was the canonical account of anything.
+# ``ReportOutcome.written`` - so one incident is one record under one logger
+# name, and a reader counting ERROR records counts incidents.
 #
-# One fact is not an outcome field and is therefore not this file's to emit:
-# the cause of a writer failure, with its traceback, which
-# ``app/services/report_service.py`` reports at the point it catches the
-# exception.  The record below is the *consequence* - the status, the writer
-# and the destination it was producing - and it deliberately does not repeat
-# that cause.
-# --------------------------------------------------------------------------- #
+# One fact is not an outcome field and so is not this file's to emit: the cause
+# of a writer failure, with its traceback, which
+# ``app/services/report_service.py`` reports where it catches the exception.
+# The records below are the *consequence* - the status, the writer and the
+# destination it was producing - and deliberately do not repeat that cause.
+
+
+#: Character bound applied to one rendered selection problem, and the reason
+#: it is the console contract's published bound rather than a number of this
+#: file's own.  A tolerated problem is engine-authored diagnostic prose - a
+#: parser error carrying its source position, a manifest reader's grammar
+#: reason and errno, a shard's own reason for producing nothing - which is
+#: exactly the class of text ``app/logging_config.py`` sized
+#: :data:`~app.logging_config.RELAYED_LINE_LIMIT` for, and a second constant
+#: here could only drift from it.  Two consequences, both deliberate: the
+#: longest diagnostic the port really produces is an order of magnitude
+#: shorter than this bound, escape spellings counted, so truncation never
+#: clips a real one in practice; and a producer that hands over a megabyte of
+#: text still costs one bounded record instead of burying the rest of the
+#: run's log, with the truncation notice naming exactly how many characters
+#: were dropped so a clipped record cannot be mistaken for a complete one.
+_SELECTION_PROBLEM_LIMIT: Final[int] = RELAYED_LINE_LIMIT
+
+
+def _render_selection_problem(problem: str) -> str:
+    """Render one tolerated selection problem as a single safe log record.
+
+    The emitter of a fact does not get to assume the fact is safe text.  A
+    problem on :attr:`~app.services.RunOutcome.parse_errors` is built by
+    whichever producer tolerated it - the engine's own parser, the rerun
+    manifest reader, a worker's diagnostics - and each of those strings can
+    carry text the port did not author.  Two things follow, and both are
+    handled here rather than trusted to every producer in turn:
+
+    * A ``CR`` or ``LF`` inside a problem would end this record and start
+      what a reader, a log scraper or a CI parser takes for a second one, so
+      a line such as ``ERROR app.cli: Exit 3: ...`` could be forged wholesale;
+      an ``ESC`` sequence inside it can recolour, erase or overwrite what the
+      console has already printed (CWE-117).  Every control character
+      therefore leaves here spelled printably and no line break of any kind
+      survives, which is what makes "one problem, one record" true of a
+      hostile problem as well as an ordinary one.
+    * An unbounded problem is an unbounded record, so the rendering is cut to
+      :data:`_SELECTION_PROBLEM_LIMIT` characters with a notice naming how
+      many were dropped.
+
+    Rendering, never rewriting: a control-free problem within the bound comes
+    back character for character, because the whole value of this record is
+    that it says what the run tolerated.  The escaping and the bound are
+    applied by :func:`~app.logging_config.sanitize_log_text`, the port's one
+    implementation of both, so this command's diagnostics and a relayed
+    worker line cannot diverge in what they let onto the console.
+
+    Args:
+        problem: One element of
+            :attr:`~app.services.RunOutcome.parse_errors`.
+
+    Returns:
+        One physical line, free of control characters and bounded, ready to
+        pass as a ``%s`` argument.
+    """
+    return sanitize_log_text(problem, limit=_SELECTION_PROBLEM_LIMIT)
 
 
 def _report_selection_problems(outcome: RunOutcome) -> None:
@@ -1167,6 +1464,13 @@ def _report_selection_problems(outcome: RunOutcome) -> None:
     whole of what a reader sees - one incident, one record, and an error count
     that matches the number of things that went wrong.
 
+    Being the only emitter is also why each problem goes through
+    :func:`_render_selection_problem` before it reaches a record: the count in
+    the summary line is a promise about how many records follow, and a problem
+    carrying a line break would break that promise by becoming two of them.
+    The rendering is what keeps the record count equal to the problem count
+    plus this one summary, whatever a producer put in the text.
+
     Args:
         outcome: The finished run.
     """
@@ -1180,17 +1484,60 @@ def _report_selection_problems(outcome: RunOutcome) -> None:
         int(ExitCode.SUCCESS),
     )
     for problem in outcome.parse_errors:
-        logger.error("Tolerated: %s", problem)
+        logger.error("Tolerated: %s", _render_selection_problem(problem))
 
 
-def _worker_status(outcome: RunOutcome) -> ExitCode:
-    """Return the status a run's shard results imply, naming any dead shard.
+def _report_dead_shards(outcome: RunOutcome) -> None:
+    """Name every shard that produced no results, whatever the run's status.
 
     Each reason is logged here and nowhere else: the run service builds it -
     naming the shard, its scenario count and what went wrong - carries it on
-    :attr:`~app.services.RunOutcome.dead_shards` and does not log it, so the
-    count and the per-shard lines below are one account rather than a second
-    copy of one.
+    :attr:`~app.services.RunOutcome.dead_shards` and deliberately does not log
+    it, so the count and the per-shard lines below are one account rather than
+    a second copy of one.
+
+    **Separated from the exit class on purpose.**  A dead shard and an
+    artifact failure can coexist, and the artifact failure outranks it - most
+    obviously when *every* worker dies, which leaves nothing to merge, so the
+    run reports the empty merge.  While this emission lived inside
+    :func:`_worker_status`, that path returned its status before any of these
+    lines were written and the log named only the aggregate merge failure: the
+    shard indices, their locations and their reasons - the only record of
+    *which* work was lost and why - were computed and then discarded.  This
+    function is therefore called once, before the precedence returns in
+    :func:`_publish`, and the status functions below only name the class they
+    return.
+
+    Args:
+        outcome: The finished run.  A run with no dead shard is silent here.
+    """
+    if not outcome.dead_shards:
+        return
+
+    # Status-neutral on purpose.  This record is written before the exit class
+    # is known - that is the whole point of it - so it states only what the
+    # run observed.  What became of the artifacts is a different fact, decided
+    # further down and reported by whichever branch decides it: all four from
+    # the completed shards at :attr:`ExitCode.WORKER_DIED`, none at all when
+    # the merge produced nothing, a prefix when a writer failed, and none by
+    # design under ``--rerun``.  Claiming any of those here would contradict
+    # the record that follows on three of those four paths.
+    logger.error(
+        "%d of %d worker shard(s) produced no results; each one is named below",
+        len(outcome.dead_shards),
+        outcome.worker_count,
+    )
+    for reason in outcome.dead_shards:
+        logger.error("Incomplete shard: %s", reason)
+
+
+def _worker_status(outcome: RunOutcome) -> ExitCode:
+    """Return the status a run's shard results imply.
+
+    The reasons themselves are not logged here: :func:`_report_dead_shards`
+    has already named every one of them, before whichever exit class the run
+    settles on, so this adds only the status line for the class it returns and
+    the two never duplicate each other.
 
     Args:
         outcome: The finished run.
@@ -1205,68 +1552,86 @@ def _worker_status(outcome: RunOutcome) -> ExitCode:
         return ExitCode.SUCCESS
 
     logger.error(
-        "Exit %d: %d of %d worker shard(s) produced no results",
+        "Exit %d: %d of %d worker shard(s) produced no results, so the four "
+        "artifacts were written from the shards that completed",
         int(ExitCode.WORKER_DIED),
         len(outcome.dead_shards),
         outcome.worker_count,
     )
-    for reason in outcome.dead_shards:
-        logger.error("Incomplete shard: %s", reason)
     return ExitCode.WORKER_DIED
 
 
-#: Printed in place of a failed writer's destination when the fan-out could not
-#: resolve one.  Deliberately not path-shaped: a reader must not be able to
-#: mistake it for somewhere to look.  Not a path literal, and not a second
-#: spelling of one - the destination itself always arrives on the outcome.
 _UNRESOLVED_DESTINATION: Final[str] = "an unresolved destination"
 
 
 def _writer_failure_status(report: ReportOutcome) -> ExitCode:
     """Report a failed writer and return the status it implies.
 
-    Nothing is rolled back here and nothing is rolled back anywhere else: the
-    artifacts already written stay exactly where their writers put them, which
-    is the writer-failure cause of :attr:`ExitCode.ARTIFACT_FAILURE`.  The
-    failing writer is named **together with the destination it was
-    producing**, the writers left unattempted are named, and the artifacts
-    that survive are named, so a CI log identifies what the publisher will
-    find without anyone re-running the command.
+    Nothing is rolled back, here or anywhere else: the artifacts already
+    written stay where their writers put them, which is the writer-failure
+    cause of :attr:`ExitCode.ARTIFACT_FAILURE`.  The failing writer is named
+    together with the destination it was producing, the writers left
+    unattempted are named, and the surviving artifacts are named, so a CI log
+    identifies what the publisher will find without a second run.
 
-    The destination is read from the outcome, never re-derived: the fan-out
-    resolved it from the artifact key ``app/utils/paths.py`` publishes, and
-    resolving it a second time here would put a second spelling of one path in
-    the port - which is why this file knows no artifact path at all.  It is
-    optional on the outcome, so an unresolved destination degrades to readable
-    text instead of printing a bare ``None``.
+    Every field comes off the outcome and none is re-derived - the destination
+    in particular, because resolving it again here would put a second spelling
+    of one path in the port.  It is optional on the outcome, so an unresolved
+    destination degrades to readable text instead of a bare ``None``.  The
+    exception itself is deliberately absent: its cause and traceback are
+    reported once, by ``app/services/report_service.py`` where it was caught.
 
-    What these records deliberately leave out is the exception itself.  The
-    cause and its traceback are one fact reported once, by
-    ``app/services/report_service.py`` at the point it caught the exception,
-    because a traceback is the one thing the outcome cannot usefully carry
-    here.  These records are the consequence of that failure - the status, the
-    identity of what failed, what was skipped and what survived - and every
-    field in them comes off the outcome.
-
-    This is also what keeps one status from costing any information.  A writer
-    failure and an empty merge share the status and share nothing else: the
-    message below names a writer where the merge's names the merge, and the
-    lines that follow it enumerate what was retained where an empty merge
-    reports that nothing was written at all.
+    One outcome reaches here with **no** failing writer: the run's claim on
+    the build output was lost during publication
+    (:attr:`~app.services.ReportOutcome.boundary_lost`).  All four artifacts
+    exist and are kept, so there is no writer to name and nothing was skipped;
+    what is reported instead is that the published set cannot be vouched for
+    as this run's, because another run may have claimed the workspace while
+    the writers were running.
 
     Args:
-        report: The fan-out's outcome, whose
-            :attr:`~app.services.ReportOutcome.failed_writer` is set and whose
-            :attr:`~app.services.ReportOutcome.failed_path` is that writer's
-            intended destination when it could be resolved.
+        report: The fan-out's outcome, not ``ok``.  Its
+            :attr:`~app.services.ReportOutcome.failed_writer` names the writer
+            that failed and its
+            :attr:`~app.services.ReportOutcome.failed_path` that writer's
+            intended destination when it could be resolved; both are absent on
+            the lost-claim outcome above.
 
     Returns:
         :attr:`ExitCode.ARTIFACT_FAILURE`.
     """
+    if report.failed_writer is None:
+        # The claim on the build output was lost, and no writer failed: all
+        # four artifacts were written and are kept, but into a workspace this
+        # run no longer owned, so what a reader will find there may be a
+        # mixture of two runs' reports.  The report service has already named
+        # the loss; this record names the class it produces.
+        logger.error(
+            "Exit %d: the four artifacts were written, but this run lost its "
+            "claim on %s during publication, so the published set is not "
+            "vouched for as this run's",
+            int(ExitCode.ARTIFACT_FAILURE),
+            render_path(target_root()),
+        )
+        if report.written:
+            logger.error(
+                "Retained, and not deleted: %s",
+                ", ".join(render_path(path) for path in report.written),
+            )
+        return ExitCode.ARTIFACT_FAILURE
+
+    # Every path this command names is rendered by ``app/logging_config.py``
+    # into the repository-relative identifier a reader acts on - the same
+    # spelling README.md quotes and the publisher's narrowed glob matches
+    # (``Jenkins:15``), and one this module still does not hold.  The absolute
+    # location of a CI workspace is not diagnostic and publishing it in an
+    # archived console log discloses the topology of the machine that produced
+    # it (CWE-200), so the rendering is applied here, at the point the value
+    # becomes a record, rather than trusted to whoever reads the log.
     destination = (
         _UNRESOLVED_DESTINATION
         if report.failed_path is None
-        else report.failed_path
+        else render_path(report.failed_path)
     )
     logger.error(
         "Exit %d: report writer %s failed writing %s",
@@ -1283,51 +1648,48 @@ def _writer_failure_status(report: ReportOutcome) -> ExitCode:
     if report.written:
         logger.error(
             "Retained, and not deleted: %s",
-            ", ".join(str(path) for path in report.written),
+            ", ".join(render_path(path) for path in report.written),
         )
     else:
         logger.error("No artifact had been written when the failure occurred")
     return ExitCode.ARTIFACT_FAILURE
 
 
-def _publish(outcome: RunOutcome) -> ExitCode:
+def _publish(outcome: RunOutcome, guard: RunLock | None = None) -> ExitCode:
     """Turn a finished run into artifacts and a status.
 
     The three states of :attr:`~app.services.RunOutcome.result_set` are read
-    apart here rather than collapsed into one truthiness test, because two of
-    them look alike and mean opposite things: an **empty** document is a
-    tag expression that selected nothing, which writes all four artifacts
-    empty at :attr:`ExitCode.SUCCESS` so the publisher always has an input,
-    while a **missing** document is a merge that produced nothing, which
-    writes no artifact at :attr:`ExitCode.ARTIFACT_FAILURE`.  Under ``--rerun``
-    a missing document is neither: a rerun writes nothing by design.
+    apart rather than collapsed into one truthiness test, because two look
+    alike and mean opposite things: an **empty** document is a tag expression
+    that selected nothing, so all four artifacts are written empty at
+    :attr:`ExitCode.SUCCESS` and the publisher always has an input, while a
+    **missing** one is a merge that produced nothing and writes no artifact
+    at :attr:`ExitCode.ARTIFACT_FAILURE`.  A rerun writes nothing by design.
 
-    Precedence, when several signals coexist, is the module docstring's: the
-    artifact failure - whether its cause is the merge, a writer, or the
-    intermediate storage the run needed - and then the dead worker.  Each
-    cause reports itself on stderr in its own words before this function
-    returns, so the single status names the class while the log names the
-    cause.
-
-    The run service's ``infrastructure_error`` is read at **two** points, and
-    both are deliberate:
-
-    * **Before the ``--rerun`` short-circuit.**  A rerun writes no artifact
-      by design, so its ordinary outcome and a rerun that could not create a
-      directory to work in are indistinguishable from the artifacts - and the
-      second executed not one of the failures it was asked to re-run.  Reading
-      the signal first is what keeps that from being reported as success.
-    * **After the fan-out.**  When the run produced a document, the failure is
-      that its intermediates could not be removed afterwards.  That must not
-      cost a completed run its four artifacts, so the writers run first and
-      the status is settled second.
+    Precedence between coexisting signals is decided here, since the run
+    service records each one independently: the artifact failure, then the
+    dead worker, with each cause reporting itself on stderr first.
+    ``infrastructure_error`` is read at two points: before the ``--rerun``
+    short-circuit, where a rerun that could not create a directory to work in
+    is otherwise indistinguishable from a successful one, and after the
+    fan-out, where intermediates that could not be removed must not cost a
+    completed run its artifacts.
 
     Args:
         outcome: The finished run.
+        guard: The claim this run holds on the build output, passed on to the
+            fan-out so that each writer's publication is checked against it,
+            or ``None`` when the caller holds none.
 
     Returns:
         The status the run's artifacts, shards and intermediate storage imply.
     """
+    # First, and before any of the precedence returns below: a dead shard's
+    # identity is reported whatever class the run ends up in.  See
+    # :func:`_report_dead_shards` for why it cannot live inside the status
+    # function it used to.
+    _report_dead_shards(outcome)
+
     infrastructure = outcome.infrastructure_error
     if infrastructure is not None:
         logger.error(
@@ -1363,31 +1725,35 @@ def _publish(outcome: RunOutcome) -> ExitCode:
                 "was written and %s is left as the clean step left it",
                 int(ExitCode.ARTIFACT_FAILURE),
                 outcome.selected_count,
-                target_root(),
+                render_path(target_root()),
             )
         else:
             logger.error(
                 "Exit %d: no artifact was written and %s is left as the clean "
                 "step left it",
                 int(ExitCode.ARTIFACT_FAILURE),
-                target_root(),
+                render_path(target_root()),
             )
         return ExitCode.ARTIFACT_FAILURE
 
     # One merged document, four independent writers, in the service's own
     # order: the two machine-read contracts first.  No path is passed - each
     # writer resolves its own destination.
-    report = generate_reports(outcome.result_set)
+    # The guard travels with the document: the fan-out checks it before each
+    # writer, so a run that lost its claim on the build output stops
+    # publishing instead of writing into a workspace another run has taken
+    # over.  ``None`` is accepted there, which is what keeps the fan-out
+    # callable on its own.
+    report = generate_reports(outcome.result_set, guard=guard)
     if not report.ok:
         return _writer_failure_status(report)
 
     logger.info(
         "Wrote %d artifact(s): %s",
         len(report.written),
-        ", ".join(str(path) for path in report.written),
+        ", ".join(render_path(path) for path in report.written),
     )
     if infrastructure is not None:
-        # The artifacts are written and kept; what is wrong is the workspace.
         logger.error(
             "Exit %d: all four artifacts were written, but the run's "
             "intermediate documents could not be removed, so the status is "
@@ -1406,6 +1772,46 @@ def _publish(outcome: RunOutcome) -> ExitCode:
 # object below, and ``create_app()`` attaches the same object to the Flask CLI
 # group, so the two routes cannot diverge.
 # --------------------------------------------------------------------------- #
+
+
+def _settle_release(problem: str | None, status: ExitCode) -> ExitCode:
+    """Fold a failed run-lock release into the status about to be published.
+
+    A release that leaves this run's lock file, or the shared intermediate
+    directory it sat in, behind is not a cosmetic failure: AAP 0.4.1 requires
+    that directory to be gone by the time the command returns, and a lock file
+    with no lock behind it is what the next run in this checkout has to
+    reason about.  So it is reported here and it costs a success its status.
+
+    The precedence is :func:`_remove_intermediates`'s, for the same reason: a
+    usage error, a dead worker or an artifact failure already names something
+    the operator must act on, and a tidy-up does not outrank it.
+
+    Args:
+        problem: What :meth:`~app.services.RunLock.release` reported, or
+            ``None`` when nothing of the claim survived.
+        status: The status the command was about to publish.
+
+    Returns:
+        ``status`` unchanged, except that :attr:`ExitCode.SUCCESS` becomes
+        :attr:`ExitCode.ARTIFACT_FAILURE` when the release failed.
+    """
+    if problem is None:
+        return status
+    if status is ExitCode.SUCCESS:
+        logger.error(
+            "Exit %d: %s",
+            int(ExitCode.ARTIFACT_FAILURE),
+            problem,
+        )
+        return ExitCode.ARTIFACT_FAILURE
+    logger.error(
+        "%s; the status stays %d, because the failure already being reported "
+        "outranks a tidy-up",
+        problem,
+        int(status),
+    )
+    return status
 
 
 def _status_of(exit_error: SystemExit) -> int | None:
@@ -1494,40 +1900,23 @@ class _RunTestsCommand(click.Command):
     :func:`~app.services.cleanup_workers_dir` - does not survive an
     invocation, because ``Jenkins:15`` narrows the Cucumber publisher's
     ``fileIncludePattern`` to the single JSON report and an intermediate
-    per-worker document must never be left where the publisher can read it.  A
-    ``finally`` inside the command callback cannot deliver that guarantee:
-    Click rejects an unknown option, a malformed ``--tags`` expression and a
-    non-positive ``--workers`` *while parsing*, before the callback is ever
-    entered, so those three exits would leave the directory behind.
+    per-worker document must never be left where the publisher can read it.
+    A ``finally`` inside the command callback cannot deliver it: Click rejects
+    an unknown option, a malformed ``--tags`` expression and a non-positive
+    ``--workers`` *while parsing*, before the callback is entered.
 
-    :meth:`click.Command.main` is the outermost frame of an invocation - it is
-    what the console script's ``__call__`` reaches, what ``CliRunner.invoke``
-    calls, and what Click's own standalone-mode error handling and
-    ``sys.exit`` live inside - so a ``finally`` there encloses parsing,
-    ``--help``, every published status, an interrupt during parsing and an
-    unexpected exception alike.  Overriding it is the whole of this class, and
-    it changes nothing else about the command: the console entry point still
-    points at the same object under the same name, which is what keeps
-    ``pyproject.toml`` untouched by this concern.
-
-    **This class holds the module's only cleanup call sites**, both of them
-    into the one helper :func:`_remove_intermediates`: :meth:`main` for the
-    console route and :meth:`make_context` for the parse boundary both routes
-    share.  The callback holds none, deliberately, so nothing can disagree
-    about whether cleanup ran or about what its failure means; the
-    directory's preparation and removal are owned by
-    ``app/services/test_run_service.py``, and this module only guarantees
-    that the removal is *reached* on every exit path and that its failure is
-    not silent.  What it asks for is this invocation's own intermediates plus
-    any abandoned run's, never a directory a live run is still using.
+    :meth:`main` and :meth:`make_context` hold this module's only two cleanup
+    call sites, both into :func:`_remove_intermediates` - ``main`` is the
+    outermost frame of a console invocation and ``make_context`` the parse
+    boundary both invocation routes share, and cleanup being idempotent is
+    what makes covering both harmless.  The callback holds none, so nothing
+    can disagree about whether cleanup ran.
 
     A cleanup failure **upgrades a success to**
-    :attr:`ExitCode.ARTIFACT_FAILURE` and leaves every other status alone -
-    the one asymmetry in this class, and the reason it catches anything at
-    all.  Returning ``0`` while this run's intermediate documents are still in
-    the workspace would be a false success, while overwriting a usage error's
-    ``2`` or a dead worker's ``3`` with ``4`` would hide a higher-priority
-    failure behind a tidy-up.
+    :attr:`ExitCode.ARTIFACT_FAILURE` and leaves every other status alone:
+    returning ``0`` with this run's intermediates still in the workspace would
+    be a false success, while overwriting a usage error's ``2`` or a dead
+    worker's ``3`` would hide a higher-priority failure behind a tidy-up.
     """
 
     def main(self, *args: Any, **kwargs: Any) -> Any:
@@ -1535,28 +1924,25 @@ class _RunTestsCommand(click.Command):
 
         Args:
             *args: Positional arguments for :meth:`click.Command.main`,
-                forwarded unchanged - ``args``, ``prog_name`` and the rest of
-                Click's own signature, which is deliberately not restated
-                here so a Click upgrade cannot silently drop a parameter.
-            **kwargs: Keyword arguments for :meth:`click.Command.main`,
-                forwarded unchanged.
+                forwarded unchanged - Click's own signature is deliberately
+                not restated, so an upgrade cannot silently drop a parameter.
+            **kwargs: Keyword arguments for the same, forwarded unchanged.
 
         Returns:
             Whatever :meth:`click.Command.main` returns, except that a
             successful return with a failed cleanup returns
-            :attr:`ExitCode.ARTIFACT_FAILURE` instead.  In standalone mode -
-            every real invocation - it does not return at all: it raises
+            :attr:`ExitCode.ARTIFACT_FAILURE`.  In standalone mode - every
+            real invocation - it does not return at all but raises
             :exc:`SystemExit`.
 
         Raises:
             SystemExit: Click's own, with its status intact, unless that
                 status is a success and the cleanup failed, in which case it
                 carries :attr:`ExitCode.ARTIFACT_FAILURE`.
-            BaseException: Anything else leaves this method unchanged, after
-                the cleanup has been attempted and reported: an interrupt is
-                the operator's decision, and an unexpected exception is a
-                defect that must keep its traceback rather than become a
-                published status.
+            BaseException: Anything else propagates unchanged once cleanup has
+                been attempted and reported: an interrupt is the operator's
+                decision and an unexpected exception is a defect, and neither
+                may become a published status.
         """
         try:
             result = super().main(*args, **kwargs)
@@ -1583,19 +1969,17 @@ class _RunTestsCommand(click.Command):
     def make_context(self, *args: Any, **kwargs: Any) -> click.Context:
         """Parse the arguments, removing intermediates if parsing fails.
 
-        :meth:`main` covers the console entry point, but it is **not** the
-        only way this command is parsed: when ``create_app()`` attaches it to
-        the Flask CLI group, Click's group dispatch builds the child's
-        context and invokes it directly, so a value rejected while parsing
-        *there* never reaches ``main`` at all.  This is the boundary both
-        routes share - ``main`` calls it too - so the guarantee holds
-        wherever the parsing happens.  Cleanup being idempotent is what makes
-        covering both harmless: on the console route this runs, and then
-        ``main`` finds nothing left to do.
+        :meth:`main` covers the console entry point but is not the only way
+        this command is parsed: when ``create_app()`` attaches it to the Flask
+        CLI group, Click's group dispatch builds the child's context and
+        invokes it directly, so a value rejected while parsing there never
+        reaches ``main``.  This is the boundary both routes share - ``main``
+        calls it too - and cleanup is idempotent, so covering both is
+        harmless.
 
         Args:
-            *args: Positional arguments for :meth:`click.Command.make_context`,
-                forwarded unchanged.
+            *args: Positional arguments for
+                :meth:`click.Command.make_context`, forwarded unchanged.
             **kwargs: Keyword arguments for the same, forwarded unchanged.
 
         Returns:
@@ -1604,10 +1988,9 @@ class _RunTestsCommand(click.Command):
         Raises:
             BaseException: Whatever parsing raised, unchanged and after the
                 cleanup - a :exc:`click.UsageError` for a rejected value, or
-                the :exc:`SystemExit` Click's own error handling produces.
-                The status is never altered here: on this route there is no
-                status yet to upgrade, and inventing one would mask the usage
-                error itself.
+                the :exc:`SystemExit` Click's error handling produces.  The
+                status is never altered here: on this route there is none yet,
+                and inventing one would mask the usage error.
         """
         try:
             return super().make_context(*args, **kwargs)
@@ -1719,16 +2102,15 @@ def run_tests(
          written from the shards that completed
       4  artifact production failed: the merge produced no result set
          (nothing is written), a report writer failed (what was already
-         written is retained), or --clean could not empty the build
-         output (nothing is executed). Each cause names itself on stderr
+         written is retained), --clean could not empty the build output
+         (nothing is executed), or another run in this checkout already
+         holds the build output (nothing is executed). Each cause names
+         itself on stderr
 
     A run needs a browser and a populated configuration.properties; the
     repository ships a template only, and a missing file is tolerated so that
     --dry-run and the report writers work without one.
     """
-    # First, before any work of any kind: progress to stdout, diagnostics to
-    # stderr, both line-buffered.  A Jenkins log stays live only because this
-    # happens here rather than on the first message.
     configure_logging()
 
     context = click.get_current_context()
@@ -1738,8 +2120,6 @@ def run_tests(
     # parsing as well as this function, because a value Click rejects while
     # parsing never reaches a ``finally`` written inside the callback.
     if rerun and _option_given(context, "tags"):
-        # Non-zero, nothing executed, nothing written: raised before the
-        # clean step and before the run service is reached.
         raise click.UsageError(
             "--rerun cannot be combined with --tags: a rerun applies no "
             "tag filter, because the Java rerun runner declared none "
@@ -1778,58 +2158,102 @@ def run_tests(
         cleaning,
     )
     if clean and rerun:
-        # Stated rather than silent, because the user asked for something
-        # that is deliberately not being done.
         logger.info(
             "--clean is ignored under --rerun: the manifest a rerun reads "
             "lives in the build output and must survive"
         )
 
-    clean_failure = _empty_build_output() if cleaning else None
-
-    if clean_failure is not None:
-        # The run stops here, and that is the point: the build output is in an
-        # unknown state, so anything executed now would publish a mixture of
-        # this run's artifacts and whatever the clean could not remove.
-        # Nothing is executed, no writer is reached, and what survives is left
-        # exactly where it is for an operator to look at.
+    # One claim on this checkout's build output, taken **before** the clean
+    # and given back after the publication, because those two and everything
+    # between them operate on state the whole checkout shares: the clean
+    # empties artifacts another run has just published, the run reclaims from
+    # the intermediate directory another run is writing into, and the fan-out
+    # publishes four artifacts one writer at a time.  Two runs interleaved
+    # across that sequence leave a workspace holding a mixture of both -
+    # reports, scenario data, credentials-bearing step arguments and
+    # screenshots from two different executions, with nothing in either
+    # artifact to say so.  The run service owns the lock because it owns the
+    # directory the lock file lives in; the lifecycle is owned here, because
+    # this is the frame that spans the three phases.
+    run_lock, lock_refusal = acquire_run_lock()
+    if run_lock is None:
+        # Refused rather than queued - see the run service's section comment.
+        # The class is the existing artifact-infrastructure failure: nothing
+        # was executed, no writer was reached and no artifact was touched,
+        # which is exactly the clean-failure row's shape, and AAP 0.1.3
+        # deviation 15 fixes the three non-zero classes so no fourth exists to
+        # invent.
         logger.error(
-            "Exit %d: the build output directory could not be emptied, so "
-            "the suite was not started, no artifact was written and nothing "
-            "was deleted beyond what is reported above: %s",
+            "Exit %d: this run did not start, and nothing in the build "
+            "output was read, written or deleted: %s",
             int(ExitCode.ARTIFACT_FAILURE),
-            clean_failure,
+            lock_refusal,
         )
-        exit_code = ExitCode.ARTIFACT_FAILURE
-    else:
-        # Selection, sharding, per-worker invocation and the merge - none of
-        # which is this file's business.  The service exits no process and
-        # raises nothing for a test outcome; every signal arrives on the
-        # outcome, and the malformed-expression exception it documents cannot
-        # reach here because the option callback rejected such a value while
-        # Click was still parsing.
-        outcome = run_suite(
-            tags=tag_expression,
-            browser=browser,
-            workers=worker_count,
-            dry_run=dry_run,
-            rerun=rerun,
-        )
+        context.exit(int(ExitCode.ARTIFACT_FAILURE))
 
-        # Reported first and separately: these never change the status, and
-        # reading them before the artifacts keeps the stderr account in the
-        # order the run discovered things.
-        _report_selection_problems(outcome)
+    try:
+        clean_failure = _empty_build_output() if cleaning else None
 
-        exit_code = _publish(outcome)
+        if clean_failure is not None:
+            # The run stops here, and that is the point: the build output is
+            # in an unknown state, so anything executed now would publish a
+            # mixture of this run's artifacts and whatever the clean could not
+            # remove.  Nothing is executed, no writer is reached, and what
+            # survives is left exactly where it is for an operator to look at.
+            logger.error(
+                "Exit %d: the build output directory could not be emptied, so "
+                "the suite was not started, no artifact was written and "
+                "nothing was deleted beyond what is reported above: %s",
+                int(ExitCode.ARTIFACT_FAILURE),
+                clean_failure,
+            )
+            exit_code = ExitCode.ARTIFACT_FAILURE
+        else:
+            # Selection, sharding, per-worker invocation and the merge - none
+            # of which is this file's business.  The service exits no process
+            # and raises nothing for a test outcome; every signal arrives on
+            # the outcome, and the malformed-expression exception it documents
+            # cannot reach here because the option callback rejected such a
+            # value while Click was still parsing.
+            outcome = run_suite(
+                tags=tag_expression,
+                browser=browser,
+                workers=worker_count,
+                dry_run=dry_run,
+                rerun=rerun,
+            )
 
-    if exit_code is ExitCode.SUCCESS:
-        # The non-zero classes have already named themselves on stderr, each
-        # carrying its status, so only the successful case needs a line here.
-        logger.info("Finished with status %d", int(exit_code))
+            # Reported first and separately: these never change the status,
+            # and reading them before the artifacts keeps the stderr account
+            # in the order the run discovered things.
+            _report_selection_problems(outcome)
 
-    # The one place a status leaves this command.  An unexpected exception -
-    # one no documented contract predicts - is deliberately *not* mapped onto
-    # a published class: it propagates with its traceback, so a defect is
-    # never disguised as one of the four published statuses above.
-    context.exit(int(exit_code))
+            exit_code = _publish(outcome, guard=run_lock)
+
+        # Released **before** the status is published, not merely in the
+        # ``finally`` below, because a release that leaves the lock file or
+        # the shared intermediate directory behind is the state AAP 0.4.1
+        # forbids and has to be able to change the outcome.  The rule is
+        # ``_remove_intermediates``'s: a success becomes an artifact failure,
+        # and a status that is already non-zero keeps its own class.
+        exit_code = _settle_release(run_lock.release(), exit_code)
+
+        if exit_code is ExitCode.SUCCESS:
+            # The non-zero classes have already named themselves on stderr,
+            # each carrying its status, so only the successful case needs a
+            # line here.
+            logger.info("Finished with status %d", int(exit_code))
+
+        # The one place a status leaves this command.  An unexpected exception
+        # - one no documented contract predicts - is deliberately *not* mapped
+        # onto a published class: it propagates with its traceback, so a
+        # defect is never disguised as one of the four published statuses
+        # above.
+        context.exit(int(exit_code))
+    finally:
+        # The net, for every way out of this frame the line above does not
+        # reach: the ``SystemExit`` it raises, an interrupt, and a defect
+        # alike.  Releasing is idempotent, so on the ordinary path this does
+        # nothing and reports nothing; on an exceptional path there is no
+        # status to change, and an exception must not be turned into one.
+        run_lock.release()

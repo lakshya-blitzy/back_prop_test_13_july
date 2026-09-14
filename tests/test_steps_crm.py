@@ -2,25 +2,16 @@
 
 Authority
 ---------
-``src/main/java/com/testinium/step_definitions/Crm.java`` and
-``src/main/java/com/testinium/pages/CrmP.java`` of the reference project at
-pinned commit ``47e9d697e4a9a85da889f94a846fdf47af28a240``.  Every expectation
-in this module is transcribed from those two files and carries the Java line it
-comes from in a comment or a docstring.  **Nothing here reads the reference
-checkout at runtime**: the authority is transcribed into module constants, so
-the suite runs on a host that has never seen the Java tree, and a drift between
-the port and the source shows up as a failing assertion rather than as a
-missing fixture.
+``Crm.java`` (twelve annotated methods in ``Crm.java:14-154``) and ``CrmP.java``
+(twenty-eight ``@FindBy`` fields in ``CrmP.java:13-95``) at the pinned commit
+:data:`REFERENCE_COMMIT`, transcribed into module constants that each carry the
+Java line they come from: nothing reads the reference checkout at runtime.
 
-What this module proves, and why each part of it is load-bearing
----------------------------------------------------------------
-AAP 0.4.1 fixes a per-module obligation: for each step module, the paired
-``tests/test_steps_<area>.py`` drives it against a stubbed driver and asserts,
-for every method of the Java class it ports, the same observable operations in
-the same order - same locators, same wait target and timeout, same keys and
-action-chain sequence, same literals, same assertion subject, same no-ops - and
-enumerates the Java class's methods so an omission fails rather than passes
-silently.  For ``Crm.java`` that is twelve definitions, and this module pins:
+The contract this module owns
+-----------------------------
+AAP 0.4.1's per-module obligation, for the one feature a default run executes:
+``Crm.feature:1`` holds the suite's only ``@Smoke`` tag, ``behave.ini``'s
+``default_tags``.
 
 * **An exact, fail-closed census.**  :data:`CENSUS` is the transcribed
   twelve-method inventory.  Three tests close it: it must hold exactly twelve
@@ -69,10 +60,20 @@ silently.  For ``Crm.java`` that is twelve definitions, and this module pins:
   ``89`` (``Crm.java:48-49``), with a passing case, a failing case, and the
   non-numeric case, which must raise ``ValueError`` **uncaught** because
   ``Integer.parseInt`` throws and the Java method catches nothing.
-* **All stdout.**  The eight ``System.out.println`` lines across the four
-  printing steps, captured with ``capsys`` and asserted exactly, computed
-  values included.  They are observable behaviour of the default-path feature,
-  not debug noise.
+* **Silence on stdout, from every definition.**  ``Crm.java:51-52``, ``:63-64``,
+  ``:97-98`` and ``:126-127`` print a parsed column total and three live
+  pipeline card titles beside their expected literals, and the port reproduces
+  none of them: the worker's stdout is relayed into the parent logger and the
+  Jenkins console, so those lines were a durable record of live customer and
+  pricing data (CWE-532/359, the security review's F04), while diagnostic
+  stdout appears in neither AAP 0.1.2's frozen list nor AAP 0.4.1's per-step
+  enumeration.  Every run in this module therefore asserts ``run.printed ==
+  ()`` - on the passing path, on the failing path and on the raising path - and
+  three module-wide tests close it: no definition emits a line when all twelve
+  are driven in order, no census function contains a ``print`` call, and the
+  step module's syntax tree holds no ``print`` call at all, at any scope.  That
+  last one is what a print smuggled back into a helper or into module scope
+  fails on.
 * **Every assertion, both ways.**  All four are two-argument
   ``Assert.assertEquals``: each is exercised passing and failing, the operand
   order the source uses is asserted at source level, and so is the absence of
@@ -88,44 +89,14 @@ silently.  For ``Crm.java`` that is twelve definitions, and this module pins:
   feature resolves to exactly one definition, the Background belonging to
   ``session_steps`` rather than here.
 
-How a step body is reached
---------------------------
-Through the fixtures ``tests/conftest.py`` publishes, and never by importing
-the step module: ``load_step_registry`` has already exec'd it into behave's
-process-wide registry, and a second registration risks ``AmbiguousStep``.
-``resolve_step(phrase)`` returns the single matching definition and
-``StepMatch.run(fake_context)`` calls it with the recorder published as
-``context.driver``.  For the parameterized definition the *concrete* phrase is
-resolved so that behave itself binds the arguments, which are then asserted.
-
-``StepMatch.func.__globals__`` is the step module's own namespace, so the three
-seams are replaced there with ``monkeypatch.setitem`` for the duration of one
-run: the visibility wait, the action-chain factory and the fixed delay.  Two
-deliberate tolerances, because a sibling change to ``app/automation`` or to the
-step module's declarations must not turn a parity test into a false failure:
-
-* the wait seam patches *every* ``wait*`` callable in that namespace and
-  recovers the target and the timeout from both positional and keyword
-  arguments, normalising an element to its locator - so the test pins the
-  literal timeout ``2`` and the waited-on element, never the call signature;
-* the delay seam accepts either ``from time import sleep`` (today's shape) or
-  ``import time`` plus ``time.sleep``.
-
-Substituting the chain factory is not optional: a real ``ActionChains`` rejects
-a stub element - ``move_to_element`` raises
-``AttributeError("move_to requires a WebElement")`` - so the seam hands back a
-duck-typed recorder whose methods return ``self`` and log their arguments.
-
-``Keys`` is imported here on purpose.  AAP 0.4.2 closes the import boundary for
-``features/steps/**``, not for this suite, and comparing against
-``Keys.ENTER`` states what ``Crm.java``'s ``+ Keys.ENTER`` means far better
-than a magic ``"\ue007"`` would.  Locator tuples come from
-:class:`~app.pages.crm_page.CrmPage` rather than being retyped, except in
-:data:`DUPLICATE_SELECTORS`, where the duplicated *value* is itself the
-assertion.
-
-Nothing here touches the network, a browser, a real driver, the clock or the
-repository's ``target/`` directory.
+Through ``tests/conftest.py``'s fixtures, never by importing the step module:
+behave's registry has already exec'd it and re-registering risks
+``AmbiguousStep``.  The visibility wait, the action-chain factory and the fixed
+delay are replaced in ``StepMatch.func.__globals__`` for one run and restored at
+teardown - the chain factory necessarily, since a real ``ActionChains`` rejects a
+stub element.  ``Keys`` is imported deliberately: AAP 0.4.2 closes the import
+boundary for ``features/steps/**``, not for this suite.  Nothing here touches a
+network, a browser, a driver, the clock or ``target/``.
 """
 
 from __future__ import annotations
@@ -234,28 +205,31 @@ OUTLINE_STEP_PHRASE: Final[str] = (
 FEATURE_TAG_LINE: Final[str] = "@Smoke"
 FEATURE_HEADER_LINE: Final[str] = "Feature: Testinium app CRM Module"
 
-#: ``Crm.feature:7``.  Declared in ``Session.java``, not in ``Crm.java``, and
-#: therefore owned by ``features/steps/session_steps.py``.
+#: ``Crm.feature:7``.  Declared at ``Session.java:12``, nowhere in
+#: ``Crm.java:21-145``, and therefore owned by
+#: ``features/steps/session_steps.py``.
 BACKGROUND_PHRASE: Final[str] = "User login to test other features"
 SESSION_MODULE_NAME: Final[str] = "session_steps"
 
 
 # =========================================================================== #
-# The census: twelve definitions, in Crm.java declaration order
+# The census: the twelve definitions of Crm.java:21-145, in declaration order
 # =========================================================================== #
 
 
 class Definition(NamedTuple):
-    """One row of the transcribed ``Crm.java`` method inventory.
+    """One row of the ``Crm.java:14-154`` method inventory, transcribed.
 
     Independently enumerated from the Java class rather than derived from the
     port, which is the whole point: if the two disagree, the census tests fail.
     """
 
-    #: 1-based position in ``Crm.java`` declaration order.
+    #: 1-based position in ``Crm.java``'s declaration order, which runs from
+    #: ``Crm.java:21`` to ``Crm.java:145``.
     index: int
 
-    #: Line of the Cucumber annotation in ``Crm.java``.
+    #: Line of the Cucumber annotation in ``Crm.java``: one of :21, :27, :34,
+    #: :46, :58, :70, :83, :89, :106, :121, :132 and :145.
     java_line: int
 
     #: The annotation itself - ``@When``, ``@And`` or ``@Then``.  Recorded
@@ -267,8 +241,9 @@ class Definition(NamedTuple):
     #: The Java method name, as declared.
     java_method: str
 
-    #: The annotation's phrase, exactly as ``Crm.java`` writes it - with
-    #: ``{string}`` placeholders where Cucumber uses them.
+    #: The annotation's phrase, exactly as ``Crm.java`` writes it on the line
+    #: *java_line* names - with ``{string}`` placeholders where Cucumber uses
+    #: them, which in this class is ``Crm.java:70`` and no other line.
     java_phrase: str
 
     #: The pattern the port registers with ``@step``, which differs from
@@ -291,7 +266,8 @@ class Definition(NamedTuple):
     claimed_by: str
 
 
-#: The twelve definitions of ``Crm.java``, transcribed in declaration order.
+#: The twelve definitions of ``Crm.java:21-145``, transcribed in declaration
+#: order.
 CENSUS: Final[tuple[Definition, ...]] = (
     Definition(
         index=1,
@@ -434,17 +410,21 @@ CENSUS: Final[tuple[Definition, ...]] = (
 )
 
 #: The size of the census, stated once and asserted rather than counted from
-#: the tuple at every use site.  ``Crm.java`` declares twelve methods.
+#: the tuple at every use site.  ``Crm.java:14-154`` declares twelve annotated
+#: methods, at :21, :27, :34, :46, :58, :70, :83, :89, :106, :121, :132 and
+#: :145, and nothing else that Cucumber can reach.
 DEFINITION_COUNT: Final[int] = 12
 
-#: ``Crm.java``'s closing brace, so that the last definition has an upper
-#: bound and an assertion's line can be attributed to the method it sits in.
+#: ``Crm.java:154``, the class's closing brace, so that the last definition
+#: (``Crm.java:145``) has an upper bound and an assertion's line can be
+#: attributed to the method it sits in.
 JAVA_CLASS_LAST_LINE: Final[int] = 154
 
-#: ``Crm.java``'s annotation mix: one ``@When`` (:21), seven ``@And`` (:27,
-#: :34, :46, :70, :83, :106, :132) and four ``@Then`` (:58, :89, :121, :145).
-#: Seven of the suite's nine ``@And`` annotations are in this one class, and
-#: behave has no ``@and`` decorator - which is why every definition here
+#: ``Crm.java``'s annotation mix: one ``@When`` (``Crm.java:21``), seven
+#: ``@And`` (:27, :34, :46, :70, :83, :106, :132) and four ``@Then`` (:58, :89,
+#: :121, :145).  Seven of the suite's nine ``@And`` annotations are in this one
+#: class - the other two are ``Calendar.java:160`` and ``Sales.java:80`` - and
+#: behave has no ``@and`` decorator, which is why every definition here
 #: registers with ``@step``.
 KEYWORD_COUNTS: Final[MappingProxyType[str, int]] = MappingProxyType(
     {"@When": 1, "@And": 7, "@Then": 4}
@@ -452,8 +432,9 @@ KEYWORD_COUNTS: Final[MappingProxyType[str, int]] = MappingProxyType(
 
 #: The four selectors ``CrmP.java`` declares twice under different names, as
 #: ``(first name, second name, shared value)``.  Retyped from the ``@FindBy``
-#: annotations on purpose: here the duplicated *value* is the assertion, so
-#: taking it from the page object would make the test tautological.
+#: annotations of ``CrmP.java:13-95`` on purpose: here the duplicated *value* is
+#: the assertion, so taking it from the page object would make the test
+#: tautological.
 DUPLICATE_SELECTORS: Final[tuple[tuple[str, str, str], ...]] = (
     # CrmP.java:16 createButton / CrmP.java:76 createCustomer
     ("CREATE_BUTTON", "CREATE_CUSTOMER", "//button[@accesskey='c']"),
@@ -496,39 +477,28 @@ KEY_SITES_IN_ORDER: Final[tuple[tuple[tuple[str, str], str], ...]] = (
     (CrmPage.SEARCHING_TEXT, SEARCH_TEXT),  # Crm.java:141
 )
 
-#: The eight ``System.out.println`` lines of ``Crm.java``, in the order a run
-#: of the whole class emits them: :51-52, :63-64, :97-98, :126-127.  The
-#: camelCase labels and the spaces around ``=`` are Java's and are reproduced
-#: byte for byte; the first line carries the *computed* total.
-PRINTED_LINES_IN_ORDER: Final[tuple[str, ...]] = (
-    f"totalPrice = {EXPECTED_PRICE}",  # Crm.java:51
-    f"price = {EXPECTED_PRICE}",  # Crm.java:52
-    f"actualName = {TITLE_TEXT}",  # Crm.java:63
-    f"expectedName = {TITLE_TEXT}",  # Crm.java:64
-    f"actualName = {EDITED_TITLE_TEXT}",  # Crm.java:97
-    f"expectedName = {EDITED_TITLE_TEXT}",  # Crm.java:98
-    f"actualName = {TITLE_TEXT}",  # Crm.java:126
-    f"expectedName = {TITLE_TEXT}",  # Crm.java:127
-)
-
-#: How many ``System.out.println`` calls each Java method makes: two in each of
-#: the four that print, none in the other eight.  Asserted at source level, so
-#: a print added to a silent step or removed from a printing one fails.
-PRINT_COUNTS: Final[MappingProxyType[str, int]] = MappingProxyType(
-    {
-        "user_click_on_the_crm_dashboard": 0,
-        "user_click_on_the_pipeline_button": 0,
-        "user_can_create_the_new_pipeline": 0,
-        "user_can_see_the_total_price": 2,  # Crm.java:51-52
-        "user_can_see_new_pipeline": 2,  # Crm.java:63-64
-        "user_can_change_any_user_s_information_like_and": 0,
-        "user_can_save_information": 0,
-        "user_can_verify_the_information": 2,  # Crm.java:97-98
-        "user_can_drag_and_drop_the_pipeline": 0,
-        "user_can_see_the_new_changes_in_progress": 2,  # Crm.java:126-127
-        "user_can_register_new_customer": 0,
-        "user_can_print_the_profile": 0,
-    }
+#: The four ``Crm.java`` methods whose bodies carry a ``System.out.println``
+#: pair - ``:51-52``, ``:63-64``, ``:97-98``, ``:126-127`` - and whose ports
+#: reproduce **neither** line of the pair.  Half of the eight values are read
+#: live from the system under test, and ``app/services/test_run_service.py``
+#: relays every worker stdout line into the parent logger and from there into
+#: the Jenkins console, so each line was a durable record of live customer and
+#: pricing data (CWE-532/359, the security review's F04).  Diagnostic stdout is
+#: in neither AAP 0.1.2's list of what the port must not change nor AAP 0.4.1's
+#: enumeration of what each step body must reproduce, so removing the eight
+#: statements costs no parity - which is why the expectation below is silence
+#: rather than eight transcribed lines.
+#:
+#: The tuple is kept because it is still load-bearing in the negative
+#: direction: these four are the bodies a print would be smuggled back into,
+#: and :func:`test_the_four_formerly_printing_definitions_are_silent` drives
+#: each of them, on the passing path and on the failing path, asserting nothing
+#: reaches stdout.
+FORMERLY_PRINTING_FUNCTIONS: Final[tuple[str, ...]] = (
+    "user_can_see_the_total_price",  # Crm.java:51-52
+    "user_can_see_new_pipeline",  # Crm.java:63-64
+    "user_can_verify_the_information",  # Crm.java:97-98
+    "user_can_see_the_new_changes_in_progress",  # Crm.java:126-127
 )
 
 #: The four ``Assert.assertEquals`` calls, as the ``(left, right)`` operand
@@ -549,10 +519,12 @@ ASSERT_OPERANDS: Final[MappingProxyType[str, tuple[str, str]]] = MappingProxyTyp
     }
 )
 
-#: The eight definitions that neither print nor assert: ``Crm.java:21``, :27,
-#: :34, :70, :83, :106, :132 and :145.  Run with nothing programmed they must
-#: complete silently - a print or an assertion smuggled into one of them fails
-#: here as well as in the source-level counts.
+#: The eight definitions that assert nothing: ``Crm.java:21``, :27, :34, :70,
+#: :83, :106, :132 and :145.  Run with nothing programmed they must complete
+#: without raising and without emitting a line - an assertion smuggled into one
+#: of them fails here, as does a print, which no definition in this module may
+#: make at all.  The other four assert, which is why they are driven with the
+#: page programmed instead.
 SILENT_FUNCTIONS: Final[tuple[str, ...]] = (
     "user_click_on_the_crm_dashboard",
     "user_click_on_the_pipeline_button",
@@ -566,26 +538,27 @@ SILENT_FUNCTIONS: Final[tuple[str, ...]] = (
 
 # --------------------------------------------------------------------------- #
 # Per-call-site page-attribute names, transcribed from the Java line of each
-# site.
+# site (Crm.java:23-151).
 #
 # This is the name-aware half of the locator check and it exists because of
 # DUPLICATE_SELECTORS: the driver log records ``(strategy, value)``, so a step
-# that used CREATE_CUSTOMER where Java uses CREATE_BUTTON would produce a
-# byte-identical log - and a wait, which resolves its locator inside its own
-# predicate, leaves no log entry to compare in the first place.  The names
-# below are read out of the step module's AST, in source order, with each usage
-# normalised to one of:
+# that used CREATE_CUSTOMER (CrmP.java:76) where Java uses CREATE_BUTTON
+# (CrmP.java:16) would produce a byte-identical log - and a wait, which resolves
+# its locator inside EC.visibility_of_element_located, leaves no log entry to
+# compare in the first place.  The names below are read out of the step module's
+# AST, in source order, with each usage classified as one of:
 #
 #   "click" / "clear" / "text"  an operation on the resolved element, named
 #                               through the lower-case accessor
 #   "keys"                      a single keyboard call (press_keys), likewise
-#                               on the resolved element
-#   "wait"                      any wait* helper - the usage is normalised, so
-#                               a sibling unit renaming the helper cannot break
-#                               parity, while the name it is given is the
-#                               UPPER_CASE locator constant the helper takes
-#   "click_and_hold" /          an action-chain method taking the element
-#   "move_to_element"
+#                               on the resolved element, as sendKeys is applied
+#                               to the field at Crm.java:36
+#   "wait"                      a visibility wait, which names the UPPER_CASE
+#                               locator constant: the spelling below is the
+#                               spelling the site must use, so a lower-case
+#                               accessor at a wait site is a diff here
+#   "click_and_hold" /          an action-chain method taking the element, as
+#   "move_to_element"           Crm.java:110 and :112 do
 # --------------------------------------------------------------------------- #
 SOURCE_SHAPES: Final[MappingProxyType[str, tuple[tuple[str, str], ...]]] = (
     MappingProxyType(
@@ -721,20 +694,21 @@ ACCESSOR_NAMES: Final[frozenset[str]] = frozenset(
     name.lower() for name in CrmPage.LOCATORS
 )
 
-#: The locator constants themselves, upper-case, as ``CrmP.java``'s field names
-#: become them.  Reading one yields the ``(strategy, value)`` pair and touches
-#: no driver: it is what a wait call site passes, because
-#: ``app/automation/waits.py`` takes the locator and resolves it inside its own
-#: predicate on every poll - the ``PageFactory`` proxy behaviour the Java field
-#: had, under the call site's own timeout.
+#: The locator constants themselves, upper-case, as the 28 ``@FindBy`` field
+#: names of ``CrmP.java:13-95`` become them.  Reading one yields the
+#: ``(strategy, value)`` pair and touches no driver: it is what a wait call site
+#: passes, because ``app/automation/waits.py`` takes the locator and resolves it
+#: inside ``EC.visibility_of_element_located`` on every poll - the
+#: ``PageFactory`` proxy dereference ``Crm.java:24``'s ``visibilityOf`` argument
+#: performed, under the 2 seconds of ``Crm.java:18``.
 LOCATOR_NAMES: Final[frozenset[str]] = frozenset(CrmPage.LOCATORS)
 
-#: Both spellings together.  Used to recognise a page access in the AST without
+#: Both spellings together, which recognises a page access in the AST without
 #: assuming what the local variable holding the page is called, and - because
-#: it admits the constants as well as the accessors - so that a wait site's
-#: *name* is read out of the source exactly as a click site's is.  That is what
-#: keeps :data:`DUPLICATE_SELECTORS` distinguishable at wait sites, where the
-#: driver log records nothing at all.
+#: it admits the constants as well as the accessors - lets a wait site's *name*
+#: be read out of the source exactly as a click site's is.  That is what keeps
+#: :data:`DUPLICATE_SELECTORS` distinguishable at wait sites, where the driver
+#: log records nothing at all.
 PAGE_ATTRIBUTE_NAMES: Final[frozenset[str]] = ACCESSOR_NAMES | LOCATOR_NAMES
 
 
@@ -751,43 +725,95 @@ PAGE_ATTRIBUTE_NAMES: Final[frozenset[str]] = ACCESSOR_NAMES | LOCATOR_NAMES
 #: Sentinel distinguishing "argument absent" from a legitimate ``None``.
 _UNSET: Final[Any] = object()
 
-#: Keyword names a wait helper might take its target under, in the order they
-#: are consulted.  ``app/automation/waits.py`` takes it positionally today;
-#: these exist so a sibling unit moving to a keyword call cannot turn a parity
-#: test into a false failure.
-_WAIT_TARGET_KEYWORDS: Final[tuple[str, ...]] = ("element", "locator", "target")
+
+class WaitTargetError(Exception):
+    """A visibility wait received something other than a locator constant.
+
+    Deliberately **not** an :class:`AssertionError`.  Three tests here run a
+    step body inside ``pytest.raises(AssertionError)`` to exercise a Java
+    assertion's failing branch (``Crm.java:66``, ``:100``, ``:129``), and a
+    wait-shape failure inside one of those has to surface rather than be
+    mistaken for the expected failure.
+    """
+
+
+def _locator_constant_name(target: Any) -> str:
+    """The name of the ``CrmPage`` locator constant *target* is, by identity.
+
+    ``Crm.java:18`` builds one 2-second ``WebDriverWait`` and applies it to a
+    ``PageFactory`` proxy field at all eleven sites (``:24``, :30, :43, :73,
+    :85, :92, :135, :137, :140, :148, :150), so the lookup happened *inside*
+    ``ExpectedConditions.visibilityOf``, once per poll, governed by those 2
+    seconds.  ``app/automation/waits.py`` reproduces that by taking the
+    upper-case locator constant and resolving it inside
+    ``EC.visibility_of_element_located``.  An element resolved through the
+    lower-case accessor *before* the call would instead be looked up under
+    ``app/automation/driver.py``'s 10-second implicit wait, leaving
+    ``Crm.java:18``'s timeout governing nothing - a difference the driver log
+    cannot show, which is why the target is checked here.
+
+    Identity and not equality, because ``CrmP.java`` declares four selectors
+    twice (:data:`DUPLICATE_SELECTORS`): ``CREATE_BUTTON`` (``CrmP.java:16``)
+    and ``CREATE_CUSTOMER`` (``CrmP.java:76``) are equal tuples, so only the
+    constant object itself names the field the Java line used.
+
+    :param target: The first argument a visibility wait received.
+    :returns: The upper-case ``CrmPage`` attribute name of *target*.
+    :raises WaitTargetError: If *target* is not one of those constants - an
+        already-resolved element, a retyped tuple, or anything else.
+    """
+    for name, locator in CrmPage.LOCATORS.items():
+        if locator is target:
+            return name
+
+    raise WaitTargetError(
+        f"a visibility wait was passed {target!r}, which is not a CrmPage "
+        f"locator constant; each of the eleven sites of Crm.java:24-150 must "
+        f"pass the upper-case constant so that app/automation/waits.py "
+        f"resolves it inside EC.visibility_of_element_located under the 2 "
+        f"seconds of Crm.java:18"
+    )
 
 
 def _locator_of(value: Any) -> Any:
-    """Reduce a recorded element to the locator that produced it.
+    """Reduce a recorded action-chain argument to the locator that produced it.
 
-    ``conftest``'s ``StubElement`` carries the ``(strategy, value)`` pair it was
-    found by, so an element and a bare locator both normalise to the same
-    comparable value.  That is what keeps the wait assertions indifferent to
-    whether the port waits on an element (``visibilityOf``, as ``Crm.java``
-    does) or on a locator, while still pinning *which* element is waited on.
+    ``Crm.java:110`` and ``:112`` hand ``clickAndHold`` and ``moveToElement`` a
+    resolved ``WebElement``, which the port reproduces, so a chain event records
+    ``conftest``'s ``StubElement``.  Each stub carries the ``(strategy, value)``
+    pair it was found by, so reducing it here lets a chain assertion name the
+    locator rather than an opaque stub.  A visibility wait does **not** go
+    through this: it is handed the locator constant itself, and normalising an
+    element into one there would conceal a lookup made before the wait existed.
 
-    :param value: An element, a locator pair, or any other argument.
+    :param value: One argument of a chain method - an element, a pause in
+        seconds, or anything else such a method receives.
     :returns: ``value.locator`` when present, otherwise *value* unchanged.
     """
     return getattr(value, "locator", value)
 
 
 class WaitEvent(NamedTuple):
-    """One visibility-wait call: which helper, on what, for how long."""
+    """One visibility-wait call: which helper, on what locator, for how long."""
 
     helper: str
+
+    #: The upper-case ``CrmPage`` attribute name *target* is, by identity, so
+    #: that a wait on the wrong twin of a duplicated selector is a diff.
+    constant: str
+
     target: Any
     timeout: Any
     position: int
 
     def as_entry(self) -> tuple[Any, ...]:
-        """Timeline form.
+        """Timeline form: the named constant, its locator pair, the timeout.
 
-        The helper name is deliberately excluded: the timeout literal and the
-        waited-on element are the parity facts, the call signature is not.
+        The helper name is excluded because ``Crm.java:24`` names a condition
+        rather than a helper; the constant, the ``(strategy, value)`` pair it
+        yields and the 2-second literal of ``Crm.java:18`` are the parity facts.
         """
-        return ("wait", self.target, self.timeout)
+        return ("wait", self.constant, self.target, self.timeout)
 
 
 class ChainFactoryEvent(NamedTuple):
@@ -894,11 +920,13 @@ class RecordingChain:
 class _TimeShim:
     """A ``time`` module stand-in whose ``sleep`` records instead of sleeping.
 
-    The step module does ``from time import sleep`` today, which the harness
-    patches directly.  This covers the other shape - ``import time`` plus
-    ``time.sleep(2)`` - because a sibling unit is editing ``crm_steps.py`` for
-    declaration hygiene and either form must be recordable.  Every other
-    attribute is delegated, so nothing else about ``time`` changes.
+    ``Crm.java:117``'s ``Thread.sleep(2000)`` is ported as a fixed delay at its
+    own call site, which Python spells either as ``from time import sleep`` -
+    patched directly, without this class - or as ``import time`` plus
+    ``time.sleep(2)``, which needs the module attribute intercepted.  Both
+    record the same :class:`SleepEvent`, so the delay is observable whichever
+    form the step module declares.  Every other attribute is delegated, so
+    nothing else about ``time`` changes.
     """
 
     def __init__(self, module: ModuleType, recorder: Any) -> None:
@@ -952,7 +980,11 @@ class StepRun:
     #: Seam events recorded during this run, in order.
     events: tuple[Any, ...]
 
-    #: Lines the step printed, in order, with line endings stripped.
+    #: Lines the step wrote to stdout, in order, with line endings stripped.
+    #: Empty for every definition of this module: the eight
+    #: ``System.out.println`` calls of ``Crm.java`` are deliberately not
+    #: reproduced (module docstring), so the field exists to *prove* the
+    #: silence and to fail if a print is smuggled back in.
     printed: tuple[str, ...]
 
     #: The exception the body raised when one was expected, else ``None``.
@@ -1024,7 +1056,7 @@ class StepHarness:
     phrase, then assertions about what it did.  Reusable within a test: each
     :meth:`run` records its own slice of the driver log, which is what the
     whole-class aggregate tests use to total the eleven waits, the seven
-    keyboard calls, the eight printed lines and the single fixed delay.
+    keyboard calls, the absence of any stdout line and the single fixed delay.
     """
 
     def __init__(
@@ -1042,7 +1074,9 @@ class StepHarness:
         :param driver: The ``StubDriver`` published as ``context.driver``.
         :param monkeypatch: Used with ``setitem`` on the step module's own
             namespace, so every patch is undone at test teardown.
-        :param capsys: Captures the ``System.out.println`` ports.
+        :param capsys: Captures stdout, so each run can prove it wrote
+            nothing - the ports of ``Crm.java``'s eight ``System.out.println``
+            calls are deliberately absent (module docstring).
         """
         self._resolve = resolve
         self._context = context
@@ -1092,7 +1126,8 @@ class StepHarness:
         seam = self._patch_sleep(namespace, events, position)
 
         # Drop anything captured before this run so ``printed`` is this step's
-        # output alone, which is what lets a test sum output across runs.
+        # output alone: that is what lets one test assert the silence of one
+        # body and another assert it across all twelve.
         self._capsys.readouterr()
 
         error: BaseException | None = None
@@ -1116,18 +1151,17 @@ class StepHarness:
             sleep_seam=seam,
         )
 
-    # -- the three seams --------------------------------------------------- #
-
     def _patch_waits(
         self, namespace: dict[str, Any], events: list[Any], position: Any
     ) -> None:
         """Replace every ``wait*`` helper in *namespace* with a recorder.
 
-        All of them rather than one by name: ``app/automation/waits.py``
-        exports nine helpers and a sibling unit may change which one this
-        module calls.  Recording whichever is used - and asserting the timeout
-        and target rather than the signature - keeps the parity check honest
-        under that change.
+        Every one of them rather than the single name this module imports, so
+        that a visibility call routed through any other helper of
+        ``app/automation/waits.py`` is recorded - and then fails the
+        ``"visible"`` check of
+        :func:`test_the_class_waits_eleven_times_and_always_for_two_seconds` -
+        instead of reaching a real ``WebDriverWait`` and a real browser.
         """
         for name, value in list(namespace.items()):
             if name.startswith("wait") and callable(value):
@@ -1137,35 +1171,42 @@ class StepHarness:
 
     @staticmethod
     def _wait_recorder(helper: str, events: list[Any], position: Any) -> Any:
-        """Build the stand-in for one wait helper."""
+        """Build the stand-in for one wait helper.
+
+        The target and the timeout are read exactly as
+        ``wait_visible_element(locator, timeout, *, driver=None)`` declares
+        them - positionally, with each parameter's own name as the fallback -
+        and the target must then *be* a ``CrmPage`` locator constant.  A call
+        carrying an already-resolved element raises
+        :class:`WaitTargetError` here rather than being normalised into a
+        locator, because that resolution would have happened before the wait
+        existed (see :func:`_locator_constant_name`).
+        """
 
         def recorder(*args: Any, **kwargs: Any) -> Any:
-            target: Any = _UNSET
-
-            for keyword in _WAIT_TARGET_KEYWORDS:
-                if keyword in kwargs:
-                    target = kwargs[keyword]
-                    break
+            target: Any = args[0] if args else kwargs.get("locator", _UNSET)
+            timeout: Any = (
+                args[1] if len(args) > 1 else kwargs.get("timeout", _UNSET)
+            )
 
             if target is _UNSET:
-                target = args[0] if args else None
-
-            timeout: Any = kwargs.get("timeout", _UNSET)
-
-            if timeout is _UNSET:
-                timeout = args[1] if len(args) > 1 else None
+                raise WaitTargetError(
+                    f"{helper} was called without a locator: args={args!r}, "
+                    f"kwargs={kwargs!r}"
+                )
 
             events.append(
                 WaitEvent(
                     helper=helper,
-                    target=_locator_of(target),
-                    timeout=timeout,
+                    constant=_locator_constant_name(target),
+                    target=target,
+                    timeout=None if timeout is _UNSET else timeout,
                     position=position(),
                 )
             )
             # The real helpers return the element they waited on; no step body
-            # in this class uses the value, and returning it keeps the seam
-            # behaviourally equivalent rather than subtly lossy.
+            # in this class uses the value, and returning the locator keeps the
+            # seam total rather than silently substituting ``None``.
             return target
 
         return recorder
@@ -1241,7 +1282,7 @@ def _crm_step(
     :param fake_context: The behave context stand-in, carrying *stub_driver*.
     :param stub_driver: The ordered-log recorder.
     :param monkeypatch: Seam replacement, undone at teardown.
-    :param capsys: stdout capture for the eight printed lines.
+    :param capsys: stdout capture, read by every run to assert silence.
     :returns: The harness, ready to run any CRM phrase.
     """
     return StepHarness(resolve_step, fake_context, stub_driver, monkeypatch, capsys)
@@ -1268,12 +1309,10 @@ def _find(locator: tuple[str, str]) -> tuple[Any, ...]:
 
 
 def _click(locator: tuple[str, str]) -> tuple[Any, ...]:
-    """An ``element.click()`` entry."""
     return ("element.click", (locator,))
 
 
 def _clear(locator: tuple[str, str]) -> tuple[Any, ...]:
-    """An ``element.clear()`` entry."""
     return ("element.clear", (locator,))
 
 
@@ -1294,8 +1333,14 @@ def _text(locator: tuple[str, str]) -> tuple[Any, ...]:
 
 
 def _wait(locator: tuple[str, str]) -> tuple[Any, ...]:
-    """A 2-second visibility wait on *locator* (``Crm.java:18``)."""
-    return ("wait", locator, WAIT_TIMEOUT)
+    """A 2-second visibility wait on *locator* (``Crm.java:18``).
+
+    *locator* is passed as the ``CrmPage`` constant, and the entry carries that
+    constant's name alongside its value, so a wait on the wrong twin of a
+    duplicated selector - or on an element resolved before the call - is a diff
+    here instead of a byte-identical pass.
+    """
+    return ("wait", _locator_constant_name(locator), locator, WAIT_TIMEOUT)
 
 
 # =========================================================================== #
@@ -1311,13 +1356,11 @@ def _wait(locator: tuple[str, str]) -> tuple[Any, ...]:
 
 @cache
 def _module_source() -> str:
-    """The step module's source text."""
     return STEP_MODULE_PATH.read_text(encoding="utf-8")
 
 
 @cache
 def _module_ast() -> ast.Module:
-    """The step module's parsed AST."""
     return ast.parse(_module_source(), filename=str(STEP_MODULE_PATH))
 
 
@@ -1457,11 +1500,13 @@ def _normalise_usage(name: str) -> str:
     """Reduce a callee name to the operation it performs.
 
     Any ``wait*`` helper becomes ``"wait"`` and the keyboard helper becomes
-    ``"keys"``, so that a sibling unit renaming a helper in
-    ``app/automation`` cannot fail a parity assertion about *which element* a
-    site touches.  Everything else - ``click``, ``clear``, ``text`` and the
-    action-chain methods - is kept as written, because those names are the
-    behaviour.
+    ``"keys"``, because the parity fact at such a site is *which page attribute*
+    it names: ``Crm.java:24`` names a condition, ``:36`` a ``sendKeys``, and
+    neither names a Python helper.  For a wait that attribute is the upper-case
+    locator constant, which :data:`SOURCE_SHAPES` spells out site by site, so
+    this reduction cannot blur a locator into an element.  Everything else -
+    ``click``, ``clear``, ``text`` and the action-chain methods - is kept as
+    written, because those names are the behaviour.
     """
     lowered = name.lower()
 
@@ -1477,12 +1522,13 @@ def _normalise_usage(name: str) -> str:
 def _enclosing(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> ast.AST | None:
     """The node that *uses* this one, looking through argument wrappers.
 
-    An accessor passed as ``helper(element=page.x)`` sits under an
-    ``ast.keyword`` rather than directly under the call, and one passed as
-    ``helper(*pair)`` under an ``ast.Starred``.  Climbing through both is what
-    keeps the usage classification indifferent to *how* an argument is passed,
-    which the module docstring commits to: the call signature belongs to
-    ``app/automation`` and a sibling unit may restate it.
+    A page attribute passed as ``wait_visible_element(locator=page.CRM_LINK, 2)``
+    sits under an ``ast.keyword`` rather than directly under the call, and one
+    passed as ``helper(*pair)`` under an ``ast.Starred``.  Climbing through both
+    means the usage is classified from the call itself, so the *name* recorded
+    for the site is the one the source writes however the argument is spelled -
+    and an upper-case constant stays distinguishable from a lower-case accessor
+    in either spelling.
     """
     parent = parents.get(node)
 
@@ -1520,13 +1566,13 @@ def _accessor_usages(function_name: str) -> tuple[tuple[str, str], ...]:
 
     A page access is recognised as ``<name>.<attribute>`` where the attribute is
     one of :data:`PAGE_ATTRIBUTE_NAMES`, rather than by assuming the local
-    variable is called ``page``: that set is exactly ``CrmP.java``'s fields
-    under both spellings the port uses - the lower-case accessor
-    ``BasePage.__init_subclass__`` installs, and the upper-case locator constant
-    a wait site hands the helper - so the recognition cannot drift and cannot
-    produce a false positive on an unrelated attribute.  The name is reported as
-    the source spells it, which is how a wait on the wrong twin of a duplicated
-    selector is caught.
+    variable is called ``page``: that set is exactly the 28 ``@FindBy`` fields of
+    ``CrmP.java:13-95`` under both spellings the port uses - the lower-case
+    accessor ``BasePage.__init_subclass__`` installs, and the upper-case locator
+    constant a wait site hands the helper - so the recognition cannot drift and
+    cannot produce a false positive on an unrelated attribute.  The name is
+    reported as the source spells it, which is how a wait on the wrong twin of a
+    duplicated selector, or on an element resolved before the wait, is caught.
     """
     node = _function_node(function_name)
     parents = _parents(node)
@@ -1589,13 +1635,15 @@ def _key_call_shapes(
         if _normalise_usage(name) != "keys":
             continue
 
-        # Positional first, as every call site writes it today, then the two
-        # keyword names the helper could plausibly take it under.
+        # Positional first, then the parameter's own name, as
+        # ``press_keys(target, *key_names, text=..., driver=...)`` declares it.
+        # Java applies sendKeys to the field itself (Crm.java:36), so a keyboard
+        # site is named through the lower-case accessor - unlike a wait site.
         target: ast.expr | None = candidate.args[0] if candidate.args else None
 
         if target is None:
             for keyword in candidate.keywords:
-                if keyword.arg in {"target", "element"}:
+                if keyword.arg == "target":
                     target = keyword.value
                     break
 
@@ -1667,7 +1715,15 @@ def _assert_shapes(function_name: str) -> tuple[tuple[str, str, bool], ...]:
 
 @cache
 def _print_count(function_name: str) -> int:
-    """How many ``print`` calls one function makes."""
+    """How many ``print`` calls one function makes - nought, for all twelve.
+
+    Kept, and now asserted at nought everywhere: ``Crm.java``'s eight
+    ``System.out.println`` calls are deliberately not reproduced (F04), and a
+    source-level count is what catches a print on a branch no test drives.
+    :func:`test_the_step_module_contains_no_print_call_at_all` extends the same
+    count to the whole file, since a print outside the twelve bodies would
+    belong to no census entry.
+    """
     node = _function_node(function_name)
 
     return sum(
@@ -1734,9 +1790,10 @@ def _statement_index(function_name: str, predicate: Any) -> int:
 def _java_line_range(entry: Definition) -> tuple[int, int]:
     """The ``Crm.java`` lines one definition spans.
 
-    From its own annotation line to the next definition's - or to the class's
-    closing brace for the last one.  Used to attribute a line quoted by a test,
-    an ``assertEquals`` line for instance, to the method that contains it.
+    From its own annotation line to the next definition's - or to
+    ``Crm.java:154``, the class's closing brace, for the last one.  This
+    attributes a line a test quotes - an ``assertEquals`` at ``Crm.java:54``,
+    for instance - to the method that contains it.
     """
     following = CENSUS[entry.index] if entry.index < len(CENSUS) else None
 
@@ -1823,7 +1880,7 @@ def test_census_transcribes_exactly_twelve_java_definitions() -> None:
     """
     assert len(CENSUS) == DEFINITION_COUNT
 
-    # Declaration order, as ``Crm.java`` has them.
+    # Declaration order, as ``Crm.java:21-145`` has them.
     assert tuple(entry.index for entry in CENSUS) == tuple(
         range(1, DEFINITION_COUNT + 1)
     )
@@ -1863,7 +1920,7 @@ def test_census_transcribes_exactly_twelve_java_definitions() -> None:
 
 
 def test_every_census_definition_is_claimed_by_a_test_in_this_module() -> None:
-    """Each of the twelve methods of ``Crm.java`` has a parity test here.
+    """Each of the twelve methods of ``Crm.java:21-145`` has a parity test here.
 
     The fail-closed half of the census: a definition whose test is deleted,
     renamed, or left without its Java line in the docstring fails *this* test.
@@ -1895,7 +1952,7 @@ def test_every_census_definition_is_claimed_by_a_test_in_this_module() -> None:
 
 
 def test_step_module_registers_exactly_the_census_definitions() -> None:
-    """The port declares the twelve ``Crm.java`` definitions, in Java order.
+    """The port declares the twelve ``Crm.java:21-145`` definitions, in Java order.
 
     Read out of ``features/steps/crm_steps.py``'s AST, so an added, removed,
     renamed or re-keyworded definition fails here rather than passing
@@ -1928,7 +1985,7 @@ def test_step_module_registers_exactly_the_census_definitions() -> None:
 def test_each_definition_resolves_once_from_crm_steps(
     entry: Definition, resolve_step: Any
 ) -> None:
-    """Every ``Crm.java`` phrase resolves to its ported body, and only it.
+    """Every ``Crm.java:21-145`` phrase resolves to its ported body, and only it.
 
     ``resolve_step`` raises when a phrase matches no definition or more than
     one, so resolving all twelve proves the module's patterns are unambiguous
@@ -1965,7 +2022,7 @@ def test_function_name_is_the_java_method_name_in_snake_case(
 
 
 # =========================================================================== #
-# CrmP.java's duplicate selectors, as declared facts
+# The four duplicate selectors of CrmP.java:13-95, as declared facts
 # =========================================================================== #
 
 
@@ -1973,8 +2030,9 @@ def test_the_four_duplicated_selectors_are_declared_under_both_names() -> None:
     """``CrmP.java`` declares four selectors twice, and the port keeps both.
 
     The reason every call site is additionally checked by *name*: these four
-    pairs are indistinguishable in the driver log, so a step using the wrong
-    twin would produce a byte-identical sequence.  The values are retyped from
+    pairs - ``CrmP.java:16``/:76, :34/:82, :43/:64 and :49/:79 - are
+    indistinguishable in the driver log, so a step using the wrong twin would
+    produce a byte-identical sequence.  The values are retyped from
     the ``@FindBy`` annotations rather than read from the page object, since
     here the shared value is the assertion.
     """
@@ -2133,9 +2191,10 @@ def test_total_price_adds_eight_and_compares_against_eighty_nine(
         _find(CrmPage.TOTAL_PRICE),
         _text(CrmPage.TOTAL_PRICE),
     )
-    assert run.printed == (
-        f"totalPrice = {EXPECTED_PRICE}",
-        f"price = {EXPECTED_PRICE}",
+    assert run.printed == (), (
+        "Crm.java:51-52's two prints are not reproduced: the parsed total is "
+        "read live from the system under test and the worker's stdout reaches "
+        "the Jenkins console (F04)"
     )
     assert int(PASSING_TOTAL_TEXT) + PRICE_ADDEND == EXPECTED_PRICE
     assert run.waits == ()
@@ -2145,20 +2204,22 @@ def test_total_price_adds_eight_and_compares_against_eighty_nine(
 def test_total_price_fails_when_the_column_total_is_not_eighty_one(
     crm_step: StepHarness,
 ) -> None:
-    """Crm.java:54 - the assertion fails for any other total, after printing.
+    """Crm.java:54 - the assertion fails for any other total.
 
-    The two prints of ``:51-52`` precede the assertion, so they are emitted on
-    the failing path as well: that is the observable behaviour the baseline
-    artifact recorded when this step failed.
+    The failing path is where ``:51-52``'s prints would have carried the live
+    total furthest, since a failed step is the one a reader goes to the CI log
+    for; the port emits nothing there either, and the ``AssertionError`` alone
+    is what the engine records.  That failure is the observable behaviour the
+    baseline artifact recorded for this step.
     """
     crm_step.driver.set_text(CrmPage.TOTAL_PRICE, "10")
 
     run = crm_step.run("User can see the total price", expect=AssertionError)
 
     assert isinstance(run.error, AssertionError)
-    assert run.printed == (
-        f"totalPrice = {10 + PRICE_ADDEND}",
-        f"price = {EXPECTED_PRICE}",
+    assert run.printed == (), (
+        "the failing path must not print the live total either; Crm.java:51-52 "
+        "are not reproduced (F04)"
     )
 
 
@@ -2170,8 +2231,8 @@ def test_total_price_raises_value_error_on_non_numeric_text(
 
     The Java method declares no ``try`` and no fallback, so the port lets
     ``int()``'s ``ValueError`` propagate and the scenario fails exactly where
-    the Java scenario failed.  The parse precedes both prints, so a failing
-    parse emits nothing at all.
+    the Java scenario failed.  Nothing reaches stdout on this path either -
+    nothing does on any path in this module.
     """
     crm_step.driver.set_text(CrmPage.TOTAL_PRICE, total_text)
 
@@ -2207,9 +2268,10 @@ def test_see_new_pipeline_expects_the_lower_case_title(
         _find(CrmPage.FIND_TITLE_TEST),
         _text(CrmPage.FIND_TITLE_TEST),
     )
-    assert run.printed == (
-        f"actualName = {TITLE_TEXT}",
-        f"expectedName = {TITLE_TEXT}",
+    assert run.printed == (), (
+        "Crm.java:63-64's two prints are not reproduced: the card title is a "
+        "live SUT value and the worker's stdout reaches the Jenkins console "
+        "(F04)"
     )
     assert run.waits == ()
 
@@ -2332,6 +2394,7 @@ def test_save_information_waits_before_clicking_save(crm_step: StepHarness) -> N
     # "wait, then click" means once the helper resolves its own locator: the
     # reversed order would put the Save lookup and click ahead of the marker.
     assert run.timeline()[0] == _wait(CrmPage.PROBABILITY_EDIT)
+    assert run.waits[0].target is CrmPage.PROBABILITY_EDIT
     assert run.waits[0].target != CrmPage.SAVE_EDIT
     assert run.printed == ()
 
@@ -2370,13 +2433,15 @@ def test_verify_information_waits_on_a_different_element(
         _text(CrmPage.FIND_TITLE_TEST),
     )
 
-    # The waited-on element is emphatically not the clicked one.
-    assert run.waits[0].target == CrmPage.BUTTON_PIPELINE
+    # The waited-on element is emphatically not the clicked one - and the
+    # constant is BUTTON_PIPELINE (CrmP.java:43) rather than its twin
+    # PROGRESS_PIPELINE (CrmP.java:64), which carries the same selector.
+    assert run.waits[0].target is CrmPage.BUTTON_PIPELINE
+    assert run.waits[0].constant == "BUTTON_PIPELINE"
     assert run.waits[0].target != CrmPage.PIPELINE_SIDE_BUTTON
 
-    assert run.printed == (
-        f"actualName = {EDITED_TITLE_TEXT}",
-        f"expectedName = {EDITED_TITLE_TEXT}",
+    assert run.printed == (), (
+        "Crm.java:97-98's two prints are not reproduced (F04)"
     )
 
 
@@ -2522,9 +2587,8 @@ def test_new_changes_in_progress_reads_the_second_column(
         _find(CrmPage.TEST_VERIFY),
         _text(CrmPage.TEST_VERIFY),
     )
-    assert run.printed == (
-        f"actualName = {TITLE_TEXT}",
-        f"expectedName = {TITLE_TEXT}",
+    assert run.printed == (), (
+        "Crm.java:126-127's two prints are not reproduced (F04)"
     )
     assert CrmPage.TEST_VERIFY != CrmPage.FIND_TITLE_TEST
     assert run.waits == ()
@@ -2629,6 +2693,10 @@ def test_print_profile_waits_on_the_due_payment_entry(crm_step: StepHarness) -> 
         CrmPage.NAME_CUSTOMER,
         CrmPage.DUE_PAYMENT_BUTTON,
     )
+    assert tuple(event.constant for event in run.waits) == (
+        "NAME_CUSTOMER",
+        "DUE_PAYMENT_BUTTON",
+    )
     assert run.printed == ()
     assert run.sleeps == ()
 
@@ -2636,13 +2704,14 @@ def test_print_profile_waits_on_the_due_payment_entry(crm_step: StepHarness) -> 
 # =========================================================================== #
 # Whole-class totals
 #
-# Every count AAP 0.4.1 and the review pin for this class, measured by running
-# all twelve definitions once in Java order.
+# The counts AAP 0.4.1 fixes for this class - eleven 2-second waits, seven
+# keyboard sites, eight printed lines, one action chain and one fixed delay -
+# measured by running all twelve definitions once in Crm.java:21-145 order.
 # =========================================================================== #
 
 
 def _run_every_definition(crm_step: StepHarness) -> tuple[StepRun, ...]:
-    """Run all twelve definitions in ``Crm.java`` order and return the runs.
+    """Run all twelve definitions in ``Crm.java:21-145`` order, and return them.
 
     The page's answers are programmed first so the four assertions pass:
     ``81`` for the column total (``81 + 8 == 89``) and ``"test"`` for the two
@@ -2685,11 +2754,23 @@ def test_the_class_waits_eleven_times_and_always_for_two_seconds(
     assert tuple(event.target for event in waits) == WAIT_TARGETS_IN_ORDER
     assert {event.timeout for event in waits} == {WAIT_TIMEOUT}
 
+    # Each site's first argument *is* the page's upper-case locator constant,
+    # not an equal tuple and not an element resolved before the call: four of
+    # CrmP.java's selectors are declared twice, so equality alone would accept
+    # the wrong twin, and a pre-resolved element would be looked up under
+    # driver.py's 10-second implicit wait instead of Crm.java:18's 2 seconds.
+    assert all(
+        event.target is expected
+        for event, expected in zip(waits, WAIT_TARGETS_IN_ORDER, strict=True)
+    )
+    assert tuple(event.constant for event in waits) == tuple(
+        _locator_constant_name(locator) for locator in WAIT_TARGETS_IN_ORDER
+    )
+
     # Java's condition is ExpectedConditions.visibilityOf at every one of the
     # eleven sites, so each has to go through a *visibility* helper - a switch
     # to a presence or clickability wait would be a different condition and
-    # fails here.  Which visibility helper, and what signature it takes,
-    # belongs to app/automation and is deliberately not pinned.
+    # fails here.
     helpers = {event.helper for event in waits}
 
     assert helpers, "no wait helper call was recorded for any of the eleven sites"
@@ -2725,27 +2806,44 @@ def test_the_class_makes_seven_single_call_keyboard_sites(
         assert arguments[-1] == Keys.ENTER
 
 
-def test_the_class_prints_exactly_eight_lines(crm_step: StepHarness) -> None:
-    """Crm.java:51-52, :63-64, :97-98, :126-127 - eight printed lines.
+def test_no_definition_writes_anything_to_standard_output(
+    crm_step: StepHarness,
+) -> None:
+    """Crm.java:51-52, :63-64, :97-98, :126-127 - eight prints, none reproduced.
 
-    Observable behaviour of the default-path feature rather than debug noise:
-    only ``Crm.java`` and ``Sales.java`` print, the labels are camelCase, the
-    spaces around ``=`` are Java's, and the first line carries the *computed*
-    total.  They are not routed through a logger, which would change both the
-    destination and the format.
+    The whole-module invariant, and the strongest form of it: all twelve
+    definitions are driven in Java order against a programmed page, and not one
+    line reaches standard output.  ``Crm.java`` printed a parsed column total
+    and three live pipeline card titles beside their expected literals, and
+    reproducing that put live customer and pricing data into durable worker and
+    Jenkins logs, because ``app/services/test_run_service.py`` relays every
+    worker stdout line into the parent logger (CWE-532/359, the security
+    review's F04).  Nothing is routed elsewhere in their place either - no
+    logger call, no attachment, no file - which
+    :func:`test_no_definition_calls_print` and
+    :func:`test_the_step_module_contains_no_print_call_at_all` check at the
+    source level.
+
+    No parity is lost by asserting silence here: diagnostic stdout is in
+    neither AAP 0.1.2's list of what the port must not change nor AAP 0.4.1's
+    enumeration of what each step body must reproduce, and every item those two
+    *do* cover is asserted by the per-definition tests above, which pass
+    unchanged.
     """
     runs = _run_every_definition(crm_step)
     printed = tuple(line for run in runs for line in run.printed)
 
-    assert printed == PRINTED_LINES_IN_ORDER
-    assert len(printed) == 8
+    assert printed == (), (
+        f"the class wrote {printed!r} to standard output; Crm.java's eight "
+        f"System.out.println calls are deliberately not reproduced, and the "
+        f"worker's stdout is relayed into the Jenkins console"
+    )
+    assert len(runs) == DEFINITION_COUNT
 
-    # Two lines each, from four of the twelve steps and no others.
-    printing = {
-        run.match.func.__name__: len(run.printed) for run in runs if run.printed
-    }
-    assert printing == {
-        name: count for name, count in PRINT_COUNTS.items() if count
+    # Stated per definition as well, so a failure names the body that spoke
+    # rather than only the total.
+    assert {run.match.func.__name__: run.printed for run in runs} == {
+        entry.function: () for entry in CENSUS
     }
 
 
@@ -2776,7 +2874,10 @@ def test_the_eight_silent_definitions_neither_print_nor_assert(
     Run against a page that answers nothing at all, each completes without
     raising and without emitting a line.  The absence of an assertion is
     behaviour: these eight steps drive the browser, and the four that check
-    anything do so on their own lines.
+    anything do so on their own lines.  The absence of output is not peculiar
+    to these eight any more - no definition in the module prints - but it is
+    still asserted per body here, which is what catches a print added to one of
+    them.
     """
     entry = next(item for item in CENSUS if item.function == function)
 
@@ -2786,6 +2887,83 @@ def test_the_eight_silent_definitions_neither_print_nor_assert(
     assert run.error is None
     assert _print_count(function) == 0
     assert _assert_shapes(function) == ()
+
+
+@pytest.mark.parametrize(
+    ("function", "locator", "passing_text", "failing_text"),
+    [
+        (
+            "user_can_see_the_total_price",  # Crm.java:51-52
+            CrmPage.TOTAL_PRICE,
+            PASSING_TOTAL_TEXT,
+            "10",
+        ),
+        (
+            "user_can_see_new_pipeline",  # Crm.java:63-64
+            CrmPage.FIND_TITLE_TEST,
+            TITLE_TEXT,
+            EDITED_TITLE_TEXT,
+        ),
+        (
+            "user_can_verify_the_information",  # Crm.java:97-98
+            CrmPage.FIND_TITLE_TEST,
+            EDITED_TITLE_TEXT,
+            TITLE_TEXT,
+        ),
+        (
+            "user_can_see_the_new_changes_in_progress",  # Crm.java:126-127
+            CrmPage.TEST_VERIFY,
+            TITLE_TEXT,
+            EDITED_TITLE_TEXT,
+        ),
+    ],
+    ids=FORMERLY_PRINTING_FUNCTIONS,
+)
+def test_the_four_formerly_printing_definitions_are_silent(
+    crm_step: StepHarness,
+    function: str,
+    locator: tuple[str, str],
+    passing_text: str,
+    failing_text: str,
+) -> None:
+    """Crm.java:51-52, :63-64, :97-98, :126-127 - silent on both paths.
+
+    The sensitivity half of the invariant, and the one that would catch a print
+    reintroduced where the source had one.  Each of the four bodies is driven
+    twice - once with the page programmed so its assertion passes, once so its
+    assertion fails - because the value the removed prints carried was read
+    live from the system under test and a failing step is exactly where a
+    reader would be tempted to print it again (CWE-532/359, F04).  Neither path
+    may emit a line, and the source-level count of the body must stay at nought
+    so that a print on a branch no test drives is caught as well.
+    """
+    entry = next(item for item in CENSUS if item.function == function)
+
+    # The four that printed are the four that assert - a property of
+    # Crm.java, not of this test's ordering, and the reason each case below
+    # has a failing half at all.
+    assert tuple(ASSERT_OPERANDS) == FORMERLY_PRINTING_FUNCTIONS
+    assert function in FORMERLY_PRINTING_FUNCTIONS
+
+    crm_step.driver.set_text(locator, passing_text)
+    passing = crm_step.run(entry.concrete_phrase)
+
+    assert passing.error is None
+    assert passing.printed == (), (
+        f"{function} wrote {passing.printed!r} on the passing path; "
+        f"Crm.java:{entry.java_line}'s method printed two lines and the port "
+        f"reproduces neither"
+    )
+
+    crm_step.driver.set_text(locator, failing_text)
+    failing = crm_step.run(entry.concrete_phrase, expect=AssertionError)
+
+    assert isinstance(failing.error, AssertionError)
+    assert failing.printed == (), (
+        f"{function} wrote {failing.printed!r} on the failing path, which is "
+        f"the path a live SUT value would reach the Jenkins console by"
+    )
+    assert _print_count(function) == 0
 
 
 # =========================================================================== #
@@ -2861,8 +3039,11 @@ def test_each_title_assertion_fails_when_the_page_disagrees(
 
     The wrong values are each other's expected values, which is the point of
     keeping the three literals distinct: a step that compared against the wrong
-    one of them would pass its own case and fail here.  The two prints precede
-    the assertion, so both lines are emitted on the failing path.
+    one of them would pass its own case and fail here.  The failing path emits
+    nothing: ``:63-64``, ``:97-98`` and ``:126-127`` printed the live card
+    title beside its expected literal and the port reproduces none of them
+    (F04), so the ``AssertionError`` is the whole of what a failing comparison
+    produces.
     """
     # The quoted assertEquals line belongs to this phrase's own method, and
     # that method makes exactly one assertion - so the failure below is the
@@ -2878,14 +3059,16 @@ def test_each_title_assertion_fails_when_the_page_disagrees(
     run = crm_step.run(phrase, expect=AssertionError)
 
     assert isinstance(run.error, AssertionError)
-    assert run.printed == (
-        f"actualName = {wrong_text}",
-        f"expectedName = {expected_text}",
+    assert run.printed == (), (
+        f"the failing comparison of {phrase!r} wrote {run.printed!r} to "
+        f"standard output; the live title {wrong_text!r} must not reach the "
+        f"worker or Jenkins log"
     )
+    assert expected_text != wrong_text
 
 
 # =========================================================================== #
-# Source-level parity: accessor names and keyboard call shapes
+# Source-level parity: accessor names, and how each keyboard call is written
 # =========================================================================== #
 
 
@@ -2897,11 +3080,12 @@ def test_every_call_site_uses_the_locator_name_its_java_line_uses(
 
     The name-aware half of the locator obligation.  Four selectors are declared
     twice in ``CrmP.java``, so the driver log cannot tell ``CREATE_BUTTON``
-    from ``CREATE_CUSTOMER``, ``CREATE_PIPELINE`` from
-    ``CREATE_CUSTOMER_BUTTON``, ``OPPORTUNITY_TITLE_EDIT`` from ``INPUT_NAME``
-    or ``BUTTON_PIPELINE`` from ``PROGRESS_PIPELINE``; this reads the accessor
-    names out of the step module's AST instead, in source order, so a step that
-    used the wrong twin fails even though its log would be identical.
+    (:16) from ``CREATE_CUSTOMER`` (:76), ``CREATE_PIPELINE`` (:34) from
+    ``CREATE_CUSTOMER_BUTTON`` (:82), ``OPPORTUNITY_TITLE_EDIT`` (:49) from
+    ``INPUT_NAME`` (:79) or ``BUTTON_PIPELINE`` (:43) from ``PROGRESS_PIPELINE``
+    (:64); this reads the attribute names out of the step module's AST instead,
+    in source order, so a step that used the wrong twin fails even though its
+    log would be identical.
     """
     assert _accessor_usages(entry.function) == SOURCE_SHAPES[entry.function]
 
@@ -2929,8 +3113,9 @@ def test_every_keyboard_site_sends_its_text_and_enter_in_one_call(
 
 
 def test_the_seven_keyboard_sites_are_the_only_ones_in_the_module() -> None:
-    """Crm.java declares seven ``sendKeys`` sites across three methods.
+    """``Crm.java:36``, :40, :76, :78, :80, :138 and :141 - seven ``sendKeys``.
 
+    The seven sites sit in the three methods at ``Crm.java:34``, :70 and :132.
     A keyboard call added to any other definition - or removed from one of the
     three - fails here, which keeps the runtime total of seven honest.
     """
@@ -2946,9 +3131,72 @@ def test_the_seven_keyboard_sites_are_the_only_ones_in_the_module() -> None:
 
 
 @pytest.mark.parametrize("entry", CENSUS, ids=lambda entry: entry.java_method)
-def test_print_counts_match_the_java_methods(entry: Definition) -> None:
-    """Two ``println`` calls in each printing method, none in the other eight."""
-    assert _print_count(entry.function) == PRINT_COUNTS[entry.function]
+def test_no_definition_calls_print(entry: Definition) -> None:
+    """No ``print`` call in any of the twelve bodies, at any nesting.
+
+    The per-body source-level half of the stdout invariant: ``Crm.java``'s
+    eight ``System.out.println`` calls are not reproduced (F04), and this is
+    asserted on the syntax tree rather than only at run time so that a print
+    inside a branch no scenario happens to take is caught too.
+    """
+    assert _print_count(entry.function) == 0, (
+        f"{entry.function} calls print(); Crm.java:{entry.java_line}'s output "
+        f"is deliberately not reproduced, and the worker's stdout is relayed "
+        f"into the parent logger and the Jenkins console"
+    )
+
+
+def test_the_step_module_contains_no_print_call_at_all() -> None:
+    """``features/steps/crm_steps.py`` holds no ``print`` call, in any scope.
+
+    The whole-file form of the same fact, and the one that closes the gap the
+    per-definition census leaves: a print in ``_page``, in a helper added
+    later, or at module scope belongs to no census entry and would satisfy
+    :func:`test_no_definition_calls_print` while still writing a line into
+    every worker and Jenkins log (F04).  Counted over the module's entire
+    syntax tree, so the prose in the docstrings - which discusses the removed
+    prints by name - cannot satisfy or break it.
+    """
+    calls = [
+        node
+        for node in ast.walk(_module_ast())
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "print"
+    ]
+
+    assert calls == [], (
+        f"crm_steps.py calls print() at line(s) "
+        f"{[node.lineno for node in calls]}; the module writes nothing to "
+        f"standard output"
+    )
+
+    # The named alternatives are absent as well: the finding is about the
+    # values reaching a durable log, so rerouting them to a logger, an
+    # attachment or a file would not resolve it.
+    referenced = {
+        node.id for node in ast.walk(_module_ast()) if isinstance(node, ast.Name)
+    } | {
+        node.attr
+        for node in ast.walk(_module_ast())
+        if isinstance(node, ast.Attribute)
+    }
+
+    for name in (
+        "print",
+        "logging",
+        "logger",
+        "getLogger",
+        "stdout",
+        "stderr",
+        "write",
+        "open",
+    ):
+        assert name not in referenced, (
+            f"crm_steps.py references {name!r}; the eight removed prints are "
+            f"not to be re-routed to another sink - the finding is the values "
+            f"reaching a durable record, whichever one it is"
+        )
 
 
 # =========================================================================== #
@@ -2989,9 +3237,9 @@ def test_every_feature_step_resolves_to_exactly_one_definition(
 
     ``resolve_step`` raises on an undefined or ambiguous phrase, so this covers
     both.  The Background's *Given User login to test other features* resolves
-    into ``session_steps`` - it is declared in ``Session.java``, shared by every
-    feature needing a logged-in session, and deliberately not redeclared here -
-    while every other phrase resolves into ``crm_steps``.  The set of
+    into ``session_steps`` - it is declared at ``Session.java:12``, shared by
+    every feature needing a logged-in session, and deliberately not redeclared
+    here - while every other phrase resolves into ``crm_steps``.  The set of
     ``crm_steps`` functions the feature reaches is exactly the census, so an
     unported definition or a phrase drifting out of the feature fails.
     """

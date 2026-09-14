@@ -1,323 +1,62 @@
 {#-
-  ===========================================================================
-  pretty/tag.html - the tag detail page of the generated report tree.
-  ===========================================================================
+  pretty/tag.html - the tag detail page of the generated report tree, rendered
+  once per tag of the run as cucumber-html-reports/report-tag_<hash>.html.
 
-  One of the six page templates app/reporting/pretty_reports.py renders, and
-  the second of the two it renders MORE THAN ONCE: like feature.html it is
-  rendered once per subject, emitting one
-  cucumber-html-reports/report-tag_<hash>.html for every tag in the run.
+  It extends pretty/_layout.html - never app/templates/base.html, whose
+  static-URL asset links resolve only while an application serves - supplies
+  'Tag: ' and the name for title_suffix, and sets NO active_page, a detail
+  page leaving all four navigation items plain. No filename is computed here -
+  the output name hashes THE TAG NAME in app/reporting/pretty_reports.py - and
+  every href is a caller's value, so the page resolves offline.
 
-  The template is tag.html and the artifacts are report-tag_<hash>.html. The
-  two names differ on purpose and neither follows the other, exactly as
-  overview_steps.html is the template behind overview-steps.html.
-
-  PROVENANCE
-  ----------
-  This is contract 2 of the port's two HTML artifacts - the tree the Java
-  build produced with me.jvt.cucumber:reporting-plugin 7.2.0 (pom.xml:66-70),
-  which pulls net.masterthought:cucumber-reporting 5.6.1 over
-  org.apache.velocity:velocity-engine-core 2.3. Velocity, not Mustache; the
-  specification's Mustache claim is wrong and is not used. Contract 1, the
-  single self-contained page from io.cucumber:html-formatter 17.0.0, is a
-  different generator with its own template set under app/templates/artifact/,
-  and the only markup the two contracts share is the three partials in
-  app/templates/partials/.
-
-  THE REFERENCES FOR THIS PAGE ARE CLEAN, which is rare in this tree.
-  report-tag_2208711665.html and report-tag_4059758862.html carry ZERO
-  merge-conflict markers, and between them cover both cases: the smaller page
-  is all-passing and carries no expanded container at all, the larger carries
-  failures with expanded containers and failure messages. Every "measured"
-  note below cites those two files. The four overview pages splice two
-  different runs and are readable for structure only. Acceptance of these
-  artifacts is structural: the plan maps no HTML golden fixture, and the tree
-  is additionally STALE ON TAGS - it holds a page and an overview row for a
-  @Dash tag no feature at the pinned revision declares, which is what proves
-  it predates the source. @Dash is not a tag this port must produce.
-
-  ---------------------------------------------------------------------------
-  THE RENDER CONTEXT - the contract app/reporting/pretty_reports.py renders
-  against, and the contract tests/test_pretty_reports.py asserts. Neither
-  exists yet, so this declaration is the specification for both.
-  ---------------------------------------------------------------------------
-  project_name, build_date_display and title_suffix are the layout's own and
-  are documented there; the last is set below rather than passed, and
-  active_page is deliberately NOT set - see the note under the title.
-
-      tag              THE SUBJECT OF THE PAGE. Either a mapping or, so that a
-                       hand-built fixture renders, a bare string.
-
-                         name    string, INCLUDING ITS LEADING @. The tag as
-                                 the result model carries it - '@Smoke', not
-                                 'Smoke' - because that is what the model's
-                                 tag entries hold and what the reference title
-                                 and tagname cell show.
-                         href    IGNORED IF SUPPLIED. The statistics row of a
-                                 detail page is the subject of the page the
-                                 reader is already on, so its key cell is
-                                 plain text. See the tagname note below.
-                         the twelve statistics keys of _stats_table.html's row
-                                 contract - steps_passed, steps_failed,
-                                 steps_skipped, steps_pending,
-                                 steps_undefined, steps_total,
-                                 scenarios_passed, scenarios_failed,
-                                 scenarios_total, duration_ns and status -
-                                 EACH OPTIONAL. A key that is supplied is used
-                                 verbatim, so a writer that would rather
-                                 aggregate in Python can; a key that is absent
-                                 is derived here from the elements the page
-                                 renders. The two are per-key, not
-                                 all-or-nothing.
-
-      tag_name         OPTIONAL string. An alternative to tag.name for a
-                       caller that has only the name, and the lowest-priority
-                       source of it.
-
-      features         PRIMARY CONTENT SHAPE. The normalized result model's
-                       feature list - the same value overview_steps.html and
-                       app/templates/view/overview.html consume and the shape
-                       tests/fixtures/sample_results.json carries. The page
-                       keeps the scenarios that carry this tag, grouped under
-                       their own features. See the two sections below for how
-                       a scenario is judged to carry it and for what happens
-                       to Background occurrences.
-
-      elements / rows  ALTERNATIVE CONTENT SHAPE, for a writer that would
-                       rather select in Python: a flat sequence of element
-                       mappings, or of rows carrying an 'element' mapping.
-                       Read only when features supplies nothing usable.
-                       NOTHING IS FILTERED BY TAG in this shape - a flat list
+  INPUTS, each reached through a guarded default so the page renders under a
+  strict undefined policy whatever the writer omits:
+      tag              THE SUBJECT: a mapping, or a bare string so a fixture
+                       renders. name carries ITS LEADING @, as the model holds
+                       it; any href is IGNORED; _stats_table.html's statistics
+                       keys are OPTIONAL PER-KEY, an absent one derived here.
+      tag_name         OPTIONAL, the lowest-priority source of the name.
+      features         PRIMARY CONTENT SHAPE: the normalised feature list, the
+                       scenarios carrying this tag grouped under their own.
+      elements / rows  ALTERNATIVE FLAT SHAPE for a writer that selects in
+                       Python, read only when features supplies nothing
+                       usable. NOTHING IS FILTERED BY TAG there - a flat list
                        cannot answer whether an untagged scenario inherits a
-                       feature-level tag, because its feature is not in the
-                       list - so the caller's selection is taken as final. Any
-                       feature_href or feature_name on such a row is dropped;
-                       see the feature-link note below.
+                       feature-level tag - so the caller's selection is final.
+      tag_hrefs        OPTIONAL map from tag name to a page filename, passed
+                       to the element tree so each chip becomes a link.
 
-      tag_hrefs        OPTIONAL mapping from tag name to the page filename its
-                       caller computed, passed straight through to the element
-                       tree so each tag chip in the tree becomes a link. A tag
-                       with no entry renders as a plain chip rather than a
-                       dead link. Include this page's own tag and its chips
-                       become self-links, which the reference does; omit it and
-                       they do not. NO FILENAME IS COMPUTED HERE.
+  WHICH SCENARIOS CARRY THE TAG: the match is against the union of a
+  scenario's own tag names and its feature's, a feature-level tag propagating
+  onto every scenario of its feature. An untagged scenario omits the tags key
+  rather than carrying an empty list, so every tag access is guarded, and an
+  unselected scenario is not rendered, an absent flag meaning selected.
 
-  Every one of those is reached through a guarded default, so the page renders
-  under a strict undefined policy whatever the writer omits - and that matters
-  beyond tidiness: the run's exit contract requires all four artifacts to be
-  written even when the tag expression selects nothing, so an empty subject is
-  a real, reachable, must-not-fail input.
+  THE STATISTICS ROW AGGREGATES THE TAGGED SCENARIOS ONLY - a Background
+  carries no tags and is not counted - while the TREE renders those scenarios
+  together with the Background occurrences preceding them, a scenario whose
+  Background is hidden reading as though it began mid-flow. That is the one
+  place on this page where the two halves count different things.
 
-  A SCENARIO THE RUN DID NOT SELECT IS NOT RENDERED. A scenario excluded by
-  the tag expression never started, so it never reached the reference
-  generator either - the JSON writer drops it for the same reason - and a
-  model without the flag predates it, so absent means selected. This is the
-  same guard overview_steps.html applies.
+  TWO ELEMENT FORMS, one parameter of _element_tree.html: the flat path, which
+  pretty_reports.py takes, renders plain div.elements with an opener row per
+  element; the grouped path renders div.feature per feature holding
+  div.elements.inner-level with no opener rows, inner-level marking a list
+  nested INSIDE a feature wrapper and so belonging to that path alone.
 
-  ---------------------------------------------------------------------------
-  WHICH SCENARIOS CARRY A TAG - and why an untagged one still can
-  ---------------------------------------------------------------------------
-  A FEATURE-LEVEL TAG PROPAGATES ONTO EVERY SCENARIO OF ITS FEATURE. @Smoke is
-  declared once, at Crm.feature:1, and all four scenario elements of that
-  feature carry it in the result model; a tag's page therefore lists every
-  scenario of a feature tagged with it. The match here is made against the
-  union of a scenario's own tag names and its feature's, so the page is
-  correct whether or not the writer propagated them itself.
+  PAGE SHAPE: the statistics table in the detail form - sortable=false and no
+  totals - then the collapse-all pair from pretty/_macros.html, the element
+  tree, the pair again, and the page-owned <br/>. id="report" is emitted
+  EXACTLY ONCE, which keeps any '#report ...' selector's scope unambiguous.
 
-  CONVERSELY, AN UNTAGGED SCENARIO OMITS THE 'tags' KEY ENTIRELY rather than
-  carrying an empty list, and five of the ten features in this suite carry no
-  feature-level tag at all - Contact, Inventory, Notes, Sales and Session - so
-  the absent key is the common case rather than an edge case. Every tag access
-  in this file and in the vocabulary it calls is therefore a guarded one.
-
-  Names are compared exactly, after trimming, with the leading @ intact: tag
-  names are case-sensitive in Gherkin and @smoke is not @Smoke.
-
-  ---------------------------------------------------------------------------
-  THE STATISTICS ROW AGGREGATES THE TAGGED SCENARIOS ONLY - MEASURED
-  ---------------------------------------------------------------------------
-  A Background carries no tags, and the reference does not count one. Proven
-  against the reference result set rather than assumed:
-
-      the @Smoke tag row      15 steps - 10 passed, 2 failed, 3 skipped -
-                              4 scenarios, 2 passed and 2 failed, and
-                              data-value="62051000000", rendering 1:2.051
-      the CRM feature row     19 steps - 14 passed, 2 failed, 3 skipped -
-                              and data-value="100186000000", 1:40.186
-
-  The difference is exactly the feature's four Background occurrences: four
-  steps and 38.135 seconds. So the row below is derived from the tag-carrying
-  scenarios and from nothing else, while the TREE below it renders those
-  scenarios together with the Background occurrences that precede them,
-  because a scenario whose Background is hidden reads as though it began
-  mid-flow. The split is deliberate and is the one place on this page where
-  the two halves count different things.
-
-  Each scenario contributes its own status, by its own steps, to the two
-  scenario columns; the row's overall status is the worst status across all of
-  their steps, through the one fold pretty/_element_tree.html owns.
-
-  ---------------------------------------------------------------------------
-  THREE DELIBERATE DEPARTURES FROM THE REFERENCE MARKUP, each recorded because
-  a reader comparing this page against report-tag_4059758862.html will see it.
-  Each is a correction or a content-shape difference, and none of them changes
-  what the page reports
-  ---------------------------------------------------------------------------
-  1. id="report" IS EMITTED ONCE, on the element-tree container. The reference
-     emits it twice - on the statistics wrapper and again on the tree wrapper
-     - which is invalid HTML and leaves the scope of any '#report ...'
-     selector ambiguous. The statistics wrapper here carries no id.
-
-  2. THE EXPAND-ALL / COLLAPSE-ALL CONTROL IS NOT THE REFERENCE'S MARKUP,
-     though it is in both of the reference's positions. Both clean reference
-     tag pages carry the chevron pair twice - once immediately above the tree
-     and once below it, before the trailing <br/> - and both blocks are
-     driven by an inline onClick="javascript:$('#report .collapsable-details')
-     .collapse(...)" handler. The positions and the wrapper are reproduced;
-     the handler is not. Inline script is forbidden on this surface in any
-     form - it is exactly what a page needs CSP unsafe-inline for - and the
-     reference reached for it only because the vendored plugin has no
-     declarative way to say show-all or hide-all. AAP 0.3.4 gives expand and
-     collapse to app/static/js/report.js, _element_tree.html now emits every
-     region as one of that script's own [data-report-detail] regions with a
-     real button beside it, and the two controls here carry that script's
-     data-report-toggle-all. So the page keeps the control a reader needs, on
-     one driver, with no inline handler. Both controls come from
-     pretty/_macros.html, shared with feature.html, so the four blocks across
-     the two detail pages cannot drift apart.
-
-  3. THE ELEMENTS FORM FOLLOWS THE CONTENT SHAPE, and only one of the two is
-     a departure. pretty/_element_tree.html documents both measured forms from
-     the same measurement and exposes them as one parameter:
-
-       the flat path - THE ONE app/reporting/pretty_reports.py TAKES, which
-         hands this page the tag's already-selected elements each carrying a
-         feature link - renders plain div.elements with an opener row per
-         element, inner_level=false. That IS the reference's form, and it is
-         no departure at all: report-tag_4059758862.html emits exactly one
-         div.elements, without inner-level, and the word "Background" does not
-         occur on it.
-       the grouped path, for a caller that hands over the whole feature list
-         instead, renders div.feature per feature, each holding
-         div.elements.inner-level, and no opener row on any element. THAT is
-         the departure: the feature wrapper carries the feature identity the
-         opener row would otherwise carry, one heading per feature rather than
-         one link per scenario, and it is the form that keeps a scenario's
-         Background beside it. A tag spanning several features renders several
-         wrappers, in the order the model carries them - feature source order,
-         then line order within each - which is what AAP 0.6 asks of every
-         writer when it requires the page set to be identical for identical
-         inputs.
-
-     inner-level marks a list nested INSIDE a feature wrapper, so it belongs
-     to the grouped path and to nothing else. Passing it on the flat path
-     would put a nesting class on an unnested list - visible in the emitted
-     page, and a break from both clean reference tag pages.
-
-  ---------------------------------------------------------------------------
-  MEASURED DETAILS THIS PAGE OWNS
-  ---------------------------------------------------------------------------
-    - THE TITLE IS "Cucumber Reports  - Tag: @Smoke", the double space after
-      Reports included: the layout owns the prefix, this page supplies
-      'Tag: ' and the name.
-    - NO NAVIGATION ITEM IS CURRENT. Both reference detail pages leave all
-      four plain, so active_page is not set and the layout handles its
-      absence.
-    - THE LEAD IS "Tag Report" AND NOTHING ELSE. No paragraph, unlike the four
-      overviews, and matching feature.html. The reference's element is h2;
-      this page emits <h1 class="h2">, the same type scale, for the reason
-      recorded at the block itself.
-    - THE STATISTICS TABLE IS <table class="stats-table"> - no id, no
-      table-hover - which is what sortable=false selects. A single row has
-      nothing to sort, and the layout's tablesorter initialisation binds to
-      the id this table therefore does not carry.
-    - td.tagname HOLDS THE PLAIN TAG NAME, no anchor. Passing no href is what
-      produces it, and it is the measured difference from overview_tags.html,
-      where the same cell links here.
-    - EXACTLY ONE BODY ROW AND NO tfoot. Passing no totals is what leaves the
-      footer out.
-    - THE <br/> BEFORE THE FOOTER is measured on both reference tag pages and
-      belongs to the page, not to the chrome, so it is emitted here.
-
-  ---------------------------------------------------------------------------
-  CONSTRAINTS THIS FILE HOLDS TO
-  ---------------------------------------------------------------------------
-    - NO FRAMEWORK URL BUILDING and no application endpoint. These pages are
-      written to disk and opened over the file protocol or straight from a
-      Jenkins workspace, where no route resolves. Every filename and every
-      destination is a value the caller passes in: the output filename is a
-      numeric hash - report-tag_<hash>.html, a fixed prefix, an unsigned
-      decimal hash and the extension, hashing THE TAG NAME where a feature
-      page hashes the feature URI - whose algorithm belongs to
-      app/reporting/pretty_reports.py, which derives it from
-      cucumber-reporting 5.6.1 and confirms it against a regenerated baseline.
-      Unlike feature-page names, a tag-page name does not move when the
-      features directory does, so nothing here changes on that account.
-    - NO VALUE IS DECLARED PRE-ESCAPED OR TRUSTED MARKUP. Jinja's automatic
-      escaping is relied on throughout, and it matters in every direction: tag
-      names, feature and scenario names, step arguments, descriptions and
-      assertion text are all model free text, this suite's names carry
-      quotation marks and apostrophes, and the reference generator escapes its
-      own output too.
-    - NO MERGE-CONFLICT MARKER, EVER. The reference's markers stay in the
-      read-only reference checkout; every writer of this port emits clean
-      output.
-    - NO INLINE JAVASCRIPT, in any form: no handler attribute, no javascript:
-      destination and no script block. This page has no chart, so head_extra
-      is left untouched, the tablesorter initialisation belongs to the layout,
-      and the two collapse-all controls carry a declarative attribute the
-      report script answers.
-    - NO PRESENTATION STATE OF THE PORT'S OWN: none of the three runtime
-      state classes - report-is-collapsed, report-is-filtered-out,
-      report-lightbox-is-open - which report.js alone writes and main.css
-      alone reads, and which are the whole of this project's state
-      vocabulary. The stylesheet
-      reads their absence as expanded, visible and closed, so server output
-      always describes a fully expanded, fully visible page and stays correct
-      with scripting off and on paper. Selection attributes are a different
-      thing and are allowed: data-report-root marks the tree so the report
-      script's filter scopes to it, each filter button carries
-      data-report-filter, and data-report-toggle-all names the action each
-      collapse-all control performs on the tree.
-    - CLASS VOCABULARY: the bare generator classes the vendored stylesheet
-      declares, and alongside them the port's own tqa- classes and its
-      data-report-status hook. Every main.css selector is led by a tqa-
-      class, a data-report- hook or one of the three report-is- runtime
-      classes, so the two sets meet in exactly one deliberate place: main.css
-      restates the bare status classes, scoped inside this project's own
-      containers, where the vendored palette's colour is not the one the
-      required palette specifies - and that restatement is why
-      _stats_table.html puts tqa-table on the statistics table it renders for
-      this page. Everywhere else they are disjoint. One of its classes is
-      deliberately NOT applied to the reference's bootstrap containers:
-      tqa-page sets width, max-width, margin and padding, so putting it on a
-      container-fluid would change the measured layout. What this page emits
-      of its own is data-report-status, whose main.css rules set custom
-      properties only and so paint nothing by themselves, data-report-root,
-      and tqa-filter with tqa-filter-btn on the status filter group.
-    - THE SOURCE'S INCONSISTENCIES ARE RENDERED, NOT TIDIED, per AAP 0.2.2:
-      two pairs of features share a JSON id because they share a title,
-      Contact.feature's header is mis-titled "Inventory feature" and
-      Notes.feature's "login feature", the feature titles say Testinium while
-      the assertions target Odoo and the pipeline's original checkout named
-      Upgenix, and the Examples tables carry plaintext credentials for an
-      external test instance. Nothing here disambiguates, corrects, renames,
-      redacts or flags any of it; report metadata uses whatever the data
-      itself carries.
-
-  ACCESSIBILITY. The page's lead heading is the document's primary heading and
-  is therefore a real h1, rendered at the measured 24px through the vendored
-  .h3 utility - the lead note below records why that utility and not .h2 - so
-  the rendered page is unchanged while the heading hierarchy starts where a
-  reader expects it; it sits inside the landmarks _layout.html emits. The statistics table is a real thead/tbody split with a scope on
-  every header cell, every status is spelt out in words beside its background
-  colour so colour is never the only carrier of meaning, and the element tree
-  names each collapse region and reports its expanded state. The two
-  collapse-all controls are real buttons - focusable, operated by Enter and
-  Space, named for the action they perform, and sized by the vendored button
-  box rather than by a bare glyph; pretty/_macros.html records that decision
-  where the markup is emitted, as _layout.html and _element_tree.html record
-  the ones they own.
+  STATE AND HOOKS. None of report.js's three runtime classes
+  (report-is-collapsed, report-is-filtered-out, report-lightbox-is-open),
+  which that script alone writes and main.css alone reads, and no inline
+  script or handler attribute. Selection attributes are used: data-report-root
+  marks the tree so the filter scopes to it, data-report-status sits on the
+  container, data-report-filter carries an authored aria-pressed on each
+  filter button, and data-report-toggle-all names the collapse-all action.
+  tqa-page is withheld: its width, margin and padding would change the layout.
 -#}
 {% extends "pretty/_layout.html" %}
 {#- The three helpers of this folder, each in the plain import form it
@@ -542,68 +281,40 @@
 {%- endif -%}
 
 {#- ---------------------------------------------------------------------
-    THE STATISTICS, derived from the tag-carrying scenarios and from nothing
-    else - the measured rule, proven in the header note: the @Smoke row
-    reports 15 steps and 62051000000 ns where its feature's row reports 19
-    and 100186000000, the difference being exactly the four Background
-    occurrences the tag does not carry.
+    THE STATISTICS, over the tag-carrying scenarios and nothing else - the
+    measured rule, proven in the header note: the @Smoke row reports 15 steps
+    and 62051000000 ns where its feature's row reports 19 and 100186000000,
+    the difference being exactly the four Background occurrences the tag does
+    not carry.
 
-    Every reading below goes through pretty/_element_tree.html, which is the
-    single owner of all three: a step's status is folded by handing that one
-    step to the same fold the tree uses, so no second normalisation exists on
-    this page; a scenario's status is decided by its own steps; and a
-    scenario's duration is the sum of its step durations, which is measured to
-    be exactly what the reference emits. A step carrying no duration key
-    contributes nothing rather than a zero.
+    NOT ONE OF THOSE FIGURES IS COMPUTED HERE ANY MORE. This page used to
+    count its own five step columns, its own two scenario columns and its own
+    duration in a loop over the subjects, and to fold its own status beside
+    them. app/reporting/aggregation.py is the normalised result model both
+    HTML artifacts are graded by - AAP 0.3.4 asks for one model across the
+    artifacts and the HTTP views, 0.4.2 repeats it as a cross-file invariant,
+    and that module records which surfaces read it - and it is what builds the
+    row the tags overview shows for this same tag. Two
+    computations of one number are two numbers: the local tally counted a
+    scenario passed whenever its own STEPS passed, while the authority counts
+    the ones whose effective verdict is a pass, so a failed after-hook or a
+    failed Background made the overview row and this page disagree about one
+    tag.
 
-    The five status counters cover the five columns the table has. A step in
-    any other state - untested, ambiguous, unrecognised - is counted in the
-    total and in no column, which is the honest reading of a total that the
-    generator labels Total.
+    So the subject row is the writer's - tag, which
+    app/reporting/pretty_reports.py hands over from the same aggregation that
+    produced the overview row - and a context that supplies none gets one call
+    to model_stats_row over the same subjects, which is the same function
+    behind that row. The five step columns, the two scenario columns, the
+    total and the duration arrive whole; a step in any other state - untested,
+    ambiguous, unrecognised - is counted in the total and in no column, which
+    is the honest reading of a total the generator labels Total, and the rule
+    lives in that module.
     --------------------------------------------------------------------- -#}
-{%- set tally = namespace(steps_passed=0, steps_failed=0, steps_skipped=0,
-                          steps_pending=0, steps_undefined=0, steps_total=0,
-                          scenarios_passed=0, scenarios_failed=0, duration=0) -%}
-{%- set subject_steps = [] -%}
-{%- for element in subjects -%}
-    {%- set element_steps = element.get('steps') -%}
-    {%- for step in (element_steps if (element_steps is sequence and element_steps is not string and element_steps is not mapping) else []) -%}
-        {%- if step is mapping -%}
-            {%- set _ = subject_steps.append(step) -%}
-            {%- set step_token = tree.steps_status([step], empty='unknown')|string|trim -%}
-            {%- set tally.steps_total = tally.steps_total + 1 -%}
-            {%- if step_token == 'passed' -%}
-                {%- set tally.steps_passed = tally.steps_passed + 1 -%}
-            {%- elif step_token == 'failed' -%}
-                {%- set tally.steps_failed = tally.steps_failed + 1 -%}
-            {%- elif step_token == 'skipped' -%}
-                {%- set tally.steps_skipped = tally.steps_skipped + 1 -%}
-            {%- elif step_token == 'pending' -%}
-                {%- set tally.steps_pending = tally.steps_pending + 1 -%}
-            {%- elif step_token == 'undefined' -%}
-                {%- set tally.steps_undefined = tally.steps_undefined + 1 -%}
-            {%- endif -%}
-        {%- endif -%}
-    {%- endfor -%}
-    {#- The two scenario columns. A scenario in any other state counts in the
-        total and in neither column, because the table has no third column
-        for it - measured: the reference reports 4 total, 2 passed, 2 failed.
-        The empty answer is the generator's own, for the reason
-        pretty/_element_tree.html records against EmployeeFc's empty
-        Background. -#}
-    {%- set element_token = tree.element_status(element)|string|trim -%}
-    {%- if element_token == 'passed' -%}
-        {%- set tally.scenarios_passed = tally.scenarios_passed + 1 -%}
-    {%- elif element_token == 'failed' -%}
-        {%- set tally.scenarios_failed = tally.scenarios_failed + 1 -%}
-    {%- endif -%}
-    {%- set tally.duration = tally.duration + tree.element_duration_ns(element)|int -%}
-{%- endfor -%}
-
 {#- ---------------------------------------------------------------------
-    THE ONE BODY ROW. Derived values first, then any the writer supplied,
-    per key rather than all-or-nothing, so a writer that aggregates in Python
-    is authoritative about what it sends and silent about the rest.
+    THE ONE BODY ROW. The authority's figures first, then any the writer
+    supplied, per key rather than all-or-nothing, so a writer that aggregates
+    in Python is authoritative about what it sends and silent about the rest.
 
     NO href KEY IS EVER SET, and one supplied on the subject is discarded
     here: passing none is exactly what makes _stats_table.html render
@@ -616,20 +327,7 @@
     sort attribute and the row can never disagree with the durations the tree
     below it renders.
     --------------------------------------------------------------------- -#}
-{%- set row = {
-      'name': tag_label,
-      'steps_passed': tally.steps_passed,
-      'steps_failed': tally.steps_failed,
-      'steps_skipped': tally.steps_skipped,
-      'steps_pending': tally.steps_pending,
-      'steps_undefined': tally.steps_undefined,
-      'steps_total': tally.steps_total,
-      'scenarios_passed': tally.scenarios_passed,
-      'scenarios_failed': tally.scenarios_failed,
-      'scenarios_total': subjects|length,
-      'duration_ns': tally.duration,
-      'status': tree.steps_status(subject_steps, empty='passed')|string|trim
-    } -%}
+{%- set row = dict(model_stats_row(tag_label, subjects), name=tag_label) -%}
 {%- for key in ['steps_passed', 'steps_failed', 'steps_skipped', 'steps_pending',
                 'steps_undefined', 'steps_total', 'scenarios_passed',
                 'scenarios_failed', 'scenarios_total', 'status'] -%}
@@ -642,11 +340,16 @@
 {%- if supplied_duration -%}
     {%- set _ = row.update({'duration_ns': supplied_duration|int}) -%}
 {%- endif -%}
-{#- The page's status hook, folded through the same single owner so that a
-    supplied status and a derived one are normalised identically. main.css
-    answers this attribute with custom properties only, so it paints nothing
-    by itself and the generator's own palette remains what a reader sees. -#}
-{%- set page_status = tree.steps_status([{'result': {'status': row.status}}], empty='unknown')|string|trim -%}
+{#- The page's status hook, canonicalised through the authority's own single
+    normalisation point - model_status_token, which app/reporting/
+    pretty_reports.py registers on the environment that renders this folder -
+    so that a supplied status and the authority's own are spelled identically
+    and a value the vocabulary does not recognise reads 'unknown' rather than
+    reaching the attribute raw. It was a fold over a hand-built one-step list
+    before, which asked a steps question of a row's status. main.css answers
+    this attribute with custom properties only, so it paints nothing by itself
+    and the generator's own palette remains what a reader sees. -#}
+{%- set page_status = model_status_token(row.status)|string|trim -%}
 
 {#- ---------------------------------------------------------------------
     THE STATUS FILTER'S OWN INPUT: which statuses the elements this page
@@ -660,7 +363,8 @@
     and excludes the Background occurrences kept beside them.
 
     THE STATUS READ HERE IS THE ONE THE ROWS EMIT. element_status is the
-    macro element_block itself uses when no status is passed to it, so a
+    reader element_block itself uses when no status is passed to it - the
+    authority's decorated status for that element, steps and hooks - so a
     button can never name a status no element carries and its count cannot
     disagree with the number of elements the script hides.
     --------------------------------------------------------------------- -#}
@@ -681,8 +385,13 @@
     {%- set token = tree.element_status(element)|string|trim -%}
     {%- set _ = filter_counts.update({token: filter_counts.get(token, 0) + 1}) -%}
 {%- endfor -%}
+{#- The button order is the authority's severity order, read as data. NOTHING
+    IS APPENDED TO IT: that tuple now names 'unknown' itself - a status nobody
+    established ranks between untested and passed rather than outside the
+    order - so the ('unknown',) this loop used to add would name the token
+    twice and emit two identical buttons for one group of rows. -#}
 {%- set filter_tokens = [] -%}
-{%- for token in tree.STATUS_PRECEDENCE + ('unknown',) -%}
+{%- for token in tree.STATUS_PRECEDENCE -%}
     {%- if filter_counts.get(token) -%}
         {%- set _ = filter_tokens.append(token) -%}
     {%- endif -%}

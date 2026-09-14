@@ -1,73 +1,44 @@
 """Read-only artifact-viewer HTTP surface for the Testinium-QA Python port.
 
-This package is the whole of the port's web tier. It presents, over HTTP and
-strictly read-only, the report artifacts that a test run has already produced.
-It never starts a run, never writes to disk, and never reaches into the layers
-that produce those artifacts -- a property enforced structurally rather than by
-convention, since this package imports no service, no report writer and no
-browser-automation module.
+This package is the whole of the port's web tier: it presents, over HTTP and
+strictly read-only, the report artifacts a test run has already produced. It
+starts no run and writes nothing, a property that holds structurally rather
+than by convention, since the package imports no service, no report writer and
+no browser-automation module.
 
-Provenance
-----------
-The web tier has no counterpart in the Java implementation this project ports:
-that implementation exposes no HTTP surface at all, as its build manifest and
-documentation both confirm. The package is therefore recorded as deviation 12
-in the technical specification's deviation inventory (section 0.1.3), and it is
-authorized by Conflict 3 of that section -- the request mandates a Flask
-application, while the specification states the system has no traditional
-application UI. The conflict resolves by holding Flask to the minimum it
-compels: a viewer over output that already exists, and nothing beyond it.
-Nothing in this package is preserved behaviour; all of it is a recorded
-addition.
+The tier has no counterpart in the Java implementation this project ports --
+that implementation exposes no HTTP surface at all -- so it is recorded as
+deviation 12 in the technical specification's deviation inventory (section
+0.1.3) and authorized by Conflict 3 of that section: the request mandates a
+Flask application while the specification states the system has no traditional
+application UI, and the conflict resolves by holding Flask to the minimum it
+compels, a viewer over output that already exists. Nothing here is preserved
+behaviour.
 
-Structure
----------
-Specification section 0.3.3 fixes a single blueprint for the entire surface:
-the surface is small and read-only, so the one JSON route sits alongside the
-HTML routes because both read the same artifact. That blueprint is defined
-here, as :data:`web_bp`. The six view functions bound to it live in the sibling
-``routes`` module; none is defined here.
+Specification section 0.3.3 fixes a single blueprint for the entire surface,
+defined here as :data:`web_bp`; the six view functions bound to it live in the
+sibling ``routes`` module and none is defined here. The blueprint's name string
+``"web"`` is a contract rather than a preference: the viewer templates and the
+views address their endpoints as ``web.index``, ``web.reports_overview``,
+``web.report_feature``, ``web.report_scenario``, ``web.reports_summary`` and
+``web.artifact``, so renaming it would break every one of those references at
+render time. Three constructor arguments are deliberately left unset:
+``url_prefix``, because the six rules carry absolute paths any prefix would
+corrupt, and ``template_folder`` and ``static_folder``, because template and
+static lookup must resolve against the application package's own directories --
+a blueprint-local folder would shadow that root and the views could no longer
+render the shared partials.
 
-The blueprint's name string ``"web"`` is a contract rather than a preference.
-The viewer templates and the views themselves address their endpoints as
-``web.index``, ``web.reports_overview``, ``web.report_feature``,
-``web.report_scenario``, ``web.reports_summary`` and ``web.artifact``.
-Renaming the blueprint would break every one of those references at render
-time, so the name is fixed.
-
-Three constructor arguments are deliberately left unset:
-
-``url_prefix``
-    The six rules carry absolute paths, which any prefix would corrupt.
-``template_folder``
-    Template lookup must resolve against the application package's own
-    template directory, so the views can render the shared partials; a
-    blueprint-local folder would shadow that root.
-``static_folder``
-    Static lookup must likewise stay at application level, so that the
-    endpoint the base template references keeps resolving.
-
-Registration
-------------
-Two different acts, and this module performs exactly one of them.
-
-Binding the six views to the blueprint happens here, once, by calling
-``register_routes()`` from the sibling ``routes`` module with the blueprint
-constructed below. The wiring runs in one direction only: this package imports
-that module, and that module imports nothing from this package, so neither
-import depends on the order the statements in either file happen to be written
-in and either module may be imported first.
-
-Registering the blueprint on an *application* is the other act, and it is the
-sole responsibility of the ``create_app()`` factory in the application package
--- which is also the only place the command-line surface and the
-application-level error handlers are wired. Importing this package therefore
-has no effect on any application object; it merely makes the blueprint, with
-its six routes already bound, available for the factory to register exactly
-once.
+Importing this package binds the six views to the blueprint, by calling
+``register_routes()`` from the ``routes`` module with the blueprint constructed
+below. That module imports nothing from this package, so the wiring runs in one
+direction and either module may be imported first. Registering the blueprint on
+an *application* is the other act and is the sole responsibility of the
+``create_app()`` factory, so importing this package has no effect on any
+application object; it merely makes a fully routed blueprint available for the
+factory to register exactly once.
 """
 
-# Ordered canonical name first, alias second, rather than alphabetically.
 __all__ = ["web_bp", "bp"]  # noqa: RUF022
 
 from flask import Blueprint

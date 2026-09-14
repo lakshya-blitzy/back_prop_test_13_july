@@ -3,186 +3,68 @@
   artifact/metadata.html - the page-header metadata block of the single,
   self-contained HTML report artifact.
   ---------------------------------------------------------------------------
-  Dividers here are dash rules throughout, deliberately: a run of equals signs
-  is the middle marker of an unresolved merge, the committed reference report
-  carries such a block, and no token that a marker scan looks for belongs in a
-  file this project writes - not even inside a comment the engine discards.
+  Two halves of that page's header: the run's provenance - what produced the
+  report, on what runtime and machine, when it was generated and when the run
+  started - and its tally of features, scenarios and steps by status. Both are
+  read straight from the normalised result model. This template computes
+  nothing: it counts nothing, derives no status, formats no timestamp and
+  holds no path literal.
 
-  WHICH ARTIFACT, AND WHICH GENERATOR. This file belongs to the first of the
-  project's two HTML contracts and the two are never collapsed into one.
-  cucumber-java 7.2.3 (pom.xml, retained as historical reference) pulls
-  html-formatter 17.0.0, which produced target/cucumber-reports.html - one
-  self-contained page, carrying no external asset reference of any kind. That
-  page is what app/reporting/html_report.py writes and what the templates in
-  this folder describe. The report tree under target/cucumber/ comes from a
-  different generator - cucumber-reporting 5.6.1 over Velocity - and has its
-  own page set, layout, assets and navigation in app/templates/pretty/.
-  Nothing here is shared with that folder except the partials named below.
+  API
 
-  WHAT IT RENDERS. Two halves of the report header, in this order:
-
-    1. the run's provenance - what produced the report, on what runtime, on
-       what machine, when it was generated and when the run started;
-    2. the run's tally - how many features, scenarios and steps there were and
-       how they came out, with the earliest scenario start as the anchor.
-
-  Both are read straight from the normalised result model. This template
-  computes nothing: it counts nothing, derives no status, formats no timestamp
-  and holds no path literal. Every number and every string arrives in the two
-  arguments below, already computed by the writer that owns them.
-
-  ---------------------------------------------------------------------------
-  THE MACRO, AND THE CONTEXT CONTRACT IT FIXES
-  ---------------------------------------------------------------------------
       {% from "artifact/metadata.html" import metadata_block %}
       {{ metadata_block(metadata, summary) }}
 
-  metadata   A mapping. The vocabulary is EXACTLY the four keys this port
-             produces - implementation{name,version}, runtime{name,version},
-             os{name}, cpu{name} - carrying this port's values (behave,
-             CPython, the host platform) in place of the JVM's. That is the
-             same four-key vocabulary app/reporting/events.py fixes in
-             run_metadata and documents against this file, and
-             app/reporting/html_report.py's build_metadata states its return
-             as exactly those four plus the two timestamps. Two run-level
-             timestamps join them, both in the model's own format:
-             generated_at, when the document was written, and started_at, the
-             earliest scenario start.
+  metadata_block(metadata, summary, extra_classes='')
+      metadata is a mapping of implementation{name,version},
+      runtime{name,version}, os{name} and cpu{name} plus the run-level
+      timestamps generated_at and started_at, in the model's own format.
+      summary is a mapping of the count groups features, scenarios and steps -
+      each a mapping of status to count, or a bare number read as that group's
+      total - plus the earliest scenario start as started_at, for which
+      start_timestamp is accepted as a spelling. extra_classes appends class
+      tokens to the single root element, runs of whitespace collapsed.
+      Both mappings are optional in every part: a missing argument, a null, a
+      non-mapping, a sparse mapping, a blank value or a count that is not a
+      number renders as though that item were absent. So this file cannot
+      raise under the strict undefined policy the tests enable and cannot
+      print the word None into a report, and a run that selected no scenario
+      renders as a deliberate empty state rather than as a gap.
 
-             The reference artifact's own payload also carried a protocol
-             version, and THIS PORT DOES NOT PRODUCE ONE: nothing in it
-             speaks the JVM formatter's message protocol, so there is no
-             version to state and a row for one could never render. It is a
-             deliberate exclusion rather than an oversight, recorded here so
-             that a reader who finds the key in the reference file does not
-             reintroduce a row nothing can fill. Any further key the writer
-             ever adds arrives with its own row added alongside the six
-             below, never with a row authored ahead of the value.
-
-  summary    A mapping of three count groups plus the earliest start:
-
-                 {"features":  {"total": 4, "passed": 3, "failed": 1},
-                  "scenarios": {"total": 10, "passed": 6, "failed": 2,
-                                "undefined": 1, "skipped": 1},
-                  "steps":     {"total": 30, "passed": 24, ...},
-                  "started_at": "2022-09-07T13:37:26.297Z"}
-
-             Counts of features, scenarios and steps by status plus the run's
-             earliest start timestamp - deliberately the same shape the
-             summary route answers with, because the artifacts and the HTTP
-             views read one normalised model precisely so that no view can
-             contradict an artifact. A group may also be a bare number, read
-             as that group's total. start_timestamp is accepted as a spelling
-             of started_at. Every status key present is rendered, in the fixed
-             order below; a status the writer did not count is simply absent,
-             and a key outside the model's vocabulary is still rendered - in
-             sorted position, in the neutral unknown state - because a count
-             that reaches this template is never silently dropped.
-
-  extra_classes  Optional, a string, default empty. Further class tokens for
-             the block's single root element. Runs of whitespace collapse and
-             an empty value leaves no class attribute at all.
-
-  Both mappings are optional in every part. A missing argument, a null, a
-  non-mapping, a sparse mapping, a blank value or a count that is not a number
-  renders as though that item were absent, so this file cannot raise under a
-  strict undefined policy - which the tests enable - and cannot print the word
-  None into a report. A run that selected no scenario at all is a legitimate
-  outcome that still writes every artifact, so a zero tally renders as a
-  deliberate empty state rather than as a gap.
-
-  ---------------------------------------------------------------------------
-  STATUS, AND WHERE IT IS DECIDED
-  ---------------------------------------------------------------------------
-  Never here. partials/status_badge.html is the single place a status is
-  normalised in this project, so every value that lands in a
-  data-report-status
-  attribute goes through status_token first - no lowercase fold, no mapping and
-  no derivation of a status is written in this file. The partial is imported
-  without the calling context, which is what keeps its output identical on
-  every surface it renders into. Its status_badge macro is deliberately not
-  called here: a tqa-count is itself a status-coloured container in the
-  stylesheet, and nesting a badge inside one would render a pill inside a pill
-  and state the same status twice.
-
-  Colour is never the sole carrier of meaning: every coloured count states its
-  group and its status in words, so the block reads the same in greyscale, on
-  paper and to a screen reader. That holds for an unrecognised key too - it
-  keeps its own spelling, which is the informative part, and gains the state
-  it was folded to in parentheses whenever the two differ, so a count reading
-  "Steps bogus (unknown)" says in text exactly what its neutral tint says in
-  colour. A key that differs only in case, folding onto a state it already
-  spells, gains nothing and stays as it was written. The stylesheet pairs each
-  status with a border style and a weight for the same reason, and it owns
-  every colour - this file emits the attribute hook and not one colour of its
-  own. Its print rules drop the tints and set one weight for every count, so
-  the words are what carry a status onto paper.
-
-  ORDERING is fixed rather than sorted: passed, failed, skipped, pending,
-  undefined, untested, ambiguous, unknown, with any unrecognised key after
-  them in sorted position - sorted case-sensitively, so that two keys
-  differing only in case cannot fall back on the order the writer happened to
-  insert them in. Identical input therefore yields identical structure,
-  which is the determinism the report contract requires. The
-  alphabetical sorting configured in the CI publisher is a display option of
-  that publisher and imposes nothing on the artifacts, so nothing is sorted on
-  its account.
-
-  ---------------------------------------------------------------------------
-  CLASS VOCABULARY - app/static/css/main.css, and nothing else
-  ---------------------------------------------------------------------------
-  tqa-meta and tqa-meta-item for the provenance grid, tqa-meta-label and
-  tqa-meta-value for the pair inside each item, tqa-summary and tqa-count for
-  the tally, tqa-timestamp for a time, tqa-empty for the empty state. No name
-  is invented: the stylesheet carries no selector outside that namespace, so an
-  invented class would render unstyled and silently.
-
-  Two markup choices follow that stylesheet rather than convention. The
-  provenance grid is a list, not a description list: tqa-meta-item is declared
-  as a flex container, which makes each item a flex box rather than a list item
-  and so generates no marker, while tqa-meta's own padding replaces the
-  browser's list indent - whereas a dd would keep its 40px browser margin,
-  which no rule in the stylesheet resets and which this file may not add. And
-  the count itself sits in a b element because the stylesheet sizes exactly
-  that element inside tqa-count and gives it tabular figures, so the digits of
-  adjacent counts line up.
-
-  WHITESPACE is cosmetic here and the block is written to tolerate whichever
-  trim settings the writer's engine carries: no rendered element depends on a
-  text node between two tags. The stylesheet separates a count from its label
-  with a gap on the flex container rather than with a space in the markup,
-  precisely because a whitespace-only text node between flex or grid items is
-  not rendered at all. So the structure is identical in either mode; only the
-  indentation of the emitted source differs.
-
-  TIMESTAMPS are rendered exactly as the model carries them - millisecond
-  precision, a literal trailing Z - as the machine-readable value of a time
-  element and as its text. Nothing is re-parsed, reformatted or localised
-  here, and no date library is reachable from this page.
-
-  ---------------------------------------------------------------------------
-  PROHIBITIONS, ALL OF THEM HONOURED
-  ---------------------------------------------------------------------------
-  This block is inlined into a page that must be readable from a filesystem
-  with no network at all, so: no absolute, protocol-relative or content-
-  delivery-network URL; no reference to a stylesheet, script, image, font or
-  sibling page; no application endpoint URL, because this page is written to
-  disk rather than served; and no icon glyph, because the icon fonts ship only
-  inside the other generator's tree and are unreachable from here. The one
-  style element and the scripts of the finished page belong to report.html,
-  so this file contains no inline style and no script of its own, and it
-  inherits no shell template - the page shell is not this block's to own.
-
-  Automatic escaping stays on and nothing is ever declared pre-escaped:
-  result data carries assertion text, tracebacks and Selenium messages full of
-  angle brackets and quotes, and the stylesheet handles the wrapping of what
-  remains. No behaviour hook from the report script's namespace is emitted -
-  the filterable containers and the page-level filter and expand-all controls
-  belong to the element, feature and report templates - and none of the three
-  state attributes the stylesheet reads is emitted either, since their absence
-  is what means expanded, visible and closed. Server output therefore always
-  describes the fully expanded, fully visible page, which is how this
-  single-file artifact is normally read.
+  CONSTRAINTS THAT CANNOT BE READ OFF THE CODE
+    - Status is never decided here: every value reaching a data-report-status
+      attribute goes through the badge partial's normaliser first, and that
+      partial's status_badge macro is deliberately not called, because a
+      tqa-count is itself a status-coloured container and a badge inside one
+      would state the same status twice.
+    - Counts are presented in the badge partial's reading order with any
+      unrecognised key after them in case-sensitively sorted position, so two
+      keys differing only in case cannot fall back on insertion order and
+      identical input yields identical structure.
+    - Colour never carries meaning alone: every count states its group and its
+      status in words, and an unrecognised key keeps its own spelling and
+      gains the state it folded to in parentheses when the two differ.
+    - Two markup choices follow the stylesheet rather than convention: the
+      provenance grid is a list rather than a description list, because
+      tqa-meta-item is a flex container and generates no marker where a dd
+      would keep a browser margin nothing here resets; and a count sits in a b
+      element, which that stylesheet sizes inside tqa-count and gives tabular
+      figures, so adjacent digits line up.
+    - Timestamps are emitted exactly as the model carries them, as both the
+      machine-readable value and the text of a time element. Nothing is
+      re-parsed, reformatted or localised, and no date library is reachable.
+    - Inlined into a page that must open from a filesystem with no network, so
+      no URL of any form, no stylesheet, script, image, font or sibling-page
+      reference, no endpoint-builder call and no icon glyph. The page's style
+      and script elements belong to artifact/report.html, and this file
+      inherits no shell template.
+    - No control is emitted here, so no mutable ARIA mirror is authored; the
+      two accessible names it does emit are static semantics, which nothing
+      maintains and main.css does not read. None of
+      the three runtime classes report.js writes - report-is-collapsed,
+      report-is-filtered-out, report-lightbox-is-open - appears either;
+      main.css alone reads those, and their absence is the fully expanded,
+      fully visible page. data-report-status is classification, not state.
 -#}
 {% import "partials/status_badge.html" as badge %}
 

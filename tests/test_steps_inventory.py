@@ -1,109 +1,42 @@
-r"""Behavioural parity tests for ``features/steps/inventory_steps.py``.
+"""Behavioural parity tests for ``features/steps/inventory_steps.py``.
 
-The per-module obligation AAP 0.4.1 places on this file: drive the Inventory
-step module against the stubbed driver and assert, **for every step method of
-``Inventory.java``**, that the port performs the same observable operations in
-the same order - the same locators as the paired page object declares, the same
-wait target and timeout, the same hard-coded literals, and the same no-ops
-where the Java body computes a value and throws it away.  A step method with no
-corresponding assertion here is a gap, so the nine-row census below is compared
-as a *set* against the registry: an omitted method turns this module red rather
-than passing silently.
+AAP 0.4.1 places one obligation on this file: drive the Inventory step module
+against a stubbed driver and assert, for every step method of
+``Inventory.java``, that the port performs the same observable operations in
+the same order - the same locators, wait target, timeout and literals, and the
+same no-ops where the Java body computes a value and discards it.  A method
+with no assertion here is a gap, so :data:`STEP_TABLE` is compared as a *set*
+against behave's registry.
 
 Java authority
 --------------
-``src/main/java/com/testinium/step_definitions/Inventory.java`` and
-``src/main/java/com/testinium/pages/InventoryP.java`` at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240``.  Every expectation in this file is
-cross-referenced to a line of those two files and to nothing else - in
-particular, never to the Python implementation, which is the thing under test.
+``src/main/java/com/testinium/step_definitions/Inventory.java:10-64`` and
+``src/main/java/com/testinium/pages/InventoryP.java:8-39``, at pinned revision
+``47e9d697e4a9a85da889f94a846fdf47af28a240``, which AAP 0.2.1 holds REFERENCE
+and this port never modifies.  Every expectation names the line it rests on;
+nothing here is derived from the Python implementation, which is under test.
 
-::
+Why the ordered log is the contract
+-----------------------------------
+``Inventory.java`` makes no ``Assert`` call in any of its nine methods
+(``:15-60``), and four statements compute a boolean and discard it: the title
+comparison at ``:28`` and the ``isDisplayed()`` reads at ``:44``, ``:54`` and
+``:59``.  Each is pinned twice - by parsing the module, and by programming the
+call to answer ``False`` and showing the step still completes - and with
+nothing asserted, the ordered log is what each per-step test states.
 
-    :12  InventoryP inventory = new InventoryP();
-    :13  WebDriverWait wait = new WebDriverWait(Driver.getDriver(), 20);
-    :15  "Logged user clicks on Inventory Module"  inventoryModule.click()
-    :20  "User clicks on Product module"           wait 20s visibilityOf, click
-    :26  "User see the products"                   getTitle().equals(...) dropped
-    :31  "User clicks create button"                createBtn.click()
-    :36  "User clicks the save button"              wait 20s visibilityOf, click
-    :42  "User should see the error"                fieldError.isDisplayed() dropped
-    :47  "User enters Product Name"                 productName.sendKeys("IBM")
-    :52  "User should see the title includes ..."    productsList.isDisplayed() dropped
-    :57  "User sees the created Product"            createdProduct.isDisplayed() dropped
+The wait contract
+-----------------
+Two call sites, ``:22`` and ``:38``, both at the 20 seconds ``:13``
+constructs, and each passes the page object's upper-case locator constant, so
+``visibility_of_element_located`` does the lookup inside the wait and those 20
+seconds govern it - the lower-case accessor would resolve the element first and
+leave the lookup to the 10-second implicit wait of ``Driver.java:34``.  Waits
+are intercepted in the step module's own globals, and each target is asserted
+by identity with its :class:`~app.pages.inventory_page.InventoryPage` constant.
 
-What makes this class different from every other one in the suite
------------------------------------------------------------------
-``Inventory.java`` contains **no assertion at all** - nine methods, not one
-``Assert`` call - and **four** of its statements are boolean-returning calls
-whose results are discarded: the title comparison at ``:28`` and the three
-``isDisplayed()`` reads at ``:44``, ``:54`` and ``:59``.  Those four are the
-headline obligation of this module and are pinned from both directions:
-
-*structurally*
-    :func:`test_no_step_body_contains_an_assert_statement` and
-    :func:`test_discarded_result_is_a_bare_expression_statement` parse the
-    module with :mod:`ast` and prove that no ``assert`` exists in any of the
-    nine bodies and that each discarded call really is a bare expression
-    statement - not assigned, not asserted, not branched on;
-
-*behaviourally*
-    :func:`test_discarded_result_does_not_fail_the_step` programmes each of the
-    four calls to answer ``False`` (or, for the title, to report a different
-    page) and asserts the step still completes and still returns ``None`` -
-    while the call itself is shown in the ordered log, so "no assertion" is
-    never confused with "no operation".
-
-It also has **zero fixed delays** (the seventeen ``Thread.sleep`` calls of this
-suite belong to Calendar, Contacts, Crm, EmployeeStage and Notes), reads **no
-configuration key**, uses neither ``Keys`` nor ``Actions``, and never
-navigates: ``Driver.getDriver()`` appears once, at ``:28``, only to read a
-title.
-
-Four techniques, and why each is the one used
----------------------------------------------
-**The wait is intercepted in the step module's own globals.**  behave's
-``load_step_modules`` execs each step file with a private globals dict, so the
-name a step body reaches the wait helper through lives there rather than in
-``app.automation``.  :func:`_install_wait_recorder` discovers that name
-dynamically - any callable module global whose name begins with ``wait`` - and
-replaces it with a recorder through ``monkeypatch.setitem``.  This is mandatory
-twice over: without it ``app/automation/waits.py``'s ``_until`` would call
-``get_driver()`` and this suite would try to start a browser, and the wait call
-sites themselves are being changed by another work unit.  So what is asserted
-here is the wait's **target locator**, its **timeout value** and its **position
-relative to the click** - never the helper's name, arity or argument shape.  The
-recorder accepts either target shape: an element carrying ``.locator`` or a raw
-``(by, value)`` pair, and reads the timeout as "the numeric argument", whether
-positional or keyword.
-
-**The wait lands in the driver's single ordered log.**  The recorder appends a
-synthetic :data:`WAIT_OP` entry to ``stub_driver.calls``, so "waited, then
-clicked" is one sequence assertion rather than two assertions and a comparison
-of indices.  :func:`_ordered_calls` then removes the one difference between the
-two possible call shapes - an element-shaped wait resolves its target with a
-lookup of its own, a locator-shaped one does not - and removes nothing else.
-The click's *own* lookup is never removed, because re-resolving the element for
-the click is itself parity: the Java field is a ``PageFactory`` proxy that
-re-resolves on every use (``InventoryP.java:10-12``).
-
-**Locator expectations close the chain Java -> constant -> operation inside this
-file.**  :data:`JAVA_FIND_BY` restates all eight ``@FindBy`` annotations of
-``InventoryP.java:14-36``, including the server-generated id and the two
-exact-``@class`` XPaths; :func:`test_locator_constant_matches_java_findby`
-compares each against its :class:`~app.pages.inventory_page.InventoryPage`
-constant, and every per-step test asserts the operation reached the driver with
-that same constant.
-
-**Operation order is the parity.**  Because the class asserts nothing, the
-ordered log *is* the contract: each of the nine tests states the complete
-sequence of lookups, clicks, reads and waits its step produced, so an added,
-removed or reordered operation fails.  Nothing here sleeps, touches the network
-or creates a browser.
-
-Fixtures come from ``tests/conftest.py`` and nothing is added to it: this module
-uses :fixture:`stub_driver`, :fixture:`fake_context`, :fixture:`resolve_step`
-and :fixture:`step_registry` as they are defined there.
+Fixtures come from ``tests/conftest.py``, which nothing here adds to, and
+nothing here sleeps, touches the network or starts a browser.
 """
 
 from __future__ import annotations
@@ -139,9 +72,10 @@ FEATURE_PATH: Final[Path] = REPO_ROOT / "features" / "Inventory.feature"
 STEP_MODULE_NAME: Final[str] = "inventory_steps"
 
 #: The step modules that own the two phrases ``Inventory.feature`` uses but
-#: ``Inventory.java`` does not declare.  Both must resolve - the feature cannot
-#: run otherwise - and neither may be redeclared here, which would make the
-#: phrase ambiguous.
+#: ``Inventory.java:15-60`` does not declare: ``Session.java:12-18`` owns the
+#: Background login and ``LoginSD.java:41-47`` the dashboard check.  Both must
+#: resolve - the feature cannot run otherwise - and neither may be redeclared
+#: here, which would make the phrase ambiguous.
 FOREIGN_PHRASE_OWNERS: Final[tuple[tuple[str, str], ...]] = (
     ("User login to test other features", "session_steps"),
     ("User should see the dashboard", "login_steps"),
@@ -164,8 +98,8 @@ PRODUCT_NAME_VALUE: Final[str] = "IBM"
 #: even though its result is not.
 PRODUCTS_TITLE: Final[str] = "Products - Odoo"
 
-#: A page title that is **not** :data:`PRODUCTS_TITLE`, used to drive the
-#: discarded comparison of ``:28`` to ``False``.
+#: A page title that is **not** :data:`PRODUCTS_TITLE`, which drives the
+#: discarded comparison of ``Inventory.java:28`` to ``False``.
 OTHER_TITLE: Final[str] = "Sales - Odoo"
 
 # --------------------------------------------------------------------------- #
@@ -179,8 +113,9 @@ OTHER_TITLE: Final[str] = "Sales - Odoo"
 #: A singular element lookup: ``("find_element", (by, value))``.
 FIND: Final[str] = "find_element"
 
-#: A plural lookup.  Named only so that its **absence** can be asserted:
-#: ``InventoryP.java`` declares no ``List<WebElement>`` field.
+#: A plural lookup.  Named only so that its **absence** can be asserted: the
+#: eight ``@FindBy`` fields of ``InventoryP.java:14-36`` are all singular
+#: ``WebElement``, and the class declares no ``List<WebElement>``.
 FIND_ALL: Final[str] = "find_elements"
 
 #: ``WebElement.click()``, logged with its originating locator first.
@@ -226,17 +161,17 @@ WAIT_PREFIX: Final[str] = "wait"
 #: missed.
 STEP_BUCKETS: Final[tuple[str, ...]] = ("step", "given", "when", "then")
 
-#: Gherkin step keywords, used to extract the feature file's phrases.
+#: Gherkin step keywords, which mark the feature file's phrases for extraction.
 GHERKIN_KEYWORDS: Final[tuple[str, ...]] = ("Given ", "When ", "Then ", "And ", "But ")
 
 
 # --------------------------------------------------------------------------- #
-# The census: one row per method of Inventory.java
+# The census: one row per method of Inventory.java:15-60
 # --------------------------------------------------------------------------- #
 
 
 class StepSpec(NamedTuple):
-    """One method of ``Inventory.java``, as the registry must expose it."""
+    """One method of ``Inventory.java:15-60``, as the registry must expose it."""
 
     #: The text inside the Java annotation, which is the ``@step`` pattern and,
     #: these definitions carrying no parameters, also the Gherkin phrase.
@@ -245,12 +180,13 @@ class StepSpec(NamedTuple):
     #: The port's function name, which is the Java method name unchanged.
     function: str
 
-    #: The method's line range in ``Inventory.java``.
+    #: The method's line range in ``Inventory.java``, annotation through
+    #: closing brace, within the class body at ``:10-64``.
     java_lines: str
 
 
-#: All nine methods, in ``Inventory.java`` source order.  This tuple is the
-#: gap detector AAP 0.4.1 requires: it is compared as a set against the
+#: All nine methods of ``Inventory.java:15-60``, in source order.  This tuple
+#: is the gap detector AAP 0.4.1 requires: it is compared as a set against the
 #: definitions the registry attributes to ``inventory_steps``, so a method
 #: dropped from either side fails.
 STEP_TABLE: Final[tuple[StepSpec, ...]] = (
@@ -313,7 +249,7 @@ WAITING_PHRASES: Final[tuple[str, ...]] = (
 
 
 class LocatorSpec(NamedTuple):
-    """One ``@FindBy`` field of ``InventoryP.java``."""
+    """One ``@FindBy`` field of ``InventoryP.java:14-36``."""
 
     #: The constant on :class:`~app.pages.inventory_page.InventoryPage`.
     constant: str
@@ -324,7 +260,8 @@ class LocatorSpec(NamedTuple):
     #: The selector, carried character-for-character from the annotation.
     selector: str
 
-    #: The field's line range in ``InventoryP.java``.
+    #: The field's line range in ``InventoryP.java``: the ``@FindBy``
+    #: annotation and the declaration under it, within ``:14-36``.
     java_lines: str
 
 
@@ -375,12 +312,13 @@ CREATED_PRODUCT: Final[tuple[str, str]] = InventoryPage.CREATED_PRODUCT
 
 
 class DiscardedSpec(NamedTuple):
-    """One boolean-returning call whose result ``Inventory.java`` throws away."""
+    """One discarded boolean: ``Inventory.java:28``, ``:44``, ``:54`` or ``:59``."""
 
     #: The phrase whose body performs it.
     phrase: str
 
-    #: The statement's line in ``Inventory.java``.
+    #: The statement's line in ``Inventory.java`` - one of ``:28``, ``:44``,
+    #: ``:54`` and ``:59``.
     java_line: str
 
     #: The element whose ``isDisplayed()`` is read, or ``None`` for the title
@@ -392,9 +330,10 @@ class DiscardedSpec(NamedTuple):
     operation: str
 
 
-#: The four discarded results.  ``Inventory.java`` computes each of these and
-#: drops it on the floor: the class has no ``Assert`` call anywhere, so none of
-#: the four can fail a scenario however the page answers.
+#: The four discarded results, at ``Inventory.java:28``, ``:44``, ``:54`` and
+#: ``:59``.  The class computes each and drops it on the floor: there is no
+#: ``Assert`` call anywhere in ``:10-64``, so none of the four can fail a
+#: scenario however the page answers.
 DISCARDED: Final[tuple[DiscardedSpec, ...]] = (
     DiscardedSpec("User see the products", "Inventory.java:28", None, TITLE),
     DiscardedSpec(
@@ -549,18 +488,34 @@ def _called_names() -> tuple[str, ...]:
     )
 
 
-def _wait_call_sites() -> tuple[tuple[str, str, tuple[Any, ...]], ...]:
+class WaitSite(NamedTuple):
+    """One wait call as the parsed step module writes it."""
+
+    #: The step function whose body holds the call.
+    function: str
+
+    #: The callee, rendered from the source - ``"wait_visible_element"``.
+    callee: str
+
+    #: Its numeric arguments, positional or keyword, which is where the
+    #: timeout of ``Inventory.java:13`` appears.
+    numbers: tuple[Any, ...]
+
+    #: Its first argument, rendered from the source - ``"page.PRODUCTS"``.
+    target: str
+
+
+def _wait_call_sites() -> tuple[WaitSite, ...]:
     """Every wait call the nine step bodies make, in source order.
 
     A wait call is recognised by the root name of its callee beginning with
     :data:`WAIT_PREFIX` - the same rule :func:`_install_wait_recorder` applies to
-    the module globals, so the two cannot drift apart.  The helper's identity is
-    deliberately not part of the rule: another work unit is changing these call
-    sites, and this module asserts the target, the timeout and the order rather
-    than the helper.
+    the module globals, so the two cannot drift apart.  One prefix rule serves
+    both the binding that must be patched and the call site that must be
+    counted; the parity facts themselves - target locator, timeout and order -
+    are each asserted on their own below.
 
-    :returns: One ``(function name, callee, numeric arguments)`` triple per wait
-        call site.
+    :returns: One :class:`WaitSite` per wait call site.
     :raises AssertionError: If a wait is reached through an attribute rather
         than a plain name.  AAP 0.4.2 has step modules import the helpers by
         name from ``app.automation``, and the globals-level interception this
@@ -568,7 +523,7 @@ def _wait_call_sites() -> tuple[tuple[str, str, tuple[Any, ...]], ...]:
         the unsupported shape is reported explicitly instead of producing a
         confusing failure elsewhere.
     """
-    sites: list[tuple[str, str, tuple[Any, ...]]] = []
+    sites: list[WaitSite] = []
 
     for function in SOURCE_DEFINITIONS.values():
         for node in ast.walk(function):
@@ -596,7 +551,14 @@ def _wait_call_sites() -> tuple[tuple[str, str, tuple[Any, ...]], ...]:
                 and isinstance(value.value, (int, float))
                 and not isinstance(value.value, bool)
             )
-            sites.append((function.name, callee, numbers))
+            sites.append(
+                WaitSite(
+                    function=function.name,
+                    callee=callee,
+                    numbers=numbers,
+                    target=ast.unparse(node.args[0]) if node.args else "",
+                )
+            )
 
     return tuple(sites)
 
@@ -613,7 +575,9 @@ class WaitRecord(NamedTuple):
     #: no assertion in this module reads it.
     binding: str
 
-    #: The target's locator, whichever shape the target arrived in.
+    #: The wait's first argument, held verbatim: the page object's upper-case
+    #: locator constant, the same object :class:`InventoryPage` declares, so a
+    #: test can compare it by identity and not merely by value.
     locator: tuple[str, str]
 
     #: The numeric argument, positional or keyword; ``None`` when the call
@@ -627,33 +591,39 @@ class WaitRecord(NamedTuple):
     kwargs: dict[str, Any]
 
 
-def _target_locator(target: Any) -> tuple[str, str]:
-    """The ``(by, value)`` pair a wait was asked to wait on.
+def _wait_locator(target: Any) -> tuple[str, str]:
+    """The locator a wait was asked to wait on, returned as supplied.
 
-    Accepts both shapes a call site may use, because which one it uses is not
-    this module's business: an element already resolved - the stub element of
-    ``tests/conftest.py``, which carries ``.locator`` - or a raw locator pair.
+    A locator pair is the only target a wait call site may pass.
+    ``wait_visible_element`` performs the lookup *inside*
+    ``visibility_of_element_located``, so the wait's own 20 seconds govern the
+    lookup, which is what ``Inventory.java:22`` and ``:38`` do: their target is
+    a ``PageFactory`` proxy that re-locates on every touch, once per poll,
+    inside ``wait.until``.  An element resolved before the call - through the
+    page object's lower-case accessor - would be looked up before the wait
+    exists, leaving that lookup to the session's 10-second implicit wait
+    (``Driver.java:34``) and shortening the guarantee the source gives.  That
+    shape is rejected here rather than normalized, so it cannot pass silently.
+
+    The value is handed back unchanged rather than rebuilt as a new tuple: the
+    identity of the page class attribute is what the per-step tests assert.
 
     :param target: The wait's first argument.
-    :returns: The locator as a two-tuple.
-    :raises AssertionError: If the target is neither shape, which would mean the
-        call site waits on something this module cannot attribute to a locator.
+    :returns: *target*, once established to be a ``(by, value)`` pair.
+    :raises AssertionError: If the target is not a locator pair - an element, a
+        proxy, or anything else that moves the lookup out of the wait.
     """
-    locator = getattr(target, "locator", None)
-
-    if locator is not None:
-        return tuple(locator)  # type: ignore[return-value]
-
     if (
         isinstance(target, tuple)
         and len(target) == 2
         and all(isinstance(part, str) for part in target)
     ):
-        return (target[0], target[1])
+        return target
 
     raise AssertionError(
-        f"wait target {target!r} carries no locator and is not a (by, value) "
-        f"pair, so the wait's target cannot be asserted"
+        f"wait target {target!r} is not a (by, value) locator pair; the two "
+        f"wait call sites of Inventory.java:22 and :38 resolve their target "
+        f"inside visibility_of_element_located, never before the wait"
     )
 
 
@@ -692,7 +662,9 @@ class WaitRecorder:
     def __call__(self, target: Any, *args: Any, **kwargs: Any) -> Any:
         """Record one wait and return its target.
 
-        :param target: The element or locator being waited on.
+        :param target: The locator being waited on - a page object's upper-case
+            constant, which :func:`_wait_locator` establishes before the call is
+            recorded.
         :param args: Remaining positional arguments; the timeout is the numeric
             one.
         :param kwargs: Keyword arguments; a numeric one is equally accepted as
@@ -705,7 +677,7 @@ class WaitRecorder:
             if isinstance(value, (int, float)) and not isinstance(value, bool)
         ]
         timeout = numbers[0] if len(numbers) == 1 else None
-        locator = _target_locator(target)
+        locator = _wait_locator(target)
 
         self.records.append(
             WaitRecord(
@@ -789,44 +761,49 @@ def _install_wait_recorder(
 
 
 def _ordered_calls(driver: Any) -> tuple[tuple[str, tuple[Any, ...]], ...]:
-    """The driver's ordered log, with the wait's own target lookup removed.
+    """The driver's ordered log, verbatim, with pre-resolution rejected.
 
-    The single normalization this module performs, and it exists for one
-    measured reason: an element-shaped wait call has its target resolved by a
-    lookup immediately before the wait, and a locator-shaped one does not, so
-    keeping that lookup would pin the helper's argument shape - which is being
-    changed by another work unit - rather than the behaviour.  Everything else
-    is left exactly as it was recorded, including the click's *own* lookup:
-    re-resolving the element for the click is parity with the ``PageFactory``
-    proxy of ``InventoryP.java:10-12``, not an artefact of the wait.
+    Nothing is dropped and nothing is reordered: the log is the contract, so
+    the sequence each test states is the sequence the step produced.  The one
+    check made on the way through is a gate rather than a normalization - a
+    lookup of the wait's *own* target immediately in front of the wait entry
+    means the step resolved the element before calling the wait, which moves
+    that lookup out of the 20 seconds of ``Inventory.java:13`` and under the
+    session's 10-second implicit wait (``Driver.java:34``).  It is asserted
+    absent, so it fails here instead of being hidden.
+
+    The click's own lookup is a different thing and stays: re-resolving the
+    element for the click is parity with the ``PageFactory`` proxy of
+    ``InventoryP.java:10-12``, and it follows the wait rather than preceding
+    it.
 
     :param driver: The :fixture:`stub_driver`.
-    :returns: The normalized ``(operation, args)`` sequence.
+    :returns: The recorded ``(operation, args)`` sequence.
+    :raises AssertionError: If a wait's target was looked up before the wait.
     """
-    calls = list(driver.calls)
-    kept: list[tuple[str, tuple[Any, ...]]] = []
+    calls = tuple((operation, args) for operation, args in driver.calls)
 
-    for index, entry in enumerate(calls):
-        operation, args = entry
+    for index, (operation, args) in enumerate(calls):
         following = calls[index + 1] if index + 1 < len(calls) else None
 
-        if (
+        assert not (
             operation == FIND
             and following is not None
             and following[0] == WAIT_OP
             and following[1][0] == args
-        ):
-            continue
+        ), (
+            f"{args!r} was looked up immediately before the wait on it, so the "
+            f"lookup ran outside the wait's own {WAIT_TIMEOUT} seconds: "
+            f"{calls!r}"
+        )
 
-        kept.append((operation, args))
-
-    return tuple(kept)
+    return calls
 
 
 def _operations(calls: tuple[tuple[str, tuple[Any, ...]], ...]) -> tuple[str, ...]:
-    """The operation names of a normalized log, arguments dropped.
+    """The operation names of an ordered log, arguments dropped.
 
-    :param calls: A normalized log, as :func:`_ordered_calls` returns.
+    :param calls: An ordered log, as :func:`_ordered_calls` returns.
     :returns: The operation names in order.
     """
     return tuple(operation for operation, _ in calls)
@@ -913,7 +890,7 @@ def test_module_registers_exactly_nine_definitions(step_registry: Any) -> None:
 
 
 def test_covered_phrase_set_equals_the_java_method_census(step_registry: Any) -> None:
-    """The nine registered phrases are exactly the nine of ``Inventory.java``.
+    """The nine registered phrases are exactly those of ``Inventory.java:15-60``.
 
     AAP 0.4.1's gap detector: "a step method with no corresponding assertion in
     its module's test is a gap, and the module test enumerates the Java class's
@@ -963,7 +940,7 @@ def test_every_definition_registers_in_the_step_bucket(step_registry: Any) -> No
 
 
 def test_all_nine_definitions_share_one_module(resolve_step: Any) -> None:
-    """The nine methods of ``Inventory.java`` port to one module, not several.
+    """The nine methods of ``Inventory.java:15-60`` port to one module.
 
     Asserted through the globals dict behave gives each step file: all nine
     resolved functions share one, which is also the dict the wait interception
@@ -1084,6 +1061,12 @@ def test_product_module_waits_twenty_seconds_then_clicks(
     click in the driver's single ordered log, and the click is preceded by its
     own lookup, because the Java field is a proxy that re-resolves on each use
     (``InventoryP.java:10-12``).
+
+    The wait's target is pinned by identity against
+    :attr:`InventoryPage.PRODUCTS <app.pages.inventory_page.InventoryPage>`, not
+    against an equal-valued pair: the call site has to hand the wait the page
+    class's own constant, so that ``visibility_of_element_located`` performs the
+    lookup and the 20 seconds cover it.
     """
     _, recorder, result = _drive(
         "User clicks on Product module",
@@ -1101,6 +1084,10 @@ def test_product_module_waits_twenty_seconds_then_clicks(
     assert [(record.locator, record.timeout) for record in recorder.records] == [
         (PRODUCTS, WAIT_TIMEOUT)
     ]
+    assert recorder.records[0].locator is InventoryPage.PRODUCTS, (
+        f"the wait of Inventory.java:22 was given "
+        f"{recorder.records[0].locator!r} rather than InventoryPage.PRODUCTS"
+    )
     assert result is None
 
 
@@ -1168,7 +1155,10 @@ def test_save_button_waits_twenty_seconds_then_clicks(
 
     ``wait.until(visibilityOf(saveBtn))`` at ``:38`` then ``saveBtn.click()`` at
     ``:39``, again at 20 seconds and again wait-first.  The class's second and
-    last wait call site.
+    last wait call site, and its target is pinned by identity against
+    :attr:`InventoryPage.SAVE_BTN <app.pages.inventory_page.InventoryPage>` for
+    the reason the ``PRODUCTS`` site is: the locator reaches the wait, so the
+    lookup happens inside it.
     """
     _, recorder, result = _drive(
         "User clicks the save button",
@@ -1186,6 +1176,10 @@ def test_save_button_waits_twenty_seconds_then_clicks(
     assert [(record.locator, record.timeout) for record in recorder.records] == [
         (SAVE_BTN, WAIT_TIMEOUT)
     ]
+    assert recorder.records[0].locator is InventoryPage.SAVE_BTN, (
+        f"the wait of Inventory.java:38 was given "
+        f"{recorder.records[0].locator!r} rather than InventoryPage.SAVE_BTN"
+    )
     assert result is None
 
 
@@ -1307,7 +1301,7 @@ def test_sees_the_created_product_reads_is_displayed_and_drops_the_answer(
 
 @pytest.mark.parametrize("spec", STEP_TABLE, ids=lambda spec: spec.function)
 def test_no_step_body_contains_an_assert_statement(spec: StepSpec) -> None:
-    """``Inventory.java`` makes no ``Assert`` call in any of its nine methods.
+    """``Inventory.java:10-64`` makes no ``Assert`` call in any of its methods.
 
     Proved structurally, by parsing the module: a body that grew an ``assert``
     would be checking something the Java does not check, and a scenario would
@@ -1485,11 +1479,28 @@ def test_module_has_exactly_two_wait_call_sites() -> None:
     of ``:13``.  The count is as contractual as the value: a third wait would
     change the timing of a step the source leaves to the implicit wait, and a
     missing one would remove a 20-second grace period the Odoo UI needs.
+
+    Each site's first argument is read from the source too, and it has to be an
+    upper-case page constant: ``page.PRODUCTS``, never the ``page.products``
+    accessor.  The accessor resolves the element before the wait is entered,
+    which is the one way a call site can keep its 20 seconds on paper while
+    leaving the lookup to the implicit wait.
     """
     sites = _wait_call_sites()
 
     assert len(sites) == 2, f"expected two wait call sites, found {sites}"
-    assert [site[2] for site in sites] == [(WAIT_TIMEOUT,), (WAIT_TIMEOUT,)]
+    assert [site.numbers for site in sites] == [(WAIT_TIMEOUT,), (WAIT_TIMEOUT,)]
+
+    for site in sites:
+        attribute = site.target.rpartition(".")[2]
+
+        assert attribute.isupper() and attribute in {
+            spec.constant for spec in JAVA_FIND_BY
+        }, (
+            f"{site.function} waits on {site.target!r}; a wait call site passes "
+            f"the page object's upper-case locator constant so that "
+            f"visibility_of_element_located does the lookup"
+        )
 
 
 def test_only_the_two_documented_steps_wait(
@@ -1504,6 +1515,11 @@ def test_only_the_two_documented_steps_wait(
     run against the same recorder and only ``:20-24`` and ``:36-40`` register a
     wait, each once, each on its own locator at 20 seconds.  The seven others
     rely on the session's 10-second implicit wait exactly as the Java does.
+
+    Both targets are also pinned by identity against the
+    :class:`~app.pages.inventory_page.InventoryPage` attributes, so this test
+    covers the whole class's wait surface in one place: two waits, two page
+    constants, no third wait and no element-shaped target anywhere.
     """
     match = resolve_step(ALL_PHRASES[0])
     recorder = _install_wait_recorder(
@@ -1522,6 +1538,21 @@ def test_only_the_two_documented_steps_wait(
     assert waited["User clicks the save button"] == [(SAVE_BTN, WAIT_TIMEOUT)]
     assert [phrase for phrase, records in waited.items() if records] == list(
         WAITING_PHRASES
+    )
+    assert [record.locator for record in recorder.records] == [
+        InventoryPage.PRODUCTS,
+        InventoryPage.SAVE_BTN,
+    ]
+    assert [
+        record.locator is constant
+        for record, constant in zip(
+            recorder.records,
+            (InventoryPage.PRODUCTS, InventoryPage.SAVE_BTN),
+            strict=True,
+        )
+    ] == [True, True], (
+        f"a wait target is an equal-valued pair rather than the page class "
+        f"attribute itself: {recorder.records}"
     )
 
 
@@ -1746,8 +1777,12 @@ def test_module_does_not_import_by() -> None:
 def test_module_imports_no_interaction_helpers() -> None:
     """``Inventory.java`` uses neither ``Keys`` nor ``Actions``.
 
-    ``app/automation/interactions.py`` exists for Crm, Notes and Sales; nothing
-    from it belongs here, and neither does a raw key literal.
+    Its whole import list is ``Inventory.java:3-8`` - two Cucumber annotations,
+    the page object, ``Driver`` and the two wait types - and neither Selenium
+    interaction type is in it.  ``app/automation/interactions.py`` exists for
+    ``Crm.java``, ``Notes.java`` and ``Sales.java``, the three classes that do
+    import them; nothing from it belongs here, and neither does a raw key
+    literal.
     """
     modules = [module for module, _ in _imports()]
     imported = {name for _, names in _imports() for name in names}
@@ -1759,10 +1794,12 @@ def test_module_imports_no_interaction_helpers() -> None:
 def test_module_reads_no_configuration() -> None:
     """``Inventory.java`` reads none of the six configuration keys.
 
-    ``ConfigurationReader.getProperty`` is called by ``LoginSD``, ``Session``,
-    ``EmployeeStage`` and ``Driver`` only.  An Inventory step that reached
-    ``app.config`` would be reading a key the source never reads, so neither the
-    module nor any helper of it may import it.
+    ``ConfigurationReader.getProperty`` is called at ``Driver.java:27``,
+    ``LoginSD.java:22``, ``Session.java:14-16`` and ``EmployeeStage.java:18``,
+    ``:24``, ``:31``, ``:60`` and ``:93`` - ten sites, none of them in
+    ``Inventory.java:10-64``.  An Inventory step that reached ``app.config``
+    would be reading a key the source never reads, so neither the module nor
+    any helper of it may import it.
     """
     modules = [module for module, _ in _imports()]
     called = _called_names()
@@ -1772,11 +1809,13 @@ def test_module_reads_no_configuration() -> None:
 
 
 def test_module_contains_no_fixed_delay() -> None:
-    """``Inventory.java`` contains no ``Thread.sleep``.
+    """``Inventory.java:10-64`` contains no ``Thread.sleep``.
 
-    The suite's seventeen fixed delays belong to Calendar (two of 3s), Contacts
-    (five of 3s), Crm (one of 2s), EmployeeStage (one of 7s and seven of 3s) and
-    Notes (one of 2s), and AAP 0.4.1 keeps each at its own call site.  None is
+    The suite's seventeen fixed delays are at ``Calendar.java:99`` and ``:155``
+    (3s each), ``Contacts.java:19``, ``:25``, ``:57``, ``:64`` and ``:98`` (3s
+    each), ``Crm.java:117`` (2s), ``EmployeeStage.java:48`` (7s) with ``:62``,
+    ``:68``, ``:70``, ``:95``, ``:97``, ``:100`` and ``:103`` (3s each), and
+    ``Notes.java:23`` (2s); AAP 0.4.1 keeps each at its own call site.  None is
     in this class, so neither a ``time`` import nor a ``sleep`` call may appear -
     checked on the parsed source, since this module's docstrings discuss delays
     in order to explain their absence.
@@ -1815,9 +1854,10 @@ def test_definition_registers_with_step_in_source(spec: StepSpec) -> None:
 
     The registry test above proves where the definitions landed; this proves how
     they were written, so a ``@when`` that happened to land in a reachable bucket
-    would still be caught.  ``Inventory.java``'s own mix of ``@When`` and
-    ``@Then`` carries no meaning - Cucumber-JVM matches on text alone - which is
-    why the port uses one decorator for all nine.
+    would still be caught.  ``Inventory.java``'s own mix - ``@When`` at ``:15``,
+    ``:20``, ``:26``, ``:31``, ``:36`` and ``:47``, ``@Then`` at ``:42``, ``:52``
+    and ``:57`` - carries no meaning, Cucumber-JVM matching on text alone, which
+    is why the port uses one decorator for all nine.
     """
     decorators = _decorator_names(SOURCE_DEFINITIONS[spec.phrase])
 

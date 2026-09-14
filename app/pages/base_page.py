@@ -1,181 +1,42 @@
 r"""Lazy-locator base class - the Python stand-in for Java's ``PageFactory``.
 
-Every one of the ten page objects in this package subclasses :class:`BasePage`,
-so this module is the whole of the mechanism that replaces Java's
-``PageFactory``/``@FindBy`` pair.  That pair has no Python equivalent, which is
-why AAP 0.1.1 goal G5 replaces it with *"explicit locator constants resolved
-lazily"* and AAP 0.4.1 gives this file its one-line job: it *"carries
-``PageFactory.initElements``'s lazy-resolution semantics (``LoginP.java:9-11``)
-for all ten page objects."*
+All ten page objects in this package subclass :class:`BasePage`, the whole of
+the mechanism replacing the ``PageFactory``/``@FindBy`` pair that has no Python
+equivalent: AAP 0.1.1 goal G5 substitutes *"explicit locator constants resolved
+lazily"* and AAP 0.4.1 makes this file the single carrier of
+``PageFactory.initElements``'s semantics (``LoginP.java:9-11``) for all ten.
 
-The Java pattern being ported, in the words of the anchor
---------------------------------------------------------
-All ten classes in ``src/main/java/com/testinium/pages`` at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240`` - held REFERENCE by AAP 0.2.1 and
-never modified - share the shape of ``LoginP.java:8-14``:
+A subclass declares upper-case locator constants, each yielding two access
+forms: the constant is the ``(By.X, "value")`` tuple that
+``app/automation/waits.py`` and the parity tests take, and the lower-case
+accessor - a separate name only because Python is case-sensitive - is the live
+element a step drives.  The resolution contract, and what it forbids:
 
-.. code-block:: java
+* **Per access.**  An accessor performs exactly one ``find_element`` - or
+  ``find_elements`` for a :attr:`BasePage.PLURAL_LOCATORS` name - at the
+  moment it is read, and construction resolves nothing, which is what lets a
+  scenario build a page object before navigating (AAP 0.3.3).
+* **No memoization.**  No ``@FindBy`` field in the reference is a
+  ``@CacheLookup`` proxy, so each one re-locates on every use; nothing here
+  caches an element, on the instance or through ``functools``.
+* **No waiting.**  ``Driver.java:34`` and ``:40`` put a 10-second implicit
+  wait on every session, which is what retries a lookup; a ``WebDriverWait``,
+  retry loop or ``sleep`` here would stack a second timeout on it.
+* **No exception handling.**  A missing element surfaces as
+  ``NoSuchElementException`` when that window expires, and no accessor returns
+  ``None`` in its place.
 
-    public class LoginP {
-        public LoginP(){
-            PageFactory.initElements(Driver.getDriver(), this);
-        }
-        @FindBy(name = "login")
-        public WebElement inputEmail;
+:attr:`BasePage.driver` resolves per access rather than in ``__init__``, which
+is observationally identical to the Java constructor's ``Driver.getDriver()``:
+``features/environment.py`` has created the session before any step runs, and
+that call's create-on-demand behaviour stays out of construction (AAP 0.3.3).
 
-``initElements`` does **not** look anything up.  It replaces each annotated
-field with a proxy that re-runs ``findElement`` on every method invocation, so
-resolution happens **on access, not at construction**.  AAP 0.3.3 states the
-consequence this module must not break: *"a Python page object that called
-``find_element`` in ``__init__`` would change when elements are looked up and
-break scenarios that build a page before navigating."*
-
-The Python shape, and the two access forms
-------------------------------------------
-A subclass declares locator constants and nothing else:
-
-.. code-block:: python
-
-    class LoginPage(BasePage):   # ``By`` comes from ``app.automation``
-        INPUT_EMAIL = (By.NAME, "login")
-        BUTTON = (By.XPATH, "//button[.='Log in']")
-
-and both of these then work, on the class and on an instance:
-
-======================================  =======================================
-Access form                             Yields
-======================================  =======================================
-``LoginPage.INPUT_EMAIL``               the ``(By.NAME, "login")`` **tuple**,
-``page.INPUT_EMAIL``                    for both visibility waits -
-                                        ``wait_visible(locator, timeout)`` and
-                                        ``wait_visible_element(locator,
-                                        timeout)`` - for
-                                        ``press_keys(locator, ...)`` and for
-                                        the per-module parity tests
-``page.input_email``                    the live **element**, re-resolved on
-                                        every access, for ``.click()``,
-                                        ``.send_keys()``, ``.is_displayed()``
-                                        and ``.get_attribute()``
-======================================  =======================================
-
-Both forms are required rather than convenient.  Every element-addressing
-helper in ``app/automation/waits.py`` takes the **locator**, including
-``wait_visible_element``: the ``visibilityOf`` predicate it ports was applied
-to a ``PageFactory`` proxy, which re-located the element *inside* the wait, so
-the port passes the locator and lets the wait resolve it on each poll rather
-than receiving something resolved beforehand.  The element form is what a step
-operates on directly, and it is also what ``press_keys`` accepts alongside a
-``(By.X, "value")`` pair.  A Java step class reached both shapes off the same
-field - ``loginP.inputEmail`` for the element and ``By.name(...)`` for a
-locator - and the two Python names coexist without collision purely because
-Python is case-sensitive: the constant is ``INPUT_EMAIL``, the accessor is
-``input_email``.
-
-Resolution semantics: resolve every time, cache nothing, wait nowhere
---------------------------------------------------------------------
-* **No caching.**  ``grep -rn CacheLookup`` over the reference sources returns
-  zero hits, so no ``@FindBy`` field in the suite is a cached proxy and every
-  one of them re-locates on each use.  Memoizing a found element - on the
-  instance, in a dict, through ``functools.cached_property``, anywhere - would
-  be a behaviour change, so :meth:`BasePage.find` and
-  :meth:`BasePage.find_all` are the single funnel and they hold no state at
-  all.  ``tests/test_base_page.py`` asserts this by counting calls: three
-  accesses of one accessor must produce three ``find_element`` calls.
-* **No waiting here.**  ``Driver.java:34`` and ``:40`` set a 10-second
-  implicit wait on every session, and that is what already makes a lookup
-  retry until the element appears.  A ``WebDriverWait``, a retry loop or a
-  sleep in this module would stack a second timeout on top of it and change
-  how long a failing step takes.  Explicit waits are a separate concern with a
-  per-call-site timeout, and they live in ``app/automation/waits.py`` because
-  the source fixes a different timeout per step class.
-* **No exception handling.**  A missing element must surface as
-  ``NoSuchElementException`` after the implicit-wait window, exactly as the
-  Java proxy raises it.  Nothing here catches, wraps, retries or logs it, and
-  no accessor ever returns ``None`` in place of an element - a caller that got
-  ``None`` would fail later, at a place that no longer names the locator.
-
-The driver seam
----------------
-``__init__`` stores its argument and does nothing else.  It deliberately does
-**not** call :func:`~app.automation.driver.get_driver`, even though the Java
-constructor calls ``Driver.getDriver()``: that call *creates a browser session
-on demand*, so reproducing it here would mean that merely constructing a page
-object launches a browser.  AAP 0.3.3 assigns that ownership elsewhere - *"One
-owner for the lifecycle, so no step or page ever creates or quits a driver"* -
-and ``features/environment.py`` has already created the session in
-``before_scenario`` before any step runs.  Deferring the lookup to
-attribute-access time is therefore observationally identical to the Java
-behaviour and compliant with the ownership rule at the same time.
-
-The :attr:`~BasePage.driver` property resolves per access: an injected driver
-when one was passed to the constructor, otherwise this worker's session from
-:func:`~app.automation.driver.get_driver`.  ``get_driver()`` may hand back
-``None`` - ``Driver.java:29-42`` has no default branch, so an unrecognised
-``browser`` value leaves the slot empty and ``Driver.java:45`` returns that
-``null`` - and this module passes that straight through, which reproduces the
-source's *"fails at first driver use"* behaviour rather than second-guessing
-it.
-
-Two substitution seams exist, and the first is the one to prefer:
-
-1. **Injection** - ``LoginPage(stub)`` or ``LoginPage(driver=stub)``.  A plain
-   positional-or-keyword parameter, so both spellings work.  This is what the
-   ten ``tests/test_steps_<area>.py`` modules use to *"drive the module
-   against a stubbed driver"* (AAP 0.4.1), and it mirrors the ``driver=None``
-   seam that ``app/automation/waits.py`` and ``interactions.py`` already
-   adopted.
-2. **Module-global substitution** - monkeypatching
-   ``app.pages.base_page.get_driver``.  Because AAP 0.4.2 fixes the import
-   form as ``from app.automation import ...``, the substitutable name is the
-   binding *in this module*, which is the same convention
-   ``app/automation/driver.py`` documents for ``interactions.py``: the callee
-   is *"read through the module global so a test can substitute it"*.
-   Patching ``app.automation.get_driver`` instead rebinds a different name and
-   this module will not see it.
-
-Import boundary (AAP 0.4.2)
----------------------------
-*"Page objects import ``app.automation`` for the current driver, nothing
-else"*, and that package is the only one in the port permitted to import the
-browser-automation library at all.  So this module imports exactly two names
-from the application - :data:`~app.automation.By` and
-:func:`~app.automation.get_driver` - plus three standard-library modules, and
-nothing further: no browser-library import of any kind, not even under
-``typing.TYPE_CHECKING``, because a guarded import is still an import
-statement and would trip the grep-based boundary check the suite performs; no
-``app.config``, because page objects never read configuration - step modules
-do, which is where the Java classes read it; and no service, no reporting
-writer, no path helper, no web framework and no Gherkin engine.
-
-The cost of refusing the guarded import is annotation precision, and it is
-paid deliberately: every element-valued signature below is annotated ``Any``
-and names its real type - a ``WebElement`` - in prose instead.
-``app/automation/waits.py`` may annotate precisely because it is inside the
-boundary; this module is not.
-
-What this module deliberately does not contain
-----------------------------------------------
-Each omission is the contract, not an oversight, and AAP 0.8's *"Preserve, do
-not tidy"* is why:
-
-* **No locator constants of its own.**  :class:`BasePage` is mechanism; the
-  ten subclasses hold all 131 locators the reference declares.
-* **No navigation helper** - no ``open()``, ``goto()`` or ``load()``.  None of
-  the ten Java page classes has one; navigation is a step's job, done through
-  the driver the step already holds.
-* **No wait wrapper, no assertion helper, no screenshot capture, no logging of
-  element lookups.**  The only behaviour method in the entire Java page
-  package is ``EmployeeP.login()`` (``EmployeeP.java:59-69``), and it belongs
-  to ``app/pages/employee_page.py``.  Adding a convenience here would be an
-  addition the request never asked for, and every page object in the port
-  would inherit it.
-* **No path literal, no configuration read, no environment-variable read.**
-  ``app/utils/paths.py`` owns paths and ``app/config.py`` owns configuration.
-
-Importing this module has no side effects whatever: it starts no browser,
-provisions no driver binary, reads no ``configuration.properties``, touches no
-filesystem and configures no logging, which is what lets the unit suite import
-it on a machine with no browser installed.
+AAP 0.4.2 caps a page object's imports at ``app.automation``, which is also
+what makes the substitutable ``get_driver`` this module's own binding - a test
+either injects a driver or patches that name - and admits no browser-library
+import even under ``typing.TYPE_CHECKING``, so every element-valued signature
+below is annotated ``Any`` and names ``WebElement`` in prose.  Importing this
+module has no side effects at all.
 """
 
 from collections.abc import Mapping
@@ -186,12 +47,6 @@ from app.automation import By, get_driver
 
 __all__ = ["BasePage"]
 
-#: The locator shape a page constant holds and every element lookup expects:
-#: a ``(By.X, "value")`` pair.  Spelled identically to the alias in
-#: ``app/automation/waits.py`` so a locator reads the same on both sides of the
-#: page/automation boundary, and kept out of :data:`__all__` for the same
-#: reason that module keeps its own out - the alias exists to make the
-#: signatures below legible, not to widen this module's surface.
 type Locator = tuple[str, str]
 
 #: Every locator strategy the re-exported ``By`` defines, listed uniformly.
@@ -247,24 +102,20 @@ def _is_locator_declaration(name: str, value: object) -> bool:
         an accessor and a :attr:`BasePage.LOCATORS` entry, ``False``
         otherwise.
 
-    The test is structural and needs four things to hold at once, which
-    together make a false positive implausible without rejecting anything the
-    ten page modules legitimately declare:
+    Four conditions hold at once, which keeps an incidental two-string tuple
+    out of the inventory without rejecting anything the ten page modules
+    declare:
 
-    1. The name is upper-case - ``str.isupper()``, which ignores digits and
-       underscores, so ``INPUT_EMAIL`` and ``PROGRESS_PIPELINE2`` both qualify
-       (the latter is the port of the reference's only digit-bearing field,
-       ``CrmP``'s ``progressPipeline2``).  Methods, ordinary attributes and
-       dunders are all excluded by this alone.
-    2. The name is not private.  A leading underscore marks a page's own
-       internal, and internals are not part of the locator inventory.
-    3. The name is not one of the mechanism's own (:data:`_RESERVED_CLASS_ATTRIBUTES`).
+    1. The name is upper-case by ``str.isupper()``, which ignores digits and
+       underscores, so ``PROGRESS_PIPELINE2`` (``CrmP``'s
+       ``progressPipeline2``) qualifies while methods and dunders do not.
+    2. The name is not private: a page's internals are not locators.
+    3. The name is not one of :data:`_RESERVED_CLASS_ATTRIBUTES`.
     4. The value is a two-element tuple of strings whose first element is a
        recognised strategy (:data:`_LOCATOR_STRATEGIES`).
 
-    A list is not accepted where a tuple is expected, because every locator in
-    the port is written as a tuple literal and accepting both would make
-    ``LOCATORS`` inconsistent in type for no gain.
+    A list is not accepted in place of a tuple: every locator in the port is
+    a tuple literal, and accepting both would leave ``LOCATORS`` mixed in type.
     """
     return (
         name.isupper()
@@ -301,14 +152,9 @@ def _build_accessor(
         silently replacing the lookup with whatever was assigned.
 
     The locator is captured by closure rather than looked up by name at access
-    time: one indirection fewer per element, and a subclass that re-declares
-    an inherited constant gets a fresh property for its own value anyway,
-    because :meth:`BasePage.__init_subclass__` installs one for every constant
-    the subclass ends up with.
-
-    Both branches funnel through the two lookup methods rather than reaching
-    for the driver themselves, which is what keeps the no-caching guarantee
-    assertable at a single site.
+    time, and both branches go through :meth:`BasePage.find` or
+    :meth:`BasePage.find_all` rather than reaching for the driver, which keeps
+    the no-caching guarantee assertable at a single site.
     """
     accessor_name = constant_name.lower()
 
@@ -356,49 +202,28 @@ class BasePage:
 
     The Python replacement for the constructor body all ten reference page
     classes share, ``PageFactory.initElements(Driver.getDriver(), this)``
-    (``LoginP.java:10``).  A subclass declares upper-case locator constants and
-    inherits, for each of them, a read-only accessor under the lower-case name
-    that resolves the element on every access:
+    (``LoginP.java:10``): a subclass declares upper-case locator constants and
+    inherits one read-only accessor per constant, under the lower-case name.
 
     .. code-block:: python
 
-        class SalesPage(BasePage):        # ``By`` from ``app.automation``
+        class SalesPage(BasePage):
             PLURAL_LOCATORS = frozenset({"ALL_CUSTOMERS"})
-
             SEARCH_BAR = (By.XPATH, "//div[@class='o_searchview']/input")
             ALL_CUSTOMERS = (By.XPATH, "//div[@class='o_kanban_record']")
 
         page = SalesPage()            # touches nothing at all
         page.search_bar.click()       # one find_element, right now
-        len(page.all_customers)       # one find_elements, right now
         SalesPage.SEARCH_BAR          # the locator tuple, for wait_visible()
 
-    Class surface
-    -------------
-    ====================  ==================================================
-    Name                  Role
-    ====================  ==================================================
-    :attr:`LOCATORS`      Immutable ``{constant name: locator}`` mapping in
-                          declaration order, built per subclass
-    :attr:`PLURAL_LOCATORS`  Names of the constants that resolve to a list
-    :attr:`driver`        The session used for the next lookup, per access
-    :meth:`find`          The one ``find_element`` call site
-    :meth:`find_all`      The one ``find_elements`` call site
-    ====================  ==================================================
-
-    Everything else a page needs - explicit waits, keyboard input, action
-    chains - stays in ``app/automation`` with its timeout supplied at the call
-    site, so this class holds no behaviour beyond resolution.
+    :attr:`LOCATORS` is the resulting ``{constant name: locator}`` inventory -
+    immutable, in declaration order, rebuilt per subclass - and
+    :attr:`PLURAL_LOCATORS` names the constants resolving to a list.
+    :attr:`driver` is the session the next lookup uses, :meth:`find` and
+    :meth:`find_all` its two call sites; explicit waits, keyboard input and
+    action chains stay in ``app/automation``, timeout supplied per call site.
     """
 
-    #: This class's locator inventory: ``{constant name: (By.X, "value")}``,
-    #: in the order the constants appear in the class body, wrapped in a
-    #: :class:`~types.MappingProxyType` so a caller enumerating it cannot
-    #: alter it.  Empty on :class:`BasePage` itself, which declares no
-    #: locators of its own, and rebuilt for each subclass by
-    #: :meth:`__init_subclass__`.  ``tests/test_pages.py`` enumerates it to
-    #: assert each page's inventory against the ``@FindBy`` fields of the Java
-    #: class it ports - 131 locators across the ten pages.
     LOCATORS: Mapping[str, Locator] = MappingProxyType({})
 
     #: The names of the locator constants that resolve to a **list** of
@@ -436,40 +261,31 @@ class BasePage:
         ``features/environment.py``; the module docstring sets out why
         deferring it changes nothing observable.
         """
-        # Deliberately the only statement, and deliberately not normalized:
-        # a falsy-but-not-None driver stub stays exactly what the caller
-        # passed, because `is not None` is what the `driver` property tests.
         self._driver = driver
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Turn a subclass's locator constants into accessors and an inventory.
 
         :param kwargs: Class-creation keyword arguments, forwarded untouched
-            to :meth:`object.__init_subclass__` so this hook composes with any
-            other that a subclass might introduce.
+            to :meth:`object.__init_subclass__` so this hook composes.
         :returns: ``None``.
         :raises ValueError: If :attr:`PLURAL_LOCATORS` names something that is
             not a declared locator constant, or if an accessor name would
-            shadow an existing attribute - either part of this class's
-            mechanism (``driver``, ``find``, ``find_all``) or a name the
-            subclass itself defines, such as a method.
+            shadow an existing attribute - the mechanism's ``driver``,
+            ``find`` or ``find_all``, or a name the subclass itself defines.
 
         This runs once per subclass, when the ``class`` statement completes -
-        the moment ``PageFactory.initElements`` corresponds to, and the last
-        moment before any instance exists.  In order:
+        the moment ``PageFactory.initElements`` corresponds to.  In order:
 
-        1. Collect the locator constants inherited from ancestors, oldest
-           first, then the ones declared in this class's own body.  Class
-           ``__dict__`` iteration preserves declaration order and nothing is
-           sorted, so :attr:`LOCATORS` reads in source order - which is how
-           ``tests/test_pages.py`` compares a page against the ``@FindBy``
-           order of the Java class it ports.  No page in this package
-           subclasses another, so in practice the inherited part is empty; it
-           is merged anyway so that inheritance is not actively broken.
+        1. Collect the constants inherited from ancestors, oldest first, then
+           those declared in this class's own body.  Nothing is sorted, so
+           :attr:`LOCATORS` keeps the declaration order the parity tests
+           compare against the Java ``@FindBy`` order.  No page here subclasses
+           another; the ancestor merge exists so inheritance is not broken.
         2. Validate :attr:`PLURAL_LOCATORS` against those constants, so a
-           mistyped name fails loudly here instead of quietly resolving to a
-           single element at some later step.
-        3. Install one read-only property per constant, and reject a name that
+           mistyped name fails here instead of quietly resolving to a single
+           element at some later step.
+        3. Install one read-only property per constant, rejecting a name that
            would shadow something.
         4. Publish the inventory as an immutable mapping.
         """
@@ -537,9 +353,6 @@ class BasePage:
                 ),
             )
 
-        # ``locators`` is local and now unreferenced elsewhere, so the proxy
-        # is the only handle on it and the inventory is immutable in practice
-        # as well as by type.
         cls.LOCATORS = MappingProxyType(locators)
 
     @property

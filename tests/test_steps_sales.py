@@ -1,22 +1,29 @@
 """Behaviour-parity tests for ``features/steps/sales_steps.py``.
 
-The obligation this module discharges
--------------------------------------
-AAP 0.4.1 fixes a **per-module obligation** for each of the ten step modules:
-the paired ``tests/test_steps_<area>.py`` drives the module against a stubbed
-driver and asserts, for every step method of the corresponding Java class, that
-the port performs the same observable operations in the same order - the same
-locators as declared in the paired page object, the same wait target and
-timeout, the same keyboard keys, the same hard-coded literals, the same
-assertion subject and message text, and the same no-ops where a Java body
-compares nothing.  ``tests/test_steps_registration.py`` covers phrase
-resolution only and does not discharge it.
+What this module owns
+---------------------
+AAP 0.4.1's per-module obligation, for one of the ten step modules: drive the
+module against a stubbed driver and assert, for every step method of
+``Sales.java``, the same observable operations in the same order - the same
+locators, the same wait locator and timeout, the same keyboard key, the same
+literals, the same assertion subject and message, and the same absence of a
+comparison where a Java body makes none.  Suite-wide phrase resolution belongs
+to ``tests/test_steps_registration.py``, which does not discharge this.
 
-The specification is therefore not this file's prose but
+The authority
+-------------
 ``src/main/java/com/testinium/step_definitions/Sales.java`` at pinned revision
-``47e9d697e4a9a85da889f94a846fdf47af28a240`` - ninety-nine lines, seven step
-methods - together with its page object ``SalesP.java``.  Every test below
-names the Java line or lines it pins.
+``47e9d697e4a9a85da889f94a846fdf47af28a240``: 99 lines, seven methods declared
+at ``:19 :25 :40 :54 :66 :80 :87``, with its page object ``SalesP.java`` -
+twenty ``@FindBy`` fields at ``:17-75``, built by ``PageFactory.initElements``
+at ``:14``.  Every test below names the Java lines it pins.  The class's four
+awkward facts each carry a test of their own, so that losing one fails loudly:
+the near-colliding phrases at ``:40`` and ``:80``, the single 4-second
+``WebDriverWait`` at ``:17`` serving eight sites
+(``:22 :29 :43 :57 :59 :61 :69 :83``), the ``throws InterruptedException`` at
+``:20``, ``:26`` and ``:41`` that no body justifies with a sleep, and the one
+assertion at ``:37`` - inside a ``@When``, its message without the trailing
+space ``LoginSD.java:46`` and ``LogOutSD.java:27`` carry.
 
 What makes this module the awkward one
 --------------------------------------
@@ -55,7 +62,40 @@ its own so that losing one fails loudly rather than quietly:
 ``Sales.java:66`` and ``Sales.java:87``
     Two bodies build an *actual* and an *expected* string, print both, and
     compare nothing.  Those steps are proven **assertion-free**: a page value
-    that contradicts the literal must not fail them.
+    that contradicts the literal must not fail them.  What they must still do
+    is *read*: ``:72`` reads the kanban heading and ``:91`` the notification
+    area, and with no comparison anywhere those two reads are the only way
+    either step can fail, so each is asserted through the effect log.  What
+    they must still *hold* is the literal each binds - ``:71``'s ``"Lucas"``
+    and ``:90``'s ``"The following fields are invalid:"`` - which AAP 0.4.1
+    counts as parity under "the same hard-coded literals and expected values";
+    a binding is not an output, so it survives the removal of the prints that
+    were its only readers, and two tests here pin its value, its position
+    ahead of the read, and the fact that nothing consumes it.
+
+Standard output, and why silence is the expectation
+---------------------------------------------------
+``Sales.java:34-35``, ``:74-75`` and ``:93-94`` print six lines - the Customers
+page title, a customer's name read from the kanban heading, the notification
+area's text and the literals each is paired with - and the port reproduces none
+of them.  Three of the six values are read live from the system under test, and
+``app/services/test_run_service.py`` relays every worker stdout line into the
+parent logger and from there into the Jenkins console, so each line was a
+durable record of live customer data and PII (CWE-532/359, the security
+review's F04).  Diagnostic stdout appears in neither AAP 0.1.2's list of what
+the port must not change nor AAP 0.4.1's enumeration of what each step body
+must reproduce, so silence costs no parity - every other observable operation
+of the three bodies is still asserted here, item by item, and so is every
+hard-coded value those six lines carried: the title constant of ``:31``
+through the assertion that reads it, and the two unread literals of ``:71``
+and ``:90`` through the two literal-binding tests below.  What the remediation
+removed is the *writing*, not the values.
+
+Every per-step test therefore asserts ``capsys.readouterr().out == ""``, the
+whole-flow test asserts the same across all seven bodies, and two source-level
+tests close the hole a run-time check leaves: the module's syntax tree must
+contain no ``print`` call at any scope, and must name no logger, stream or
+file-write sink the removed values could have been re-routed to instead.
 
 How a step body is reached and observed
 ---------------------------------------
@@ -160,10 +200,12 @@ WAIT_TIMEOUT: Final[int] = 4
 ENTER: Final[str] = "\ue007"
 
 #: The wait helpers of ``app/automation/waits.py`` that reproduce
-#: ``ExpectedConditions.visibilityOf`` / ``visibilityOfElementLocated`` - the
-#: only predicate ``Sales.java`` waits on, at all eight of its wait sites.  A
-#: parity-preserving change of call shape moves between these two names; any
-#: other helper would change the predicate and is rejected.
+#: ``ExpectedConditions.visibilityOf`` - the only predicate ``Sales.java``
+#: waits on, at all eight of its wait sites (``:22 :29 :43 :57 :59 :61 :69
+#: :83``).  ``wait_visible`` and ``wait_visible_element`` both wrap
+#: ``visibility_of_element_located``, so both take the locator and resolve it
+#: inside the predicate; any other helper would change the predicate and is
+#: rejected.
 VISIBILITY_WAIT_HELPERS: Final[frozenset[str]] = frozenset(
     {"wait_visible", "wait_visible_element"}
 )
@@ -179,11 +221,13 @@ PERMITTED_AUTOMATION_NAMES: Final[frozenset[str]] = (
 )
 
 #: Page-object locator constants that no step class of the reference reaches -
-#: verified by search across all eleven Java step classes.  ``SalesP.java``
-#: declares them (``warningButton`` :62, ``allCustomers`` :68, ``link`` :71,
-#: ``details`` :74) and locator fidelity keeps them, but wiring one up here
-#: would invent behaviour the reference does not have.  ``ALL_CUSTOMERS`` is
-#: additionally the port's only plural locator.
+#: zero references across the eleven classes of
+#: ``src/main/java/com/testinium/step_definitions/``.  ``SalesP.java`` declares
+#: them at ``:62`` (``warningButton``), ``:68`` (``allCustomers``), ``:71``
+#: (``link``) and ``:74`` (``details``); locator fidelity keeps them, but
+#: wiring one up here would invent behaviour the reference does not have.
+#: ``SalesP.java:69`` types ``allCustomers`` as a ``List<WebElement>``, which
+#: makes ``ALL_CUSTOMERS`` the port's only plural locator.
 UNREFERENCED_LOCATORS: Final[tuple[str, ...]] = (
     "WARNING_BUTTON",
     "ALL_CUSTOMERS",
@@ -204,7 +248,7 @@ UNREFERENCED_ACCESSORS: Final[tuple[str, ...]] = (
 
 
 class Definition(NamedTuple):
-    """One of the seven step definitions, as ``Sales.java`` declares it."""
+    """One of the seven step definitions ``Sales.java:19-96`` declares."""
 
     #: The text inside the ``@step`` decorator - identical to the Java
     #: annotation's text, with ``{string}`` rewritten as behave's ``{name}``
@@ -214,7 +258,8 @@ class Definition(NamedTuple):
     #: The port's function name.
     function: str
 
-    #: The line of ``Sales.java`` carrying the annotation.
+    #: The line of ``Sales.java`` carrying the annotation - one of
+    #: ``:19 :25 :40 :54 :66 :80 :87``.
     java_line: int
 
 
@@ -269,6 +314,42 @@ PASSING_TITLE: Final[str] = "Odoo"
 #: calls at ``LoginSD.java:46`` and ``LogOutSD.java:27`` carry one and this one
 #: does not, and normalising the three would edit the source.
 TITLE_ASSERTION_MESSAGE: Final[str] = "The title is not same as the expected!"
+
+#: ``Sales.java:71``'s ``String actualName = "Lucas";`` - the customer name the
+#: search step binds and compares with nothing.  AAP 0.4.1 counts "the same
+#: hard-coded literals and expected values" as parity per module, so the
+#: literal is asserted here byte for byte even though no behaviour reads it:
+#: what the source *binds* is as much a parity fact as what it compares.  It is
+#: deliberately not the value the behavioural tests search for - those use
+#: their own distinctive name, so a body typing the literal instead of its
+#: parameter still fails.
+SEARCH_NAME_LITERAL: Final[str] = "Lucas"
+
+#: ``Sales.java:90``'s ``String actualWarning = "The following fields are
+#: invalid:";``, trailing colon included, bound by the warning step and
+#: likewise compared with nothing.  Asserted for the same reason as
+#: :data:`SEARCH_NAME_LITERAL`, and byte for byte because the colon is the only
+#: thing distinguishing it from the sentence Odoo renders.
+WARNING_LITERAL: Final[str] = "The following fields are invalid:"
+
+#: The step bodies that bind those two literals, against the page accessor each
+#: one dereferences immediately afterwards.  ``Sales.java`` binds the literal
+#: *first* and reads *second* (``:71`` before ``:72``, ``:90`` before ``:91``),
+#: which is the statement order the two tests below pin.
+LITERAL_BINDINGS: Final[tuple[tuple[str, str, str], ...]] = (
+    ("user_can_find_his_name_from_search_bar", SEARCH_NAME_LITERAL, "name_check"),
+    ("user_can_get_the_error", WARNING_LITERAL, "warning"),
+)
+
+#: The assignment target a body may bind an unread literal to.  ``Sales.java``
+#: uses a named local (``actualName``, ``actualWarning``) and reads it only
+#: from a print this port does not reproduce; a named local with no reader is a
+#: ``pyflakes`` F841, and this tree carries none, so the port binds the literal
+#: to the discard target instead.  That is the one shape both faithful to the
+#: source - a binding, at the source's statement position - and clean under the
+#: linter, and pinning it here is what stops the literal quietly moving into a
+#: local something later reads, or into a value that reaches an output sink.
+DISCARD_TARGET: Final[str] = "_"
 
 
 # --------------------------------------------------------------------------- #
@@ -337,28 +418,29 @@ _MISSING: Final[Any] = object()
 
 
 class WaitCall(NamedTuple):
-    """One explicit wait, normalised so the assertion outlives a refactor.
+    """One explicit wait, as the call site made it.
 
-    The parity facts are *what* was waited on, *for how long*, and *in what
-    order*.  Those three survive a change of call shape in ``app/automation``;
-    the shape itself is recorded in :attr:`helper` and :attr:`from_element` for
-    diagnosis and is checked only against the visibility predicate the Java
-    source uses.
+    The parity facts are *what* was waited on, *for how long* and *in what
+    order*: ``Sales.java:22`` and its seven siblings each apply
+    ``ExpectedConditions.visibilityOf`` to a ``PageFactory`` proxy, which
+    re-located the element inside the predicate on every poll
+    (``SalesP.java:14``), so the wait's own 4 seconds governed the lookup.
+    ``app/automation/waits.py``'s ``wait_visible_element`` reproduces that by
+    taking the page object's locator constant and resolving it inside
+    ``visibility_of_element_located``, and :attr:`locator` therefore holds the
+    constant the body passed - the same object, not a copy of its value.
     """
 
     #: Name of the helper the step called.
     helper: str
 
-    #: The waited-on element's locator - read off the recorder's element for an
-    #: element target, or the pair itself for a locator target.
+    #: The locator constant the call site passed, recorded as that very object
+    #: so :func:`assert_visibility_waits` can weigh it against ``SalesPage``'s
+    #: own attribute by identity.
     locator: tuple[str, str]
 
     #: Seconds, exactly as the call site supplied them.
     timeout: Any
-
-    #: ``True`` when the target was a resolved element, which is what tells the
-    #: lookup-count invariant whether the call cost a ``find_element``.
-    from_element: bool
 
     #: How many effectful operations had already happened when this wait was
     #: made - so ``1`` means "after the first click, before whatever comes
@@ -369,27 +451,52 @@ class WaitCall(NamedTuple):
     after: int
 
 
-def _wait_locator(target: Any) -> tuple[str, str]:
-    """Normalise a wait target to the locator pair it stands for.
+def page_constant_name(target: Any) -> str | None:
+    """The name of the ``SalesPage`` locator constant that *is* *target*.
 
-    :param target: A recorder element - ``StubElement`` exposes ``locator`` -
-        or a ``(By.X, "value")`` pair.
-    :returns: The locator pair.
-    :raises AssertionError: If *target* is neither, which means the port waited
-        on something no parity assertion can interpret.
+    Compared by identity across :attr:`SalesPage.LOCATORS`, not by value: two
+    pages of the reference do carry same-valued selectors, and ``SalesP.java``
+    itself declares near-twins (``:50`` and ``:62`` differ only by a trailing
+    ``/span``), so a same-valued tuple must not be able to stand in for the
+    constant a body is required to pass.
+
+    :param target: A wait target, or any other candidate locator.
+    :returns: The constant's upper-case name, or ``None`` when *target* is not
+        one of the page class's twenty locator objects.
     """
-    locator = getattr(target, "locator", None)
+    for name in SalesPage.LOCATORS:
+        if getattr(SalesPage, name) is target:
+            return name
 
-    if locator is not None:
-        return tuple(locator)
+    return None
 
-    if isinstance(target, (tuple, list)) and len(target) == 2:
-        return tuple(target)
 
-    raise AssertionError(
-        f"wait target {target!r} is neither a located element nor a "
-        f"(By.X, value) pair, so its parity with Sales.java cannot be judged"
-    )
+def _wait_locator(target: Any) -> tuple[str, str]:
+    """Check a wait target is a ``SalesPage`` locator constant, and hand it back.
+
+    :param target: What the step passed as its wait target.
+    :returns: *target* unchanged, so the recorded value keeps the call site's
+        own object.
+    :raises AssertionError: If *target* is not one of the page class's locator
+        constants - a resolved element, a locator built in the body, or a
+        same-valued copy - because ``wait_visible_element`` resolves the
+        locator inside ``visibility_of_element_located`` and a target looked up
+        before the call would move the lookup out from under
+        ``Sales.java:17``'s four seconds and behind the session's ten-second
+        implicit wait (``Driver.java:34``).
+    """
+    name = page_constant_name(target)
+
+    if name is None:
+        raise AssertionError(
+            f"wait target {target!r} is not one of SalesPage's locator "
+            f"constants. Sales.java's eight waits each apply "
+            f"ExpectedConditions.visibilityOf to a PageFactory proxy that "
+            f"re-locates inside the predicate (SalesP.java:14), so every call "
+            f"site must pass page.<CONSTANT> itself"
+        )
+
+    return target
 
 
 def _wait_recorder(helper: str, recorded: list[WaitCall], driver: Any) -> Any:
@@ -399,8 +506,8 @@ def _wait_recorder(helper: str, recorded: list[WaitCall], driver: Any) -> Any:
     :param recorded: The list every call appends to.
     :param driver: The recorder, read to timestamp each wait against the
         effectful operations that preceded it.
-    :returns: A callable with the helpers' ``(target, timeout, *, driver=None)``
-        signature that records and returns its target.
+    :returns: A callable with the helpers' ``(locator, timeout, *, driver=None)``
+        signature that records and returns the locator it was given.
     """
 
     def recorder(target: Any, timeout: Any = _MISSING, **kwargs: Any) -> Any:
@@ -419,14 +526,15 @@ def _wait_recorder(helper: str, recorded: list[WaitCall], driver: Any) -> Any:
                 helper=helper,
                 locator=_wait_locator(target),
                 timeout=timeout,
-                from_element=hasattr(target, "locator"),
                 after=len(effect_log(driver)),
             )
         )
-        # The real visibility helpers return the element they waited on. No
-        # body in this module reads that result - Sales.java discards every
-        # wait.until() too, which test_the_eight_wait_sites... asserts at the
-        # source level - so returning the target is faithful and unused.
+        # The real visibility helpers return the element the predicate
+        # resolved. No body in this module reads that result - every one of
+        # Sales.java's eight wait.until() calls discards its return too
+        # (``:22 :29 :43 :57 :59 :61 :69 :83``), which
+        # test_the_eight_wait_sites... asserts at the source level - so the
+        # locator is handed straight back and never read.
         return target
 
     return recorder
@@ -438,10 +546,11 @@ def install_wait_recorder(
     """Substitute every wait helper in the step module's namespace.
 
     Every ``wait_*`` name present is replaced, not just the one the port
-    currently calls, so that a concurrent change of wait call site in
-    ``app/automation`` is still recorded and judged on its target, timeout and
-    order.  ``monkeypatch.setitem`` is used rather than assignment because the
-    step registry is session-scoped state shared with every other step test.
+    calls, so a wait taken through any other helper is recorded and judged
+    rather than reaching a real ``WebDriverWait`` built around a session the
+    recorder is not.  ``monkeypatch.setitem`` is used rather than assignment
+    because the step registry is session-scoped state shared with every other
+    step test.
 
     :param monkeypatch: The test's patcher, which restores the namespace.
     :param match: Any ``StepMatch`` of the module - all seven share one
@@ -479,6 +588,9 @@ def install_wait_recorder(
 def wait_sequence(waits: list[WaitCall]) -> tuple[tuple[tuple[str, str], Any], ...]:
     """Reduce recorded waits to the ``(locator, timeout)`` pairs to assert.
 
+    The locator in each pair is the ``SalesPage`` constant the body passed, so
+    a test compares it against ``SalesPage.<CONSTANT>`` directly.
+
     :param waits: What :func:`install_wait_recorder` collected.
     :returns: One pair per wait, in call order.
     """
@@ -490,11 +602,12 @@ def wait_positions(waits: list[WaitCall]) -> tuple[int, ...]:
 
     The companion of :func:`wait_sequence` and :func:`effect_log`: those two
     pin *what* happened, this pins *when* the waits happened relative to it.
-    Asserting the position rather than merging the two logs is what keeps the
-    ordering fact independent of the wait call shape - a change from an element
-    target to a locator target in ``app/automation`` moves no position, while
-    ``Sales.java``'s click-then-wait order becoming wait-then-click moves every
-    one of them.
+    Counting positions rather than merging the two logs keeps the ordering
+    fact on its own: a wait takes a locator and performs no operation the
+    recorder logs, so its position is the number of operations before it, and
+    ``Sales.java``'s click-then-wait order - the click at ``:21`` before the
+    wait at ``:22``, and so on through ``:96`` - becoming wait-then-click moves
+    every one of them.
 
     :param waits: What :func:`install_wait_recorder` collected.
     :returns: One count per wait, in call order: the number of effectful
@@ -506,8 +619,11 @@ def wait_positions(waits: list[WaitCall]) -> tuple[int, ...]:
 def assert_visibility_waits(waits: list[WaitCall]) -> None:
     """Check every recorded wait against ``Sales.java:17`` and ``:22``.
 
-    Two facts, both class-wide: the predicate is visibility, and the timeout is
-    four seconds at every site.
+    Three facts, all class-wide: the predicate is visibility, the timeout is
+    four seconds at every site, and the target is one of ``SalesPage``'s
+    locator constants - the same object the page class holds, so the lookup
+    happens inside ``visibility_of_element_located`` under those four seconds
+    rather than before the call.
 
     :param waits: What :func:`install_wait_recorder` collected.
     :returns: ``None``.
@@ -521,6 +637,12 @@ def assert_visibility_waits(waits: list[WaitCall]) -> None:
             f"wait on {wait.locator!r} used a {wait.timeout!r}-second timeout; "
             f"Sales.java:17 fixes {WAIT_TIMEOUT} for every wait in this class"
         )
+        assert page_constant_name(wait.locator) is not None, (
+            f"wait target {wait.locator!r} is not a SalesPage locator "
+            f"constant; SalesP.java:14's proxies re-located inside the "
+            f"predicate, so the wait receives page.<CONSTANT> and resolves it "
+            f"itself"
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -533,14 +655,14 @@ def effect_log(driver: Any) -> tuple[tuple[Any, ...], ...]:
 
     Every entry of the recorder's log except ``find_element``, flattened to
     ``(operation, locator, *arguments)``.  Resolution is excluded on purpose:
-    a page accessor evaluated as a wait argument produces a lookup of its own,
-    so a sequence including lookups would encode the wait *call shape* -
-    which ``app/automation`` may legitimately change - instead of the
-    behaviour.  :func:`assert_lookup_invariant` pins the lookups separately.
+    each entry already names the locator its operation acted on, so listing
+    the lookup that preceded it would say the same thing twice and leave the
+    behavioural sequence twice as long as the Java body it mirrors.
+    :func:`assert_lookup_invariant` pins the lookups separately, as a count.
 
-    ``find_elements`` is deliberately *not* excluded: no ``Sales.java`` body
-    reads a plural locator, so a plural lookup appearing here is a parity
-    break and must show up in the sequence.
+    ``find_elements`` is deliberately *not* excluded: none of the seven
+    ``Sales.java`` bodies at ``:20-96`` reads a plural locator, so a plural
+    lookup appearing here is a parity break and must show up in the sequence.
 
     :param driver: The :fixture:`stub_driver` the step ran against.
     :returns: One flattened entry per effectful operation, in call order.
@@ -559,23 +681,29 @@ def assert_lookup_invariant(driver: Any, waits: list[WaitCall]) -> None:
     re-resolve on every dereference and cache nothing, and
     ``app/pages/base_page.py`` reproduces that.  Each statement of a
     ``Sales.java`` body that touches an element therefore costs one
-    ``findElement``, and so must each element-targeted wait argument.
+    ``findElement`` and the lookups must number exactly as many as the
+    operations performed on elements.
+
+    The waits add none: each one is passed a locator constant and resolves it
+    inside ``visibility_of_element_located``, where the real helper - not the
+    body - performs the lookup, so a wait that showed up here as a lookup
+    would mean the body had resolved its target before calling.
 
     :param driver: The recorder the step ran against.
-    :param waits: What :func:`install_wait_recorder` collected.
+    :param waits: What :func:`install_wait_recorder` collected, for the wait
+        targets named in the failure message.
     :returns: ``None``.
     """
     element_operations = sum(
         1 for operation, _ in driver.calls if operation.startswith("element.")
     )
-    element_waits = sum(1 for wait in waits if wait.from_element)
-    expected = element_operations + element_waits
 
-    assert driver.count_of("find_element") == expected, (
+    assert driver.count_of("find_element") == element_operations, (
         f"{driver.count_of('find_element')} lookups for "
-        f"{element_operations} element operations and {element_waits} "
-        f"element-targeted waits; the port's accessors cache nothing, so each "
-        f"reference must cost exactly one"
+        f"{element_operations} element operations, with "
+        f"{len(waits)} locator-targeted waits costing none; the port's "
+        f"accessors cache nothing, so each element reference must cost "
+        f"exactly one and a wait must cost none"
     )
     assert driver.count_of("find_elements") == 0, (
         "a plural lookup was made, but no Sales.java body reads "
@@ -693,6 +821,129 @@ def call_count(name: str) -> int:
             total += 1
 
     return total
+
+
+@functools.cache
+def step_body(function: str) -> tuple[ast.stmt, ...]:
+    """The top-level statements of one step body, in source order.
+
+    The instrument for the two parity facts a run cannot observe: that a body
+    *binds* a literal, and that it binds it before the read that follows it.
+    Neither leaves a trace in the effect log - a binding touches no browser and
+    writes nothing - so the syntax tree is the only place they can be asserted,
+    and the docstring is not, because prose can agree with a body that no
+    longer matches it.
+
+    :param function: The port's function name, as ``DEFINITIONS`` records it.
+    :returns: The function's own statements, excluding its docstring.
+    :raises AssertionError: If the module declares no such function, which is
+        what a rename or a deletion looks like from here.
+    """
+    for node in step_module_tree().body:
+        if isinstance(node, ast.FunctionDef) and node.name == function:
+            body = tuple(node.body)
+
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                return body[1:]
+
+            return body
+
+    raise AssertionError(
+        f"features/steps/sales_steps.py declares no function {function!r}, so "
+        f"the Java body it ports is unasserted"
+    )
+
+
+class LiteralBinding(NamedTuple):
+    """One string literal a step body binds, as the syntax tree shows it."""
+
+    #: Position among the body's own statements, so that "bound before the
+    #: read" - ``Sales.java:71`` before ``:72`` - is an assertable fact.
+    index: int
+
+    #: The assignment target, rendered back to source.
+    target: str
+
+    #: The bound value.
+    literal: str
+
+
+def bound_string_literals(function: str) -> tuple[LiteralBinding, ...]:
+    """Every string literal an assignment in *function* binds, in body order.
+
+    :param function: The port's function name.
+    :returns: One :class:`LiteralBinding` per assignment whose right-hand side
+        is a plain string literal.  A computed right-hand side -
+        ``"Customers - " + context.driver.title`` at ``Sales.java:32`` - is not
+        a hard-coded literal and is not reported.
+    """
+    bindings: list[LiteralBinding] = []
+
+    for index, statement in enumerate(step_body(function)):
+        if isinstance(statement, ast.Assign):
+            targets = statement.targets
+            value = statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets = [statement.target]
+            value = statement.value
+        else:
+            continue
+
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            bindings.extend(
+                LiteralBinding(index, ast.unparse(target), value.value)
+                for target in targets
+            )
+
+    return tuple(bindings)
+
+
+def statement_index_reading(function: str, accessor: str) -> int:
+    """Where *function* dereferences ``page.<accessor>``, among its statements.
+
+    Located by the accessor rather than by the helper that performs the read,
+    so the position assertion survives :func:`_read_element_text` being renamed
+    or inlined while still failing if the read moves, disappears, or overtakes
+    the literal binding that must precede it.
+
+    :param function: The port's function name.
+    :param accessor: The lower-case page accessor, such as ``"name_check"``.
+    :returns: The index of the first statement that reads it.
+    :raises AssertionError: If no statement does, which means the step lost the
+        only failure mode ``Sales.java`` gives it.
+    """
+    for index, statement in enumerate(step_body(function)):
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Attribute) and node.attr == accessor:
+                return index
+
+    raise AssertionError(
+        f"{function}() never dereferences page.{accessor}; that read is the "
+        f"step's only way to fail and must not be dropped"
+    )
+
+
+def name_loads(function: str, name: str) -> int:
+    """How many times *function* reads the bare name *name*.
+
+    :param function: The port's function name.
+    :param name: The identifier to count loads of.
+    :returns: The number of ``ast.Name`` nodes in load context, so ``0`` means
+        the name is bound and never consumed.
+    """
+    return sum(
+        1
+        for statement in step_body(function)
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Name)
+        and node.id == name
+        and isinstance(node.ctx, ast.Load)
+    )
 
 
 def wait_call_sites() -> tuple[int, int]:
@@ -901,8 +1152,10 @@ def test_dashboard_step_clicks_then_waits_on_the_same_element(
 
     The order is the source's and stays that way - the click first, the wait
     second, so what is waited on is an element the click has already acted
-    upon.  Both statements name the same field, so both resolve it, one lookup
-    each.  Nothing is printed and nothing is asserted.
+    upon.  Both statements name the same field: the click dereferences the
+    accessor, which costs the body's one lookup, and the wait is handed
+    ``SalesPage.SALES_PARTIAL`` and resolves it inside the predicate.  Nothing
+    is printed and nothing is asserted.
     """
     match = cover(resolve_step(PHRASE_DASHBOARD))
     waits = install_wait_recorder(monkeypatch, match, stub_driver)
@@ -925,7 +1178,7 @@ def test_dashboard_step_clicks_then_waits_on_the_same_element(
 # =========================================================================== #
 
 
-def test_customers_step_clicks_waits_prints_and_passes_on_the_bare_title(
+def test_customers_step_clicks_waits_and_passes_on_the_bare_title(
     resolve_step: Any,
     fake_context: Any,
     stub_driver: Any,
@@ -938,10 +1191,15 @@ def test_customers_step_clicks_waits_prints_and_passes_on_the_bare_title(
     the literal ``"Customers - Odoo"`` to *actualTitle*, ``:32`` binds
     ``"Customers - "`` followed by the live title to *expectedTitle* - so the
     names are the wrong way round and the prefix is doubled on any real
-    Customers page, both of which are the source's and are preserved - and
-    ``:34-35`` print both, the second under the label ``expected = ``, not
-    ``expectedTitle = ``.  With the live title ``"Odoo"`` the two strings
-    match and ``:37`` passes.
+    Customers page, both of which are the source's and are preserved.  With the
+    live title ``"Odoo"`` the two strings match and ``:37`` passes.
+
+    ``:34-35`` print both values and neither line is reproduced: the live
+    browser title is data read from the system under test and the worker's
+    stdout is relayed into the parent logger and the Jenkins console
+    (CWE-532/359, F04).  Silence is asserted here, and the two locals - which
+    ``:37`` compares, under the source's inverted names - are what the
+    assertion in the failing-path test still pins.
     """
     stub_driver.title = PASSING_TITLE
     match = cover(resolve_step(PHRASE_CUSTOMERS))
@@ -957,13 +1215,14 @@ def test_customers_step_clicks_waits_prints_and_passes_on_the_bare_title(
     assert wait_positions(waits) == (1,)
     assert_visibility_waits(waits)
     assert_lookup_invariant(stub_driver, waits)
-    assert capsys.readouterr().out == (
-        "actualTitle = Customers - Odoo\nexpected = Customers - Odoo\n"
+    assert capsys.readouterr().out == "", (
+        "Sales.java:34-35's two prints are not reproduced; the live browser "
+        "title must not reach the worker or Jenkins log"
     )
 
 
 @pytest.mark.parametrize(
-    ("live_title", "printed_expected"),
+    ("live_title", "doubled_title"),
     [
         ("Customers - Odoo", "Customers - Customers - Odoo"),
         ("Odoo - Customers", "Customers - Odoo - Customers"),
@@ -977,7 +1236,7 @@ def test_customers_step_fails_with_the_exact_java_message(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     live_title: str,
-    printed_expected: str,
+    doubled_title: str,
 ) -> None:
     """``Sales.java:37``: the message, byte for byte, with no trailing space.
 
@@ -988,8 +1247,14 @@ def test_customers_step_fails_with_the_exact_java_message(
     message is compared with ``==`` - which is what catches the trailing space
     ``LoginSD.java:46`` and ``LogOutSD.java:27`` carry and this call does not -
     while JUnit's ``expected:<...> but was:<...>`` rendering is neither
-    reproduced nor asserted.  The two prints happen before the comparison, so
-    both lines reach standard output even on the failing path.
+    reproduced nor asserted.
+
+    The failing path is where ``:34-35``'s prints would have carried the live
+    title furthest, a failing step being the one a reader opens the CI log for,
+    and it is silent as well: the ``AssertionError`` and its message are the
+    whole of what this step produces (CWE-532/359, F04).  *doubled_title* is
+    the string ``:32`` builds from each live title, transcribed so the doubled
+    prefix stays a stated fact of each case rather than an implicit one.
     """
     stub_driver.title = live_title
     match = cover(resolve_step(PHRASE_CUSTOMERS))
@@ -1001,8 +1266,11 @@ def test_customers_step_fails_with_the_exact_java_message(
     assert str(failure.value) == TITLE_ASSERTION_MESSAGE
     assert failure.value.args == (TITLE_ASSERTION_MESSAGE,)
     assert not str(failure.value).endswith(" ")
-    assert capsys.readouterr().out == (
-        f"actualTitle = Customers - Odoo\nexpected = {printed_expected}\n"
+    assert "Customers - " + live_title == doubled_title
+    assert capsys.readouterr().out == "", (
+        f"the failing comparison wrote to standard output; neither the live "
+        f"title {live_title!r} nor the doubled {doubled_title!r} may reach the "
+        f"worker or Jenkins log"
     )
     assert wait_sequence(waits) == ((SalesPage.CUSTOMERS_BUTTON, WAIT_TIMEOUT),)
     assert wait_positions(waits) == (1,)
@@ -1169,23 +1437,33 @@ def test_search_step_sends_the_name_then_enter_in_one_keyboard_call(
     assert wait_positions(waits) == (1,)
 
 
-def test_search_step_prints_both_names_and_compares_nothing(
+def test_search_step_reads_the_heading_and_compares_nothing(
     resolve_step: Any,
     fake_context: Any,
     stub_driver: Any,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """``Sales.java:71-77``: two locals, two prints, and no assertion.
+    """``Sales.java:71-77``: one read, no comparison, and no output.
 
     ``:71`` binds the literal ``"Lucas"`` to *actualName* - a constant even
     when the phrase supplies another name, as it does here - and ``:72`` reads
     the kanban heading into *expectedName*.  ``:74-75`` write both out and the
     body ends.  The comparison the naming plainly intends is **absent from the
     Java source**, so a heading that contradicts the literal must not fail this
-    step; repairing it would change which scenarios pass.  The read at ``:72``
-    is what gives the step its only failure mode besides the wait, so the read
-    itself is pinned.
+    step; repairing it would change which scenarios pass.
+
+    Two facts are therefore pinned together here.  The read at ``:72`` must
+    still happen - it is the step's only failure mode besides the wait, so a
+    port that dropped it would turn a step that can fail into one that cannot -
+    and it must happen *silently*: ``:74-75`` printed the heading, which is a
+    customer's name, and the worker's stdout is relayed into the parent logger
+    and the Jenkins console, so reproducing those lines would put PII into
+    durable logs (CWE-532/359, F04).  The effect log pins the read; ``capsys``
+    pins the silence.  ``:71``'s literal is a separate parity fact, pinned by
+    :func:`test_search_step_binds_the_java_name_literal_and_reads_it_nowhere`:
+    it survives the print's removal because AAP 0.4.1 counts a body's
+    hard-coded values as parity, and it is *bound*, never written anywhere.
     """
     searched = "Zephyrine-Q7"
     heading = "not-the-name-this-step-was-given"
@@ -1204,8 +1482,92 @@ def test_search_step_prints_both_names_and_compares_nothing(
     assert wait_positions(waits) == (1,)
     assert_visibility_waits(waits)
     assert_lookup_invariant(stub_driver, waits)
-    assert capsys.readouterr().out == (
-        f"actualName = Lucas\nexpectedName = {heading}\n"
+
+    captured = capsys.readouterr().out
+
+    assert captured == "", (
+        "Sales.java:74-75's two prints are not reproduced; the kanban heading "
+        "is a customer's name and must not reach the worker or Jenkins log"
+    )
+    assert heading not in captured
+    assert "Lucas" not in captured
+
+
+def test_search_step_binds_the_java_name_literal_and_reads_it_nowhere(
+    resolve_step: Any,
+    fake_context: Any,
+    stub_driver: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``Sales.java:71``: ``String actualName = "Lucas";``, bound and unread.
+
+    AAP 0.4.1's per-module obligation names "the same hard-coded literals and
+    expected values", and this is one of the two the class carries that no
+    comparison consumes.  Its print at ``:74`` is not reproduced - it wrote a
+    customer's name into every worker and Jenkins log (CWE-532/359, F04) - but
+    the *binding* is not the print: removing the output does not remove the
+    value the Java body holds, and a port that dropped the literal would have
+    no record of the name this step exists to look for.
+
+    Four facts, and it takes all four to say "kept, and kept inert":
+
+    * the literal is exactly ``"Lucas"``, byte for byte;
+    * the body binds it, at its own statement;
+    * the binding sits *before* the heading read, which is the order ``:71``
+      and ``:72`` are written in;
+    * nothing reads the binding - no name load of the discard target anywhere
+      in the body - so the value cannot reach a comparison the source does not
+      make, and the run stays silent, which ``capsys`` re-checks here beside
+      the module-wide sink assertions of
+      :func:`test_the_step_module_contains_no_print_call_at_all`.
+    """
+    searched = "Zephyrine-Q7"
+    stub_driver.set_text(SalesPage.NAME_CHECK, "kanban-heading-value")
+
+    match = cover(resolve_step(f'User can find his name "{searched}" from search bar'))
+    install_wait_recorder(monkeypatch, match, stub_driver)
+
+    assert searched != SEARCH_NAME_LITERAL, (
+        "the phrase must supply a name other than the literal, so that a body "
+        "binding the literal in place of its parameter cannot pass"
+    )
+
+    function, literal, accessor = LITERAL_BINDINGS[0]
+
+    assert literal == "Lucas"
+    assert literal == SEARCH_NAME_LITERAL
+
+    bindings = [
+        binding
+        for binding in bound_string_literals(function)
+        if binding.literal == literal
+    ]
+
+    assert len(bindings) == 1, (
+        f"{function}() binds the Sales.java:71 literal {literal!r} "
+        f"{len(bindings)} times; the source binds it exactly once"
+    )
+    assert bindings[0].target == DISCARD_TARGET, (
+        f"Sales.java:71's literal is bound to {bindings[0].target!r}; the port "
+        f"binds it to {DISCARD_TARGET!r}, which is what states that nothing "
+        f"consumes it and keeps the binding clear of pyflakes F841"
+    )
+    assert bindings[0].index < statement_index_reading(function, accessor), (
+        "Sales.java binds actualName at :71 and reads the kanban heading at "
+        ":72; the binding must stay ahead of the read"
+    )
+    assert name_loads(function, DISCARD_TARGET) == 0, (
+        "something in the search step reads the discarded binding; "
+        "Sales.java:66-77 compares nothing and writes nothing, so the literal "
+        "must stay inert"
+    )
+
+    match.run(fake_context)
+
+    assert capsys.readouterr().out == "", (
+        "the search step wrote to standard output; Sales.java:74-75 are not "
+        "reproduced and the literal is bound, never written"
     )
 
 
@@ -1262,15 +1624,24 @@ def test_error_step_reads_the_warning_area_and_compares_nothing(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """``Sales.java:90-94``: one read, two prints, no click, no wait, no assert.
+    """``Sales.java:90-94``: one read, no click, no wait, no assert, no output.
 
     ``:90`` binds the literal ``"The following fields are invalid:"`` - the
     trailing colon included - and ``:91`` reads the notification area's text.
     ``:93-94`` print both and the body ends.  Whatever the notification area
-    says, this step passes, because the two strings it builds are never weighed
-    against each other; the programmed text here contradicts the literal
-    precisely to prove that.  The read is the only thing this step does to the
-    browser and its only way to fail.
+    says, this step passes, because nothing weighs the two strings against each
+    other; the programmed text here contradicts the literal precisely to prove
+    that.  The read is the only thing this step does to the browser and its
+    only way to fail, so it is pinned through the effect log.
+
+    Neither printed line is reproduced: the notification text is read live from
+    the system under test and the worker's stdout reaches the parent logger and
+    the Jenkins console (CWE-532/359, F04).  ``:90``'s literal is kept, because
+    AAP 0.4.1 counts a body's hard-coded values as parity and a binding is not
+    an output;
+    :func:`test_error_step_binds_the_java_warning_literal_and_reads_it_nowhere`
+    is what pins it, and this test is what pins that keeping it changed nothing
+    observable.
     """
     notice = "some other Odoo notification entirely"
     stub_driver.set_text(SalesPage.WARNING, notice)
@@ -1283,9 +1654,80 @@ def test_error_step_reads_the_warning_area_and_compares_nothing(
     assert effect_log(stub_driver) == (("element.text", SalesPage.WARNING),)
     assert waits == [], "Sales.java:87-96 contains no wait.until call"
     assert_lookup_invariant(stub_driver, waits)
-    assert capsys.readouterr().out == (
-        f"actualWarning = The following fields are invalid:\n"
-        f"expectedWarning = {notice}\n"
+
+    captured = capsys.readouterr().out
+
+    assert captured == "", (
+        "Sales.java:93-94's two prints are not reproduced; the notification "
+        "text is read live from the system under test"
+    )
+    assert notice not in captured
+
+
+def test_error_step_binds_the_java_warning_literal_and_reads_it_nowhere(
+    resolve_step: Any,
+    fake_context: Any,
+    stub_driver: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``Sales.java:90``: the validation sentence, bound and unread.
+
+    The warning step's half of the parity fact its search-step counterpart
+    carries: ``String actualWarning = "The following fields are invalid:";`` is
+    a hard-coded expected value, AAP 0.4.1 enumerates those per module, and
+    ``:93``'s print - which wrote it beside live notification text into worker
+    and Jenkins logs (CWE-532/359, F04) - was the only thing that ever read it.
+    Dropping the print is the remediation; dropping the sentence would be a
+    parity loss, because it is the one record in the port of what a blank Odoo
+    customer form is expected to complain about.
+
+    The same four facts are pinned as for ``:71``, with the colon of the
+    literal included byte for byte, and the binding required to sit ahead of
+    the notification read exactly as ``:90`` sits ahead of ``:91`` - which in
+    this body means first, since ``Sales.java:87-96`` has nothing else.
+    """
+    stub_driver.set_text(SalesPage.WARNING, "notification-area-value")
+
+    match = cover(resolve_step(PHRASE_ERROR))
+    install_wait_recorder(monkeypatch, match, stub_driver)
+
+    function, literal, accessor = LITERAL_BINDINGS[1]
+
+    assert literal == "The following fields are invalid:"
+    assert literal == WARNING_LITERAL
+    assert literal.endswith(":"), "Sales.java:90's literal ends in a colon"
+
+    bindings = [
+        binding
+        for binding in bound_string_literals(function)
+        if binding.literal == literal
+    ]
+
+    assert len(bindings) == 1, (
+        f"{function}() binds the Sales.java:90 literal {literal!r} "
+        f"{len(bindings)} times; the source binds it exactly once"
+    )
+    assert bindings[0].target == DISCARD_TARGET, (
+        f"Sales.java:90's literal is bound to {bindings[0].target!r}; the port "
+        f"binds it to {DISCARD_TARGET!r}, which is what states that nothing "
+        f"consumes it and keeps the binding clear of pyflakes F841"
+    )
+    assert bindings[0].index < statement_index_reading(function, accessor), (
+        "Sales.java binds actualWarning at :90 and reads the notification "
+        "area at :91; the binding must stay ahead of the read"
+    )
+    assert name_loads(function, DISCARD_TARGET) == 0, (
+        "something in the warning step reads the discarded binding; "
+        "Sales.java:87-96 compares nothing and writes nothing, so the literal "
+        "must stay inert"
+    )
+
+    match.run(fake_context)
+
+    assert capsys.readouterr().out == "", (
+        "the warning step wrote to standard output; Sales.java:93-94 are not "
+        "reproduced and the literal is bound, never written"
     )
 
 
@@ -1483,9 +1925,10 @@ def test_module_import_boundary_is_the_three_java_dependencies() -> None:
     assert names_imported_from("app.pages") == {"SalesPage"}
 
     # The automation surface Sales.java's imports reduce to: one keyboard
-    # helper for :68's Keys.ENTER, and one visibility wait for :17's
-    # WebDriverWait. Any other helper would change the predicate, the
-    # lifecycle or the import boundary.
+    # helper for Sales.java:9's org.openqa.selenium.Keys, used once at :68,
+    # and one visibility wait for Sales.java:10-11's ExpectedConditions and
+    # WebDriverWait, constructed at :17. Any other helper would change the
+    # predicate, the lifecycle or the import boundary.
     assert names_imported_from("app.automation") <= PERMITTED_AUTOMATION_NAMES, (
         f"sales_steps.py imports "
         f"{sorted(names_imported_from('app.automation') - PERMITTED_AUTOMATION_NAMES)!r} "
@@ -1579,13 +2022,14 @@ def test_no_step_touches_the_four_unreferenced_locators(
 def test_module_reads_exactly_the_sixteen_accessors_java_reaches() -> None:
     """Sixteen of ``SalesP.java``'s twenty fields, and no twenty-first name.
 
-    ``app/pages/sales_page.py`` declares all twenty locators in Java
-    declaration order and ``BasePage`` installs a lower-case accessor for each;
-    ``Sales.java`` dereferences sixteen of them.  Checking the module's syntax
-    tree against the page class's own locator inventory is the source-level
-    counterpart of the runtime assertions above: it catches an accessor read on
-    a path no test happens to drive, and it fails if a locator is renamed on
-    one side only.
+    ``app/pages/sales_page.py`` declares all twenty locators
+    (``SalesP.java:17-75``) in Java declaration order and ``BasePage`` installs
+    a lower-case accessor for each; ``Sales.java:21-91`` dereferences sixteen
+    of them, leaving the four at ``SalesP.java:62``, ``:68``, ``:71`` and
+    ``:74``.  Checking the module's syntax tree against the page class's own
+    locator inventory is the source-level counterpart of the runtime assertions
+    above: it catches an accessor read on a path no test happens to drive, and
+    it fails if a locator is renamed on one side only.
     """
     accessors = {name.lower() for name in SalesPage.LOCATORS}
     reached = accessors & referenced_attributes()
@@ -1598,21 +2042,32 @@ def test_module_reads_exactly_the_sixteen_accessors_java_reaches() -> None:
     assert len(reached) == 16
 
 
-def test_the_flow_prints_exactly_the_six_java_lines(
+def test_the_flow_writes_nothing_to_standard_output(
     resolve_step: Any,
     fake_context: Any,
     stub_driver: Any,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """``Sales.java:34-35``, ``:74-75`` and ``:93-94``: six lines, three pairs.
+    """``Sales.java:34-35``, ``:74-75`` and ``:93-94``: six prints, none ported.
 
-    Their labels keep the Java spelling and spacing - camelCase, one space
-    either side of the ``=`` - and the first pair is asymmetric: ``:34`` writes
-    ``actualTitle = `` while ``:35`` writes ``expected = ``, not
-    ``expectedTitle = ``.  That asymmetry is the source's.  ``Crm.java`` and
-    ``Sales.java`` are the reference's only classes writing to standard output
-    at all, and six of those fourteen sites are here.
+    The whole-module invariant, driven across all seven bodies in Java
+    declaration order: not one line reaches standard output.  Three of the six
+    values those prints carried are read live from the system under test - the
+    Customers page title, a customer's name from the kanban heading and the
+    notification area's text - and ``app/services/test_run_service.py`` relays
+    every worker stdout line into the parent logger and from there into the
+    Jenkins console, so each line was a durable record of live customer data
+    and PII (CWE-532/359, F04).
+
+    The page is programmed with distinctive values precisely so a reintroduced
+    print would show up here by name.  The source-level count is asserted
+    beside the run-time silence, which is what catches a print on a path this
+    flow does not take; no parity is lost, because diagnostic stdout is in
+    neither AAP 0.1.2's frozen list nor AAP 0.4.1's per-step enumeration, and
+    every enumerated operation of the seven bodies is asserted by the tests
+    above - including the two literals of ``:71`` and ``:90``, which the
+    bodies still bind and which this silence proves they do not write.
     """
     heading = "kanban-heading-value"
     notice = "notification-area-value"
@@ -1623,16 +2078,68 @@ def test_the_flow_prints_exactly_the_six_java_lines(
 
     printed = capsys.readouterr().out
 
-    assert printed.splitlines() == [
-        "actualTitle = Customers - Odoo",
-        "expected = Customers - Odoo",
-        "actualName = Lucas",
-        f"expectedName = {heading}",
-        "actualWarning = The following fields are invalid:",
-        f"expectedWarning = {notice}",
+    assert printed == "", (
+        f"the flow wrote {printed!r} to standard output; Sales.java's six "
+        f"System.out.println calls are deliberately not reproduced"
+    )
+    assert heading not in printed
+    assert notice not in printed
+    assert call_count("print") == 0, (
+        "sales_steps.py calls print(); no body in this module writes to "
+        "standard output"
+    )
+
+
+def test_the_step_module_contains_no_print_call_at_all() -> None:
+    """``features/steps/sales_steps.py`` holds no ``print`` call, in any scope.
+
+    The source-level companion of the flow's silence, and what closes the two
+    gaps a run-time check leaves.  A print inside ``_page``,
+    :func:`_read_element_text` or any helper added later is reached by no step
+    phrase, and a print on a branch this flow does not take is reached by no
+    run, yet either would write a line into every worker and Jenkins log
+    (CWE-532/359, F04).
+
+    The second half is the alternative-sink check.  The finding is about live
+    SUT values becoming a durable record, so re-routing them to a logger, to
+    ``sys.stdout``/``stderr`` directly or to a file would not resolve it - and
+    ``Sales.java`` gives the port no reason to name any of those.  Both halves
+    read the syntax tree rather than the text, because the module's docstring
+    discusses the removed prints by name and a textual search would match the
+    prose.
+    """
+    calls = [
+        node
+        for node in ast.walk(step_module_tree())
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "print"
     ]
-    assert printed.endswith("\n")
-    assert call_count("print") == 6
+
+    assert calls == [], (
+        f"sales_steps.py calls print() at line(s) "
+        f"{[node.lineno for node in calls]}; the module writes nothing to "
+        f"standard output"
+    )
+    assert "print" not in referenced_names()
+
+    for name in (
+        "logging",
+        "logger",
+        "getLogger",
+        "stdout",
+        "stderr",
+        "write",
+        "open",
+    ):
+        assert name not in referenced_names(), (
+            f"sales_steps.py references {name!r}; the six removed prints are "
+            f"not to be re-routed to another sink"
+        )
+        assert name not in referenced_attributes(), (
+            f"sales_steps.py reads or writes the attribute {name!r}; the six "
+            f"removed prints are not to be re-routed to another sink"
+        )
 
 
 # =========================================================================== #
@@ -1670,9 +2177,10 @@ def test_sales_feature_keeps_its_name_title_and_absent_tag() -> None:
 def test_sales_feature_background_supplies_the_shared_precondition(
     resolve_step: Any,
 ) -> None:
-    """``Sales.feature:5-10``: one Background, one shared ``Given``.
+    """``Sales.feature:5-10``: one Background, one shared ``Given`` at ``:10``.
 
-    The precondition is ``Session.java``'s, declared ``@When`` there and
+    The precondition is ``Session.java``'s only definition, declared
+    ``@When("User login to test other features")`` at ``Session.java:12`` and
     invoked as a ``Given`` here - which is exactly why every definition in the
     port registers with ``@step`` (AAP deviation 7).  It resolves to
     ``session_steps``, not to this module, and every other phrase in the file
@@ -1745,7 +2253,7 @@ PARITY_TESTS: Final[dict[str, tuple[str, ...]]] = {
         "test_dashboard_step_clicks_then_waits_on_the_same_element",
     ),
     "User click customers button": (
-        "test_customers_step_clicks_waits_prints_and_passes_on_the_bare_title",
+        "test_customers_step_clicks_waits_and_passes_on_the_bare_title",
         "test_customers_step_fails_with_the_exact_java_message",
     ),
     "User can create the customer": (
@@ -1755,13 +2263,15 @@ PARITY_TESTS: Final[dict[str, tuple[str, ...]]] = {
         "test_save_the_customer_step_pairs_click_and_wait_three_times",
     ),
     'User can find his name "{name}" from search bar': (
-        "test_search_step_prints_both_names_and_compares_nothing",
+        "test_search_step_reads_the_heading_and_compares_nothing",
+        "test_search_step_binds_the_java_name_literal_and_reads_it_nowhere",
     ),
     "User can create new customer": (
         "test_create_new_customer_step_ends_on_an_unwaited_click",
     ),
     "User can get the error": (
         "test_error_step_reads_the_warning_area_and_compares_nothing",
+        "test_error_step_binds_the_java_warning_literal_and_reads_it_nowhere",
     ),
 }
 
@@ -1772,21 +2282,16 @@ def test_every_java_definition_has_a_behaviour_test() -> None:
     AAP 0.4.1: "a step method with no corresponding assertion in its module's
     test is a gap, and the module test enumerates the Java class's methods so
     an omission fails rather than passes silently".  This is that enumeration,
-    and it fails three separate ways:
-
-    * a definition the Java class declares with nothing declared against it,
-      or a declaration naming a pattern the class does not declare - the
-      static half, which holds however few tests were selected;
-    * a declared test that is not in this module under that name, which is
-      what deleting a per-step test does;
-    * a declared test that ran without ever resolving its step, which is what
-      a body-less or mis-pointed test does.
-
-    Written last so that under a whole-module run every recording test has
-    already run.  Under a ``-k`` selection, a node id or a distributed run the
-    static halves still apply and the run-time half is asked only of the
-    patterns whose tests actually executed, so a partial selection reports a
-    gap exactly where one genuinely exists and nowhere else.
+    taken against the seven annotations at
+    ``Sales.java:19 :25 :40 :54 :66 :80 :87``, and it fails three ways: a
+    definition with nothing declared against it, or a declaration naming a
+    pattern the class does not declare; a declared test this module does not
+    define under that name, which is what deleting a per-step test does; and a
+    declared test that ran without ever resolving its step.  The first two hold
+    however few tests were selected, and the third is asked only of the
+    patterns whose declared tests actually executed, so a ``-k`` run, a node id
+    or a distributed run reports a gap exactly where one genuinely exists.
+    Written last, so a whole-module run reaches it after every recording test.
     """
     expected = {definition.pattern for definition in DEFINITIONS}
 

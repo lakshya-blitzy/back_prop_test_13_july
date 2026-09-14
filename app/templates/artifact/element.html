@@ -3,49 +3,35 @@
   artifact/element.html - one Background or one Scenario of the single,
   self-contained HTML report artifact.
   ---------------------------------------------------------------------------
-  Dividers here are dash rules throughout, deliberately: a run of equals signs
-  is the middle marker of an unresolved merge, the committed reference report
-  carries such a block, and no token that a marker scan looks for belongs in a
-  file this project writes - not even inside a comment the engine discards.
+  It renders the element's heading, status badge, tags, details and steps, and
+  the failure screenshots the scenario carries; steps are delegated whole to
+  partials/step_row.html, badges to partials/status_badge.html and screenshots
+  to partials/lightbox.html.
 
-  WHICH ARTIFACT, AND WHICH GENERATOR. This file belongs to the FIRST of the
-  project's two HTML contracts, and the two are never collapsed into one.
-  cucumber-java 7.2.3 (pom.xml, retained as historical reference) pulls
-  html-formatter 17.0.0, which produced target/cucumber-reports.html - one
-  self-contained page carrying no external asset reference of any kind. That
-  page is what app/reporting/html_report.py writes and what the templates in
-  this folder describe. The report tree under target/cucumber/ comes from a
-  different generator - cucumber-reporting 5.6.1 over Velocity - and owns its
-  own page set, layout, assets and navigation in app/templates/pretty/.
-  Nothing here is shared with that folder except the three partials named
-  below, and no template from it is imported or mirrored here.
+  API
 
-  WHY THIS TEMPLATE RENDERS THE RESULTS AT ALL. In the committed reference
-  artifact the content container is EMPTY: the whole report travels as a
-  client-side message payload rendered at load time by a bundled script of
-  1,381,454 characters. This port does not reproduce that, because the plan's
-  acceptance criterion for this artifact is its opposite - every feature,
-  scenario, step, status, timestamp and embedded screenshot from the input
-  result set has to be present in the DOM, checked against a generated
-  baseline for page structure. A client-side shell has none of it in the DOM.
-  The departure is the plan's own authorised deviation for both HTML outputs
-  being generated from this project's templates and accepted structurally.
-  This template is the part that puts scenarios and steps in the document, so
-  it emits neither that payload nor that bundle, and no script of its own.
-
-  ---------------------------------------------------------------------------
-  THE MACRO
-  ---------------------------------------------------------------------------
       {% from "artifact/element.html" import element_block %}
       {{ element_block(element, findex, eindex) }}
 
-  element        REQUIRED. One element mapping from a feature's element list -
-                 a background or a scenario, as described under THE INPUT
-                 MODEL below. Anything that is not a mapping - none, a string,
-                 or the name of a variable the calling template never defined
-                 - renders the EMPTY STRING and raises nothing.
+  element_block(element, findex, eindex, extra_classes='')
+      element is REQUIRED - one mapping from a feature's element list - and
+      anything that is not a mapping renders the EMPTY STRING. findex and
+      eindex are REQUIRED: the feature's zero-based index in the result set
+      and this element's index within that feature, both read as text and
+      sanitised, so an absent, null or non-numeric value still yields a usable
+      id. extra_classes appends class tokens to the root, runs of whitespace
+      collapsed. Every field of the element is optional and type-tested, so a
+      sparse element renders under the strict undefined policy the tests
+      enable.
 
-  findex         REQUIRED. The feature's zero-based index in the result set.
+  THE TWO ELEMENT SHAPES are genuinely different and one macro serves both: a
+  background carries line, name, description, type, keyword and steps and has
+  NO id, NO tags and NO start_timestamp, while a scenario adds all three. A
+  feature-level tag carries name, type and location where a scenario tag
+  carries name alone, and the key is missing entirely rather than empty when
+  there are none. A description keeps its leading indentation verbatim and is
+  the empty string rather than absent, so it is tested for content and never
+  for presence; a start_timestamp is emitted exactly as carried.
 
   eindex         REQUIRED. This element's zero-based index within that
                  feature's element list.
@@ -167,8 +153,38 @@
   accepted, because the partial flattens one level of nesting, and the image
   is always an inline data URI. No image element is built here.
 
-  The after hook's own result is not rendered. The JSON writer owns that
-  field; this page reports the scenario and its steps.
+  ---------------------------------------------------------------------------
+  HOOK RESULTS
+  ---------------------------------------------------------------------------
+  A hook is not a step, and it is not only a screenshot carrier either: the
+  scenario lifecycle hook can itself fail - a browser session that will not
+  quit, a teardown that raises - and the element status this page reads folds
+  every hook outcome into its verdict. So a hook alone can present a scenario
+  as not passed, and a page that showed only the steps would show a red
+  scenario above a column of green steps with nothing to explain it.
+
+  Every hook whose own status is not passed, and every hook carrying failure
+  text whatever its status, is therefore reported here: its group, the dotted
+  path of the implementation that ran, its own status badge and its own
+  failure text, in the same monospace block a step failure uses. A hook that
+  passed and carries no failure text renders nothing at all, which is the
+  ordinary case for every scenario in a healthy run.
+
+  IT SITS OUTSIDE THE STEPS REGION, beside the scenario's own details block
+  rather than inside the region the steps toggle collapses, so collapsing the
+  steps leaves the reason the scenario did not pass on the page. That is the
+  same position the details block already occupies, and it is why the toggle
+  is named for the steps alone.
+
+  HOOK RESULTS ARE NOT STEPS ON THIS PAGE, deliberately and in three ways: the
+  block is not a step container, so nothing that counts or walks steps sees
+  one; no hook duration is rendered, because the element duration this report
+  presents is the sum of its STEP durations alone and printing a hook's
+  duration beside them would invite a reader to add it in; and the block
+  carries no filter hook, since the element is this page's filter unit and a
+  second one inside it would hide a subtree of the thing being hidden. The
+  hook's embeddings are not rendered here either - the screenshot block below
+  owns those, so a base64 payload is rendered once.
 
   ---------------------------------------------------------------------------
   STANDING PROHIBITIONS
@@ -297,7 +313,6 @@
         badge, which is what keeps them consistent by construction. -#}
     {%- set token = badge.status_token(element.get('status')) -%}
 
-    {#- ---- name, description and the three scenario-only fields --------- -#}
     {%- set name_text = ((element.get('name') if element.get('name') is string else '')|trim) -%}
     {%- set titled = (keyword_text ~ ': ' ~ name_text) if (keyword_text != '' and name_text != '') else (keyword_text ~ name_text) -%}
     {%- set heading_text = titled if titled != '' else kind_label -%}
@@ -332,6 +347,65 @@
         empty string for anything that is not a mapping. -#}
     {%- set raw_steps = element.get('steps') -%}
     {%- set step_list = raw_steps if (raw_steps is sequence and raw_steps is not string and raw_steps is not mapping) else [] -%}
+
+    {#- ---- hook results -------------------------------------------------
+        Both hook groups, before then after, in the order the model carries
+        them - the same two keys and the same order the aggregation reads when
+        it folds hook outcomes into the element's verdict, so this block and
+        that verdict can never disagree about which hooks exist.
+
+        A row is collected when the hook's own status is anything but passed,
+        or when it carries failure text whatever its status says: the status is
+        normalised for presentation by the badge partial, which answers
+        "unknown" for a value outside Cucumber's own vocabulary, so a hook
+        status nothing in the project can read still reports rather than being
+        silently dropped. behave's own wider vocabulary is already gone by
+        then - the authority canonicalises each recorded hook status in the
+        copy this page renders - so that fallback is the last resort it reads
+        as. A malformed entry contributes nothing.
+
+        The duration is deliberately not collected. The element duration this
+        page presents is the sum of its step durations alone, so a hook
+        duration has no slot here and is not given one. -#}
+    {%- set hook_rows = [] -%}
+    {%- for hook_key, hook_label in [('before', 'Before hook'), ('after', 'After hook')] -%}
+        {%- set hook_entries = element.get(hook_key) -%}
+        {%- if hook_entries is sequence and hook_entries is not string and hook_entries is not mapping -%}
+            {%- for entry in hook_entries -%}
+                {%- if entry is mapping -%}
+                    {%- set hook_result = entry.get('result') if entry.get('result') is mapping else {} -%}
+                    {%- set hook_token = badge.status_token(hook_result.get('status')) -%}
+                    {%- set hook_error = hook_result.get('error_message') if hook_result.get('error_message') is string else '' -%}
+                    {%- set hook_match = entry.get('match') if entry.get('match') is mapping else {} -%}
+                    {%- set hook_where = ((hook_match.get('location') if hook_match.get('location') is string else '')|trim) -%}
+                    {#- The status the model recorded, kept only when it is not
+                        a token of the page's own vocabulary, because a badge
+                        reading "Unknown" over a hook that errored would
+                        withhold the one word naming what happened. It is
+                        carried as TEXT beside the implementation rather than
+                        as the badge's label, because a badge's label is its
+                        status's accessible name on every surface of this port
+                        and must stay the token's.
+
+                        A status the project CAN read never reaches that
+                        clause, and by design: the writer renders the
+                        authority's decorated copy, where every recorded hook
+                        status is already canonical - behave's hook_error and
+                        cleanup_error fold onto "failed" there, the same answer
+                        target/cucumber.json publishes for them, which is the
+                        divergence app/reporting/aggregation.py's
+                        STATUS_ALIASES exists to close. What is left for the
+                        clause is a word no table of the project names. -#}
+                    {%- set hook_raw = ((hook_result.get('status') if hook_result.get('status') is string else '')|trim) -%}
+                    {%- set hook_note = hook_raw if (hook_raw != '' and hook_raw|lower != hook_token) else '' -%}
+                    {%- set hook_detail = (hook_where ~ ' (' ~ hook_note ~ ')') if (hook_where != '' and hook_note != '') else (hook_where if hook_where != '' else hook_note) -%}
+                    {%- if hook_token != 'passed' or hook_error|trim != '' -%}
+                        {%- set _ = hook_rows.append({'label': hook_label, 'token': hook_token, 'detail': hook_detail, 'error': hook_error}) -%}
+                    {%- endif -%}
+                {%- endif -%}
+            {%- endfor -%}
+        {%- endif -%}
+    {%- endfor -%}
 
     {#- ---- screenshots --------------------------------------------------
         A flat embedding list and the after-hook list are both accepted and
@@ -379,10 +453,6 @@
     <div class="tqa-scenario-name">
         <h3 class="tqa-scenario-name">{{ heading_text }}
             {{ badge.status_badge(token) }}</h3>
-        {#- BLITZY [A11Y]: the control's 28px minimum box is
-            app/static/css/main.css's own, matched to the step partial's
-            toggle; it is implemented as the stylesheet specifies rather than
-            enlarged here, and is flagged for design review. -#}
         {%- if step_list %}
         <button type="button"
                 class="tqa-toggle"
@@ -437,6 +507,45 @@
         {%- endfor %}
     </div>
     {%- endif -%}
+    {#- Every hook that did not pass, or that carried failure text, between the
+        steps and the failure evidence: the reason a scenario reads as not
+        passed belongs beside the steps it is not explained by, and above the
+        screenshot that illustrates it. One labelled block per hook, in the
+        metadata block's own label-above-value idiom, and the failure text as
+        its SIBLING rather than a cell inside it - which is why the block is
+        per hook and not one list of them all. app/static/css/main.css lays
+        .tqa-meta out in four columns from the 992px breakpoint, so a traceback
+        placed in it would be sized by a quarter-width column and wrap at about
+        28 characters, while as a sibling it takes the full width of the
+        element card, which is what a traceback needs and what every step
+        failure already gets. The text is interpolated flush against the tag so
+        the leading indentation of every line after the first survives into the
+        output. Each block is named for its own hook, so a reader of the
+        accessibility tree can tell one from another where an element has
+        several. Nothing here is a step container and nothing carries a filter
+        hook, for the reasons recorded in the notes above. -#}
+    {%- for row in hook_rows %}
+    {%- set row_name = row.label ~ (' ' ~ loop.index|string if hook_rows|length > 1 else '') ~ ' result for ' ~ heading_text -%}
+    <ul class="tqa-meta" aria-label="{{ row_name }}">
+        <li class="tqa-meta-item">
+            <span class="tqa-meta-label">Hook</span>
+            <span class="tqa-meta-value">{{ row.label }}</span>
+        </li>
+        {%- if row.detail != '' %}
+        <li class="tqa-meta-item">
+            <span class="tqa-meta-label">Implementation</span>
+            <span class="tqa-meta-value">{{ row.detail }}</span>
+        </li>
+        {%- endif %}
+        <li class="tqa-meta-item">
+            <span class="tqa-meta-label">Result</span>
+            <span class="tqa-meta-value">{{ badge.status_badge(row.token) }}</span>
+        </li>
+    </ul>
+    {%- if row.error|trim != '' %}
+    <pre class="tqa-error">{{ row.error }}</pre>
+    {%- endif %}
+    {%- endfor -%}
     {%- if shot_markup|trim != '' %}
     {{ shot_markup }}
     {%- endif %}

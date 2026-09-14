@@ -1,80 +1,36 @@
 """Behavioural parity tests for ``features/steps/logout_steps.py``.
 
-Anchor
-------
-``src/main/java/com/testinium/step_definitions/LogOutSD.java`` at pinned
-revision ``47e9d697e4a9a85da889f94a846fdf47af28a240``, with its paired page
-object ``LogOutP.java``.  Every expectation in this module is cross-referenced
-to a line of those two files and to nothing else: the Python implementation is
-the subject under test, never the source of an expectation, so a body edited
-away from the Java original fails here rather than re-baselining itself.
+Authority: ``step_definitions/LogOutSD.java`` at pinned revision
+``47e9d697e4a9a85da889f94a846fdf47af28a240`` - three ``@Then`` methods at
+``:16``, ``:23`` and ``:30``, bodies at ``:18-20``, ``:25-27`` and ``:32-33`` -
+with its page object ``pages/LogOutP.java``, whose three ``@FindBy`` fields sit
+at ``:14``, ``:17`` and ``:20``.  Every expectation is transcribed from those
+two files into a module constant, so the port is the subject under test and
+never the source of an expectation.  This discharges AAP 0.4.1's per-module
+obligation - the same observable operations in the same order for every method
+of the Java class - and enumerates those methods, so an omitted definition
+fails rather than passing silently.  Three class facts carry most of the
+assertions:
 
-This module discharges the per-module parity obligation of AAP 0.4.1 for the
-logout area - *"for each of the ten step modules, ``tests/test_steps_<area>.py``
-drives the module against a stubbed driver and asserts, for every step method
-in the corresponding Java class, that the port performs the same observable
-operations in the same order"* - and it enumerates the Java class's methods so
-that an omitted definition **fails** rather than passing silently.
+* the ``WebDriverWait`` at ``:13`` precedes the page field at ``:15``, carries a
+  **3-second** timeout, and is used once: at ``:18``, on the account menu alone,
+  ``:20`` clicking the log-out link with no wait of its own.  The call site
+  passes the page's locator constant and that timeout, and
+  ``visibility_of_element_located`` resolves the locator inside the wait;
+* all three definitions are declared ``@Then`` while ``Logout.feature:19``,
+  ``:43`` and ``:44`` reach two of them under an effective ``When``, so the port
+  registers every definition with ``@step`` (AAP deviation 7);
+* nothing in the class creates, configures or quits a WebDriver - logging out is
+  not WebDriver teardown, which AAP 0.3.3 gives to ``features/environment.py``.
 
-The census, which is the whole of ``LogOutSD.java``
----------------------------------------------------
-=  ==========  ==============================================  =================
-#  Annotation  Phrase                                          Java body
-=  ==========  ==============================================  =================
-1  ``:16``     ``User click Log out option``                   ``:18`` - ``:20``
-2  ``:23``     ``User should see the login dashboard``         ``:25`` - ``:27``
-3  ``:30``     ``User can not click the step back button       ``:32`` - ``:33``
-               to go the home page``
-=  ==========  ==============================================  =================
-
-Three facts about the class shape the assertions below and are asserted
-explicitly because each one is parity rather than oversight:
-
-* The ``WebDriverWait`` is declared at ``:13`` - **before** the page-object
-  field at ``:15``, the reverse of ``LoginSD.java`` - on a **3-second**
-  timeout, and it is used exactly once, at ``:18``, on the account menu alone.
-  ``:20`` clicks the log-out link with no wait of its own.
-* All three definitions are declared ``@Then`` in Java, including the first,
-  which is plainly an action; ``features/Logout.feature`` nonetheless invokes
-  two of them under an effective ``When``.  Cucumber-JVM matches on text alone,
-  so the port registers every definition with ``@step`` (AAP deviation 7) and
-  this module asserts that from the source and from the registry.
-* Nothing in the class quits, creates or configures a WebDriver.  **Logging out
-  of the application is not WebDriver teardown** - that belongs to
-  ``features/environment.py`` and ``app/automation/driver.py`` (AAP 0.3.3,
-  *"no step or page ever creates or quits a driver"*) - and the separation is
-  asserted here negatively, both from the source and from the recorder.
-
-Why the wait is intercepted through the step module's own globals
-----------------------------------------------------------------
-``app/automation/waits.py``'s ``_until`` resolves the session with
-``get_driver()`` whenever no driver is passed, so a step body's wait would
-reach the real lifecycle owner and try to provision a browser.  behave's
-``load_step_modules`` execs each step file into its **own** globals dict, so
-the binding the body actually calls is interceptable there, and
-:func:`_install_wait_recorder` does exactly that - discovering the name
-dynamically rather than hard-coding one.
-
-That indirection is also what keeps this module stable across a concurrent
-change to the wait helpers: what is asserted is the wait's **target locator**,
-its **timeout value** and its **position in the sequence**, never the helper's
-name, its arity or whether the target arrives as a live element or as a
-``(by, value)`` pair.  Both shapes are normalised by :func:`_target_locator`,
-and the timeout is read as *the numeric argument*, positional or keyword.
-
-Recorded operations land in :attr:`StubDriver.calls` alongside the driver's
-own, so a single interleaved, ordered log carries the whole interaction -
-which is what makes "the wait came first, then the menu click, then the link
-click" an assertion rather than three unrelated ones.
-
-What this module does not do
-----------------------------
-It starts no browser, opens no socket, reads no configuration and sleeps for
-nothing: ``LogOutSD.java`` has no fixed delay, and the guard fixture
-:func:`forbid_driver_lifecycle` turns any attempt to reach the session
-lifecycle into an immediate, explained failure.  Per AAP deviation 16 it
-asserts assertion **subjects** and **message text** only, never JUnit's
-``expected:<...> but was:<...>`` framing, which Python cannot produce.
+Waits are intercepted in the step module's own globals by
+:func:`_install_wait_recorder` - ``waits.py``'s ``_until`` would otherwise
+provision a browser through ``get_driver()`` - and land in the driver's ordered
+log, so a wait's target, timeout and position read as one sequence with the
+page operations around it.  Nothing here starts a browser, opens a socket,
+reads configuration or sleeps, and per AAP deviation 16 only assertion subjects
+and message text are asserted, never JUnit's ``expected:<...> but was:<...>``
+framing, which Python cannot produce.
 """
 
 from __future__ import annotations
@@ -120,19 +76,20 @@ THIS_MODULE_PATH: Final[Path] = Path(__file__).resolve()
 STEP_MODULE_NAME: Final[str] = "logout_steps"
 
 # --------------------------------------------------------------------------
-# The Java authority: the census of LogOutSD.java, transcribed by line
+# The Java authority: the census of LogOutSD.java:10-35, transcribed by line
 # --------------------------------------------------------------------------
 
 
 class JavaStepMethod(NamedTuple):
-    """One ``@Then``-annotated method of ``LogOutSD.java``.
+    """One ``@Then``-annotated method of ``LogOutSD.java:16-34``.
 
     The enumeration AAP 0.4.1 requires: three entries, one per method of the
     class, each carrying the line its annotation sits on, the Java method name
     and the byte-exact phrase that annotation declares.
     """
 
-    #: Line of the ``@Then(...)`` annotation in ``LogOutSD.java``.
+    #: Line of the ``@Then(...)`` annotation in ``LogOutSD.java``:
+    #: ``:16``, ``:23`` or ``:30``.
     annotation_line: int
 
     #: The Java method name.  Note entry 1: the method is named
@@ -146,7 +103,8 @@ class JavaStepMethod(NamedTuple):
     #: The Gherkin phrase, byte-exact, as the annotation declares it.
     phrase: str
 
-    #: First and last line of the method body in ``LogOutSD.java``.
+    #: First and last line of the method body in ``LogOutSD.java``:
+    #: ``:18`` - ``:20``, ``:25`` - ``:27`` or ``:32`` - ``:33``.
     body_lines: tuple[int, int]
 
 
@@ -220,7 +178,7 @@ NEAR_MISS_TITLES: Final[tuple[str, ...]] = (
 
 
 class LocatorAuthority(NamedTuple):
-    """One ``@FindBy`` field of ``LogOutP.java`` and the constant that ports it."""
+    """One ``@FindBy`` field of ``LogOutP.java:14-21`` and its port constant."""
 
     #: Name of the constant on :class:`app.pages.LogOutPage`.
     constant: str
@@ -232,14 +190,16 @@ class LocatorAuthority(NamedTuple):
     #: The strategy's wire value - the string the driver records in its log.
     wire_strategy: str
 
-    #: Line of the ``@FindBy`` annotation in ``LogOutP.java``.
+    #: Line of the ``@FindBy`` annotation in ``LogOutP.java``: ``:14``, ``:17``
+    #: or ``:20``, each immediately above the ``WebElement`` it decorates.
     java_line: int
 
     #: The annotation's argument, transcribed from the Java source.
     java_findby: str
 
 
-#: The three ``@FindBy`` fields of ``LogOutP.java``, in declaration order.
+#: The three ``@FindBy`` fields of ``LogOutP.java:14-21``, in declaration
+#: order, which is also the order :attr:`app.pages.LogOutPage.LOCATORS` holds.
 LOCATOR_AUTHORITY: Final[tuple[LocatorAuthority, ...]] = (
     LocatorAuthority(
         constant="POP_UP_BUTTON",
@@ -288,15 +248,18 @@ BACK: Final[str] = "back"
 
 #: This module's own synthetic log entry for an intercepted explicit wait,
 #: appended to the driver's log so that waits and page operations share one
-#: ordered sequence.  Its arguments are ``(locator, timeout)`` - normalised,
-#: so the entry is identical whichever shape the call site used.
+#: ordered sequence.  Its arguments are ``(locator, timeout)``: the locator
+#: constant the call site passed, and that call site's own timeout.
 WAIT: Final[str] = "wait"
 
-#: Lookups are filtered out of a sequence assertion by :func:`_actions`: how
-#: many of them a wait produces depends on whether the call site passes a live
-#: element or a locator pair, and that is exactly the detail this module must
-#: not pin.  Their position relative to each operation is asserted separately,
-#: by :func:`_lookup_precedes_each`, which holds for either shape.
+#: Lookups are filtered out of a sequence assertion by :func:`_actions`,
+#: because each lower-case accessor resolves its element on every access
+#: (``LogOutP.java:11``'s un-cached ``PageFactory`` proxy) and the count of
+#: those resolutions is mechanics rather than parity.  The intercepted wait
+#: contributes none of them: it is handed a locator and
+#: ``visibility_of_element_located`` would resolve it inside the wait.  Each
+#: operation's own preceding lookup is asserted separately, by
+#: :func:`_lookup_precedes_each`.
 LOOKUP_OPERATIONS: Final[frozenset[str]] = frozenset({FIND_ELEMENT, FIND_ELEMENTS})
 
 # --------------------------------------------------------------------------
@@ -305,9 +268,11 @@ LOOKUP_OPERATIONS: Final[frozenset[str]] = frozenset({FIND_ELEMENT, FIND_ELEMENT
 
 
 class WaitCall(NamedTuple):
-    """One intercepted explicit wait, normalised to what parity actually fixes."""
+    """One intercepted explicit wait: what ``LogOutSD.java:18`` fixes."""
 
-    #: The ``(strategy, selector)`` pair the wait was aimed at.
+    #: The locator constant the call site passed, as the very object
+    #: :attr:`app.pages.LogOutPage.POP_UP_BUTTON` holds, so an assertion on it
+    #: can use ``is`` and not only ``==``.
     locator: tuple[str, str]
 
     #: The timeout in seconds, exactly as the call site supplied it.
@@ -315,31 +280,41 @@ class WaitCall(NamedTuple):
 
 
 def _target_locator(value: Any) -> tuple[str, str]:
-    """Normalise a wait target to the locator pair it identifies.
+    """Require the wait's target to be one of ``LogOutPage``'s constants.
 
-    Accepts either shape a wait call site may use, because which one it uses is
-    not a parity fact: a live element - anything carrying ``.locator``, which
-    is what a page-object accessor and the suite's ``StubElement`` both do - or
-    a bare ``(by, value)`` pair.
+    ``LogOutSD.java:18`` waits on ``ExpectedConditions.visibilityOf`` applied to
+    the ``PageFactory`` field declared at ``LogOutP.java:14-15``, and that field
+    was a proxy that re-located on every touch: the lookup happened *inside* the
+    predicate, once per poll, governed by the wait's own 3 seconds
+    (``LogOutSD.java:13``).  ``app/automation/waits.py``'s
+    ``wait_visible_element`` reproduces that with
+    ``visibility_of_element_located``, which takes the **locator**.  A call site
+    that resolved the element first - through the lower-case accessor - would
+    move the lookup out of the wait and under the session's 10-second implicit
+    wait, so an element-shaped target is a parity failure here rather than an
+    alternative spelling, and is rejected.
 
-    :param value: The wait's target argument.
-    :returns: The ``(strategy, selector)`` pair.
-    :raises AssertionError: If *value* identifies no locator at all, which
-        means the call site passed something this module cannot hold to a
-        ``@FindBy`` declaration.
+    The check is by **identity** against the page class attribute, which
+    :attr:`app.pages.LogOutPage.LOCATORS` exposes by name: a tuple rebuilt at
+    the call site would satisfy an equality comparison while spelling the
+    selector a second time, outside ``LogOutP.java``'s authority.
+
+    :param value: The wait's target argument, exactly as it arrived.
+    :returns: That same locator object, so identity survives into
+        :class:`WaitCall` and can be asserted at the call site.
+    :raises AssertionError: If *value* is not one of the three locator
+        constants - an element, a rebuilt tuple and a locator belonging to
+        another page object all fail here.
     """
-    locator = getattr(value, "locator", value)
-
-    if (
-        isinstance(locator, tuple)
-        and len(locator) == 2
-        and all(isinstance(part, str) for part in locator)
-    ):
-        return (locator[0], locator[1])
+    if any(value is locator for locator in LogOutPage.LOCATORS.values()):
+        return value
 
     raise AssertionError(
-        f"wait target {value!r} identifies no (by, value) locator, so it "
-        f"cannot be checked against LogOutP.java's @FindBy declarations"
+        f"wait target {value!r} is not a LogOutPage locator constant: "
+        f"LogOutSD.java:18 waits on a locator that "
+        f"visibility_of_element_located resolves inside the wait, so the call "
+        f"site must pass the upper-case constant itself, one of "
+        f"{sorted(LogOutPage.LOCATORS)}"
     )
 
 
@@ -375,15 +350,20 @@ def _sole_timeout(values: Iterable[Any]) -> float:
 class WaitRecorder:
     """Stands in for the step module's explicit-wait helper.
 
-    Records the wait's target locator and timeout, appends the pair to the
-    driver's own ordered log so that waits and page operations interleave, and
-    returns the target unchanged - which is what the real helpers do, so a body
-    that used the return value would still work.
+    Records the wait's target locator and timeout and appends the pair to the
+    driver's own ordered log, so that waits and page operations interleave in
+    one sequence.  The target is handed back, which keeps the substitution
+    transparent to a body that used the return value; no body of
+    ``LogOutSD.java`` does, since ``:19`` and ``:20`` reach their elements
+    through the page object's accessors.
 
-    Deliberately indifferent to how it is called: any argument order, any mix
-    of positional and keyword arguments, and either target shape.  The name it
-    is installed under is discovered at run time by
-    :func:`_install_wait_recorder`.
+    The target must be a ``LogOutPage`` locator constant - the shape
+    ``visibility_of_element_located`` requires - and :func:`_target_locator`
+    rejects anything else.  The timeout is read as *the* numeric argument,
+    positional or keyword, which are the two forms
+    ``app/automation/waits.py``'s ``wait_visible_element(locator, timeout)``
+    signature admits.  The name the recorder is installed under is discovered
+    at run time by :func:`_install_wait_recorder`.
     """
 
     __slots__ = ("_driver", "calls")
@@ -404,9 +384,10 @@ class WaitRecorder:
 
         :param args: Positional arguments as the call site passed them.
         :param kwargs: Keyword arguments as the call site passed them.
-        :returns: The wait's target, unchanged.
-        :raises AssertionError: If no target or no single numeric timeout can
-            be identified among the arguments.
+        :returns: The wait's target locator, unchanged.
+        :raises AssertionError: If the target is not a ``LogOutPage`` locator
+            constant, or if no single numeric timeout can be identified among
+            the arguments.
         """
         candidates = [*args, *kwargs.values()]
 
@@ -475,10 +456,13 @@ def _actions(driver: Any) -> tuple[tuple[str, tuple[Any, ...]], ...]:
     """The ordered log with element lookups removed.
 
     Lookups are mechanics: a page-object accessor resolves its element on every
-    access, so how many lookups precede an operation depends on how the call
-    site is written.  What ``LogOutSD.java`` fixes is the sequence of *actions*
-    - the wait, the clicks, the title read, the back navigation - and that is
-    what this view exposes.
+    access (``LogOutP.java:11``), so their number tracks how many accessors a
+    body reads rather than anything ``LogOutSD.java`` declares.  What the Java
+    class fixes is the sequence of *actions* - the wait of ``:18``, the clicks
+    of ``:19`` and ``:20``, the title read of ``:26``, the back navigation of
+    ``:32`` - and that is what this view exposes.  The intercepted wait adds no
+    lookup of its own, because it is given a locator that
+    ``visibility_of_element_located`` would resolve inside the wait.
 
     :param driver: The suite's ``StubDriver``.
     :returns: The ``(operation, args)`` entries that are not lookups, in order.
@@ -908,9 +892,10 @@ def test_logout_steps_registers_exactly_the_three_census_phrases(
     """Three definitions, no more: the omission and the addition both fail here.
 
     The registry side of the AAP 0.4.1 enumeration.  A dropped definition
-    shrinks this set and a fourth phrase - one ``LogOutSD.java`` does not
-    declare - grows it, and either way the comparison against the census fails
-    rather than passing silently.
+    shrinks this set and a fourth phrase - one the three annotations of
+    ``LogOutSD.java:16``, ``:23`` and ``:30`` do not declare - grows it, and
+    either way the comparison against the census fails rather than passing
+    silently.
     """
     registered = _registered_patterns(step_registry)
 
@@ -960,7 +945,7 @@ def test_every_census_phrase_is_exercised_by_a_test() -> None:
 
 
 # ==========================================================================
-# 2. The locators, against LogOutP.java's @FindBy declarations
+# 2. The locators, against the @FindBy declarations of LogOutP.java:14-21
 # ==========================================================================
 
 
@@ -1052,6 +1037,10 @@ def test_log_out_waits_then_clicks_the_menu_then_the_link(
         (ELEMENT_CLICK, (LogOutPage.LOG_OUT_BUTTON,)),
     )
     assert len(waits.calls) == 1
+    # Identity, not equality: the wait's first argument is the page class
+    # attribute of ``LogOutP.java:14-15``, not a tuple of the same two strings
+    # rebuilt at the call site and not an element resolved before the wait.
+    assert waits.calls[0].locator is LogOutPage.POP_UP_BUTTON
 
 
 def test_log_out_waits_on_the_account_menu_for_three_seconds(
@@ -1059,12 +1048,19 @@ def test_log_out_waits_on_the_account_menu_for_three_seconds(
 ) -> None:
     """``:18`` waits on the account menu, for the ``:13`` timeout of 3 seconds.
 
-    The target is ``LogOutP.java:14``'s ``popUpButton`` and the timeout is the
-    class's own ``WebDriverWait`` value.  AAP 0.4.1 fixes a different timeout
-    per step class - 2s, 3s, 4s and 20s across the nine wait sites - so the
-    number is asserted as a value at the call site, which is the only place it
-    exists in the port: no helper declares a default and no module constant
-    hides which one this class chose.
+    The target is ``LogOutP.java:14-15``'s ``popUpButton`` and the timeout is
+    the class's own ``WebDriverWait`` value (``LogOutSD.java:13``).  AAP 0.4.1
+    fixes a different timeout per step class - 2s, 3s, 4s and 20s across the
+    nine wait sites - so the number is asserted as a value at the call site,
+    which is the only place it exists in the port: no helper declares a default
+    and no module constant hides which one this class chose.
+
+    The target is asserted **by identity** against the page class attribute.
+    ``visibility_of_element_located`` resolves the locator it is given inside
+    the wait, once per poll, so the constant itself is what the call site must
+    pass: an element resolved beforehand would be looked up under the session's
+    implicit wait instead, and an equal tuple rebuilt at the call site would
+    duplicate ``LogOutP.java``'s selector.  Neither passes ``is``.
     """
     match, waits = prepare(PHRASE_LOG_OUT)
     match.run(fake_context)
@@ -1072,6 +1068,7 @@ def test_log_out_waits_on_the_account_menu_for_three_seconds(
     assert waits.calls == [
         WaitCall(locator=LogOutPage.POP_UP_BUTTON, timeout=WAIT_TIMEOUT_SECONDS)
     ]
+    assert waits.calls[0].locator is LogOutPage.POP_UP_BUTTON
     assert waits.calls[0].timeout == 3
     assert not isinstance(waits.calls[0].timeout, bool)
 
@@ -1114,10 +1111,12 @@ def test_log_out_resolves_each_element_at_the_point_of_use(
 
     ``LogOutP.java:11``'s ``PageFactory`` proxy re-resolves on every access and
     ``app/pages/base_page.py`` reproduces that by never caching, so the menu is
-    located again for the click at ``:19`` rather than reusing whatever the wait
-    at ``:18`` looked at.  How *many* lookups a wait itself performs depends on
-    whether the call site passes an element or a locator, so the assertion is on
-    the lookup that immediately precedes each operation, which holds either way.
+    located again for the click at ``LogOutSD.java:19`` rather than reusing
+    whatever the wait at ``:18`` looked at.  The wait itself resolves nothing
+    before the page operations: it is handed
+    ``LogOutPage.POP_UP_BUTTON``, and ``visibility_of_element_located`` does the
+    lookup inside the wait.  So the assertion is that each operation is
+    immediately preceded by a lookup of the locator it is logged under.
     """
     match, _ = prepare(PHRASE_LOG_OUT)
     match.run(fake_context)
@@ -1480,13 +1479,15 @@ def test_module_imports_are_closed_to_behave_the_page_and_a_wait(
 ) -> None:
     """The import list is exactly three modules, and nothing is imported twice.
 
-    ``LogOutSD.java`` needs a registration decorator, its page object and one
-    wait, and the port's import list is the closed equivalent: ``behave`` for
-    ``step``, ``app.pages`` for ``LogOutPage`` and ``app.automation`` for the
-    wait family.  The wait helper's *name* is deliberately not pinned - which
-    predicate wrapper the call site uses is a question for
-    ``app/automation/waits.py``, and this module asserts the wait's target,
-    timeout and position instead.
+    ``LogOutSD.java`` needs a registration decorator (``:16``, ``:23``,
+    ``:30``), its page object (``:15``) and one wait (``:13``), and the port's
+    import list is the closed equivalent: ``behave`` for ``step``, ``app.pages``
+    for ``LogOutPage`` and ``app.automation`` for the wait family, admitted here
+    by the ``wait`` prefix.  What the wait *does* is pinned by the behavioural
+    tests above and not by this import list: its target is
+    ``LogOutPage.POP_UP_BUTTON``, the constant itself, its timeout is the 3 of
+    ``LogOutSD.java:13``, and its position is first among the three statements
+    of ``:18`` - ``:20``.
     """
     imported = _imported_names(step_module_tree)
 
@@ -1549,11 +1550,14 @@ def test_module_imports_no_interactions_and_no_configuration(
 ) -> None:
     """No ``Keys``, no ``Actions``, and no configuration key.
 
-    ``LogOutSD.java`` uses neither ``Keys`` nor ``Actions``, so neither the
-    keyboard helper nor the action-chain helper is imported; and it reads no
-    property, so none of the six configuration accessors of AAP 0.4.1 is
-    reached from here.  Both absences are facts about the Java class rather than
-    preferences, which is why they are asserted.
+    ``LogOutSD.java:3-8`` is the class's whole import list - ``LogOutP``,
+    ``Driver``, ``Assert``, ``WebDriverWait``, ``Then`` and
+    ``ExpectedConditions`` - and it names neither ``Keys`` nor ``Actions``, so
+    neither the keyboard helper nor the action-chain helper is imported here;
+    the three bodies at ``:18-20``, ``:25-27`` and ``:32-33`` read no property
+    either, so none of the six configuration accessors of AAP 0.4.1 is reached.
+    Both absences are facts about the Java class rather than preferences, which
+    is why they are asserted.
     """
     imported = _imported_names(step_module_tree)
     forbidden_names = {"press_keys", "action_chain", "Keys", "ActionChains"}
@@ -1576,9 +1580,11 @@ def test_module_contains_no_fixed_delay(
 
     Seventeen fixed sleeps exist across five of the reference's step-definition
     classes - ``Calendar``, ``Contacts``, ``Crm``, ``EmployeeStage`` and
-    ``Notes`` - and the port reproduces each at its own call site.
-    ``LogOutSD.java`` is not one of them: it carries none, and adding one here
-    would invent timing behaviour the source does not have.
+    ``Notes.java:23`` - and the port reproduces each at its own call site
+    (AAP 0.4.1).  ``LogOutSD.java`` is not one of them: its thirty-five lines
+    carry no ``Thread.sleep`` and none of its three methods declares
+    ``throws InterruptedException``, so adding a delay here would invent timing
+    behaviour the source does not have.
     """
     imported = _imported_names(step_module_tree)
 
@@ -1598,11 +1604,13 @@ def test_module_never_creates_or_quits_a_driver(
     """Logging out of the application is not WebDriver teardown (AAP 0.3.3).
 
     The one separation this area must state explicitly and negatively, because
-    the feature under test is *about* logging out: nothing in
-    ``LogOutSD.java`` touches the session lifecycle, and
-    ``features/environment.py`` already quits the driver after every scenario,
-    so a teardown, reset or re-open in one of these bodies would be both a
-    boundary violation and a double quit.
+    the feature under test is *about* logging out: ``LogOutSD.java`` reaches the
+    session only to read the title at ``:26`` and to navigate back at ``:32``,
+    both through ``Driver.getDriver()``, and it never creates, closes or quits
+    one - ``Driver.closeDriver()`` is called from ``Hooks.java:17`` alone.
+    ``features/environment.py`` holds that lifecycle here and already quits
+    after every scenario, so a teardown, reset or re-open in one of these bodies
+    would be both a boundary violation and a double quit.
 
     Asserted three ways: no lifecycle name appears in the source, running all
     three definitions quits nothing and configures nothing, and the autouse
@@ -1636,13 +1644,11 @@ def test_module_never_creates_or_quits_a_driver(
 # src/main/resources/features/Logout.feature at the pinned revision, and moves
 # only by AAP deviation 1 - into features/, filename unchanged.
 #
-# A note on documentation, not an assertion: README.md:87 shows
-# `tags = "@LogOut"` as though that were the suite's tag filter. It is stale.
-# CukesRunner.java:18 fixes `tags = "@Smoke"`, which occurs exactly once in the
-# whole reference, at Crm.feature:1 - so the default run selects the CRM feature
-# alone and never this one. Neither @LogOut nor @UPGN-29x is @Smoke; reaching
-# this feature takes an explicit `--tags=@LogOut`. README.md is owned elsewhere
-# and is deliberately not asserted on here.
+# A note on selection, not an assertion: CukesRunner.java:18 fixes
+# `tags = "@Smoke"`, which occurs exactly once in the whole reference, at
+# Crm.feature:1 - so the default run selects the CRM feature alone and never
+# this one. Neither @LogOut nor @UPGN-29x is @Smoke, so reaching this feature
+# takes an explicit `--tags=@LogOut`.
 # ==========================================================================
 
 

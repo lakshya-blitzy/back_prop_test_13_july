@@ -1,268 +1,68 @@
 {#-
-  ---------------------------------------------------------------------------
   pretty/_macros.html - the single owner of duration, count-cell, percentage,
   status-label and timestamp formatting for the emitted report tree, and of
-  the collapse-all control its two detail pages share.
-  ---------------------------------------------------------------------------
+  the collapse-all control its two detail pages share. Macro-only: consumers
+  import it - {% import 'pretty/_macros.html' as fmt %} - and no macro reads
+  an ambient template variable, every value arriving as an argument, which is
+  what lets one call render identically from every consumer.
 
-  A macro-only template. It renders no page, is never rendered standalone and
-  is never a target of app/reporting/pretty_reports.py, which renders only the
-  six page templates in this folder - overview_features, overview_failures,
-  overview_steps, overview_tags, feature and tag. The underscore prefix is the
-  folder's convention for a helper.
+  THE MACROS, each one's rationale recorded at the macro itself:
+      duration_value(ns)                         nanoseconds as text or empty
+      duration_text(ns)                          the human duration or empty
+      duration_unavailable()                     the em-dash cell fallback
+      duration_cell(ns, extra_classes='')        the sortable statistics cell
+      duration_span(ns)                          the inline tree duration
+      duration_total_cell(ns, extra_classes='')  the footer total
+      count_cell(value, status_class='')         a cell classed when non-zero
+      total_cell(value)                          the always-classed Total cell
+      percent_text(part, whole)                  two decimals, rounded
+      status_label(status)                       the capitalised label text
+      timestamp_text(value)                      the start timestamp or empty
+      collapse_all_control()                     the expand/collapse-all pair
 
-  Consumers import it; they never include it:
+  THE DURATION RULE: milliseconds TRUNCATE and never round; S.mmm under one
+  minute, M:S.mmm with the seconds field UNPADDED at or over one minute,
+  H:MM:SS.mmm above an hour. Percentages ROUND where durations truncate, and
+  the asymmetry must not be unified. The raw nanosecond count travels on
+  data-value and only from duration_cell, because the vendored table-sorting
+  script reads it instead of the cell text - the one reason 1:40.186 sorts
+  above 24.654 rather than below it lexically.
 
-      {% import 'pretty/_macros.html' as fmt %}
+  STATUS NORMALISATION IS BORROWED: status_label folds its argument with
+  status_token from partials/status_badge.html, the one place normalisation
+  happens project-wide. An imported name is not re-exported through this
+  file's namespace, so a consumer needing the token imports it from there.
 
-  and then call fmt.duration_cell(...), fmt.count_cell(...) and the rest. The
-  plain import form is deliberate. No macro here reads an ambient template
-  variable - every value a macro needs arrives as an argument - and that
-  restraint is what lets the same call render identically from a page template,
-  from _stats_table.html and from _element_tree.html.
+  CONSTRAINTS. This file formats values and emits that one control; it holds
+  no path, filename, link or endpoint lookup, and marks nothing as ready-made
+  markup, these values neighbouring assertion text that must stay escaped.
+  Every optional input is reached defensively so the file renders under a
+  strict undefined policy, and the default filter's boolean form is never used
+  on a numeric input: it treats zero as absent, where zero is a real duration
+  and a real count.
 
-  WHY THIS FILE EXISTS
+  STATE. Nothing here emits state - none of report.js's three runtime classes
+  (report-is-collapsed, report-is-filtered-out, report-lightbox-is-open),
+  which that script alone writes and main.css alone reads, and no mutable ARIA
+  mirror either: the two collapse-all buttons deliberately carry no
+  aria-expanded, because each acts on every region in scope rather than on one
+  it could report the state of. What they carry is selection and relationship -
+  data-report-toggle-all names the action for the script and aria-controls the
+  region it acts on. The aria-hidden="true" on the duration fallback glyph and
+  on each of the two chevrons is STATIC SEMANTICS, not state: it hides
+  presentation from assistive technology permanently, nothing maintains it, and
+  main.css does not read it.
 
-  The duration rule below has two structurally different consumers: the sorted
-  duration cell in a statistics table, which carries the raw nanosecond count
-  on a sort attribute, and the inline duration span in the element tree, which
-  carries no such attribute. A report whose table disagrees with its own tree
-  is wrong in a way no reader can diagnose, so the rule lives in exactly one
-  place. This is the same discipline app/utils/paths.py applies to artifact
-  paths and app/templates/partials/status_badge.html applies to status
-  normalisation.
-
-  THE COLLAPSE-ALL CONTROL IS HERE FOR THE SAME REASON. Both detail pages -
-  feature.html and tag.html - carry the pair TWICE, once above the element
-  tree and once below it, which is measured on the clean reference pages of
-  both kinds. That is four blocks whose markup must be identical: they address
-  the same regions through the same script, so a control that drifts on one
-  page is a control that behaves differently on two pages of one report. One
-  macro, four call sites, no drift. It lives in this file rather than in
-  either page because neither page may import the other - a page template
-  extends the layout and imports helpers, and two pages importing each other
-  is a dependency this folder does not have.
-
-  ---------------------------------------------------------------------------
-  THE DURATION RULE - MEASURED, NOT DOCUMENTED
-  ---------------------------------------------------------------------------
-  Every pair below was read out of the committed report tree at the pinned
-  reference revision. The four detail pages are free of merge markers and are
-  the trustworthy source; the overview pages splice two different runs, so
-  their structure is readable but their arithmetic is not.
-
-      nanoseconds     rendered
-      0               0.000
-      1000000         0.001
-      67000000        0.067
-      85000000        0.085
-      1648750000      1.648
-      5668000000      5.668
-      9533750000      9.533
-      15841000000     15.841
-      20400000000     20.400
-      24654000000     24.654
-      62051000000     1:2.051
-      100186000000    1:40.186
-
-  Three rules follow, each with its proof in that table:
-
-    1. MILLISECONDS TRUNCATE. They never round. 1648750000 ns is 1.64875 s and
-       renders 1.648, not 1.649; 9533750000 ns is 9.53375 s and renders 9.533,
-       not 9.534. Two independent witnesses, so this is the rule and not an
-       artefact of one sample. The floor division below is what implements it,
-       and it must not be "improved" into rounding.
-
-    2. UNDER ONE MINUTE - S.mmm. Exactly three decimal places always, and no
-       padding on the seconds: 0.001, 0.067, 20.400.
-
-    3. AT OR OVER ONE MINUTE - M:S.mmm, and the seconds field is NOT padded.
-       62051000000 renders 1:2.051, not 1:02.051. This is unusual, it is
-       measured twice over, and it is the single easiest thing in this file to
-       get wrong.
-
-  Note the asymmetry with percentages, which DO round: 2 of 19 steps renders
-  10.53% in the reference footer, where truncation would give 10.52%. Duration
-  truncates, percentage rounds. Neither is a typo and they must not be
-  unified.
-
-  An hours-scale value extends the same pattern as H:MM:SS.mmm, with minutes
-  and seconds padded to two digits because a bare colon-separated triple is
-  ambiguous otherwise. That branch is DERIVED, NOT MEASURED - the reference
-  suite contains no run of an hour, so no sample pins it - and it should be
-  confirmed against a regenerated clean baseline if one is ever produced.
-
-  ---------------------------------------------------------------------------
-  WHICH FORMS CARRY THE SORT ATTRIBUTE, AND WHICH MUST NOT
-  ---------------------------------------------------------------------------
-  The raw nanosecond count travels on the data-value attribute of a statistics
-  cell, and only there. The vendored table-sorting script reads that attribute
-  instead of the cell text, which is the only reason 1:40.186 sorts above
-  24.654 rather than below it lexically. Three forms, three different answers:
-
-    duration_cell        carries data-value with the RAW nanosecond integer,
-                         never the human string.
-    duration_span        carries NO data-value. Measured: 27 inline duration
-                         spans in the reference feature page, not one with the
-                         attribute. The difference is intentional in the
-                         generator and is not tidied up here.
-    duration_total_cell  carries NO data-value, because a footer total is not
-                         a sortable row. It is a separate macro rather than a
-                         flag on duration_cell so that emitting the attribute
-                         there is not a mistake a caller can make - the string
-                         does not appear in it.
-
-  ---------------------------------------------------------------------------
-  THE MACROS
-  ---------------------------------------------------------------------------
-    duration_value(ns)
-        The canonical nanosecond count as text, or the empty string when there
-        is no usable duration. This is the coercion every other duration macro
-        shares, exported because duration_cell's sort attribute is exactly its
-        answer and because a test can then pin the coercion on its own.
-
-    duration_text(ns)
-        The human duration per the three rules above. The empty string when ns
-        is absent or none - not 0.000, which is a real and different reading.
-        A step that was skipped may legitimately carry no duration at all: in
-        the reference result set three steps are skipped and only one of them
-        has the key, so both shapes reach this macro and neither may raise.
-
-    duration_unavailable()
-        The fallback a duration CELL shows when there is no usable duration:
-        an em dash for a sighted reader and visually hidden words for a screen
-        reader. One macro, because two cells show it.
-
-    duration_cell(ns, extra_classes='')
-        The sortable statistics cell. Omits the sort attribute entirely, rather
-        than emitting an empty one, when there is no duration - and shows
-        duration_unavailable() in the cell, because an empty cell reads as a
-        rendering fault rather than as missing data.
-
-    duration_span(ns)
-        The inline duration in the element tree. NO fallback here, and that
-        asymmetry is deliberate: an empty CELL is a visible blank box in a
-        grid of numbers, which reads as a rendering fault, while an empty
-        inline span takes no room at all in the flow beside a brief that
-        already names the element and its state. A dash there would read as
-        content rather than as an absence.
-
-    duration_total_cell(ns, extra_classes='')
-        The footer total, with the same cell fallback as duration_cell.
-
-    count_cell(value, status_class='')
-        A numeric statistics cell. The status class is applied ONLY when the
-        count is non-zero: the reference emits a bare cell for a zero, fourteen
-        times over, so a coloured zero would be a visible parity break. A blank
-        status class also yields a bare cell, and none or absent counts as
-        zero.
-
-    total_cell(value)
-        The Total column, which always carries its class - including for zero,
-        where count_cell deliberately does not.
-
-    percent_text(part, whole)
-        A percentage to exactly two decimals, rounded. A zero or missing whole
-        answers 0.00% rather than failing: the reference footer carries 0.00%
-        cells, and a report is what a reader turns to when a run has gone
-        wrong, so arithmetic on an empty set must render rather than take the
-        page down.
-
-    status_label(status)
-        The capitalised label only - Passed, Failed, Skipped, Pending,
-        Undefined, and Untested, Ambiguous or Unknown for the tokens the
-        generator's own palette does not cover. It returns text and not a cell
-        because the reference puts the same label in cells whose class varies,
-        so the caller owns the cell and its class.
-
-    timestamp_text(value)
-        A scenario start timestamp, rendered exactly as the result model
-        carries it. The empty string when absent: a Background element carries
-        no start timestamp at all, along with no id and no tags.
-
-    collapse_all_control()
-        The expand-all / collapse-all pair of the two detail pages, in the
-        measured Bootstrap wrapper. The one macro here that emits a control
-        rather than formatting a value; its own note below records why the
-        two controls are buttons, what drives them and why neither carries
-        aria-expanded.
-
-  STATUS NORMALISATION IS BORROWED, NEVER REIMPLEMENTED. status_label folds its
-  argument with status_token from partials/status_badge.html, which that file
-  documents as the single place normalisation happens project-wide. A second
-  fold here would be a second answer to the same question.
-
-  One mechanical consequence, so no sibling loses time to it: a name this file
-  imports is NOT re-exported through its own module namespace. Reaching for
-  status_token through this file's import alias fails; a consumer that needs
-  the token itself imports it straight from partials/status_badge.html, which
-  is the form that file already documents.
-
-  THE BUILD DATE IS NOT FORMATTED HERE. _layout.html receives it already
-  rendered from app/reporting/pretty_reports.py, which keeps timezone and
-  locale decisions in Python where they can be tested, rather than in a
-  template.
-
-  ---------------------------------------------------------------------------
-  CONSTRAINTS THIS FILE HOLDS TO
-  ---------------------------------------------------------------------------
-    - It formats values, plus the one shared control above, and nothing else.
-      It contains no path, no file name, no link and no application endpoint
-      lookup, because these pages are written to disk and opened from a file
-      path or a build workspace where an application route cannot resolve.
-      Every name and destination the report tree links to is a value its
-      caller passes in, owned by app/reporting/pretty_reports.py. The control
-      is no exception: it navigates nowhere and carries no href at all.
-
-    - It declares no value pre-trusted and marks no output as ready-made
-      markup, leaning on the engine's own escaping of HTML templates instead.
-      The reference generator escapes its own output too - quotes, angle
-      brackets and symbol entities all appear escaped in its pages - and the
-      values that reach these macros neighbour assertion text and step
-      arguments that must stay escaped.
-
-    - Every optional input is reached defensively, so the file renders under a
-      strict undefined policy. Note that the boolean form of the default
-      filter is deliberately NOT used on a numeric input: it treats zero as
-      absent, and zero is a measured duration that renders 0.000 and a
-      measured count that renders a bare cell. Absence is tested for
-      explicitly instead.
-
-    - It emits none of the boolean state attributes app/static/css/main.css
-      reads and none of the run-time state classes app/static/js/report.js
-      sets. The stylesheet takes their absence to mean expanded, visible and
-      closed, so server output always describes a fully expanded, fully
-      visible page - which is what keeps the emitted tree legible with
-      scripting off and correct on paper. The control's
-      data-report-toggle-all is neither of those: it is a SELECTION attribute,
-      naming an action for the script to attach to, and it describes no state.
-
-    - NO INLINE JAVASCRIPT, in any form. The control carries no handler
-      attribute, no javascript: destination and no script block; expand and
-      collapse belong to app/static/js/report.js, which AAP 0.3.4 names as
-      their owner.
-
-    - It introduces no component library. The Bootstrap, jQuery, chart,
-      table-sorting, date and icon-font files inside the emitted tree are the
-      reference generator's own output, not a design system this port adopts,
-      so every class name here is one measured in that output or one the
-      vendored stylesheets already declare.
-
-  CLASS VOCABULARY - the vendored stylesheets, and nothing else. The generator
-  stylesheet declares the five status words passed, failed, skipped, pending
-  and undefined, plus duration, lead-duration, total and collapsable-control,
-  and the vendored Font Awesome the fa, fa-2x and chevron classes; the
-  vendored bootstrap.min.css declares the grid classes, btn, btn-default,
-  btn-lg and sr-only. The generator stylesheet carries no rule for untested,
-  ambiguous or unknown, so a label in one of those states renders uncoloured
-  inside the emitted tree; the port's own stylesheet covers them on the
-  surfaces it controls. No class is invented here, and none of main.css's own
-  tqa- classes is applied: tqa-toggle in particular would put a second,
-  decorative glyph on the chevron, erase the button's surface and drop the
-  control from the printed page.
+  CLASS VOCABULARY - the vendored stylesheets only: the generator stylesheet's
+  five status words with duration, lead-duration, total and
+  collapsable-control, Font Awesome's fa, fa-2x and chevron classes, and
+  Bootstrap's grid classes with btn, btn-default, btn-lg and sr-only. That
+  stylesheet has no rule for untested, ambiguous or unknown, so such a label
+  renders uncoloured in the emitted tree, and no tqa- class of main.css is
+  applied here: tqa-toggle would add a second decorative glyph to the chevron,
+  erase the button's surface and drop the control from the page.
 -#}
 
-{#- Status normalisation, borrowed from its single owner. -#}
 {%- from 'partials/status_badge.html' import status_token -%}
 
 
@@ -410,7 +210,6 @@
 {%- endmacro -%}
 
 
-{#- The capitalised status label, text only, over the borrowed fold. -#}
 {%- macro status_label(status) -%}
     {{- status_token(status)|capitalize -}}
 {%- endmacro -%}
@@ -428,51 +227,35 @@
 {#- THE COLLAPSE-ALL CONTROL of the two detail pages, defined once and called
     four times - twice from feature.html and twice from tag.html, above and
     below the element tree on each - so the four blocks cannot drift apart.
-    Both positions are measured on the clean reference pages of both kinds:
-    report-tag_4059758862.html carries the pair immediately above its
-    div#report and again below the tree before the page's trailing <br/>, and
-    the two reference feature pages carry it in the same two places.
-
-    THE WRAPPER IS THE MEASURED ONE - container-fluid > row >
-    col-md-1.col-md-offset-10 - and the two controls sit inside it in the
-    measured order, expand before collapse.
+    The wrapper is the generator's own, container-fluid > row >
+    col-md-1.col-md-offset-10, with expand before collapse inside it.
 
     THE DRIVER IS app/static/js/report.js, declaratively. Each control carries
     data-report-toggle-all, which that script answers by expanding or
     collapsing every [data-report-detail] region in the control's scope - its
     closest [data-report-root], the whole document where there is none - and
     then re-deriving aria-expanded on every [data-report-toggle] in that
-    scope, so an all-control and the per-region controls cannot disagree. AAP
-    0.3.4 gives that script sole ownership of expand and collapse; the
-    reference reached for inline jQuery only because the vendored plugin has
-    no declarative way to say show-all or hide-all, and _element_tree.html no
-    longer attaches that plugin to anything.
+    scope, so an all-control and the per-region controls cannot disagree. That
+    script owns expand and collapse alone: this file emits no handler
+    attribute, no javascript: destination and no script block.
 
-    EACH CONTROL IS A REAL BUTTON, which corrects the reference's <i> glyph
-    rather than reproducing it. The glyph was unfocusable, absent from the tab
-    order, operable by pointer alone - Enter and Space do nothing to a click
-    handler on an <i> - exposed neither the region it acted on nor any state,
-    and was a ~28px target. A <button type="button"> is focusable, is operated
-    by Enter and Space with no key handling of this file's own, announces
-    itself as a control, and is what the script requires of a hook, since it
-    suppresses no authored default action. The chevron survives inside it as a
-    decorative glyph, hidden from assistive technology, and the accessible
-    name is the button's own label. The target size comes from the vendored
-    .btn.btn-default.btn-lg box - 10px/16px padding and an 18px line-box
-    around the 28px .fa-2x glyph - and MEASURED IN A BROWSER over the emitted
-    tree it renders 65x59 CSS px, which clears the 44x44 minimum. Vendored
-    Bootstrap does that work: no dimension, no style attribute and no
-    stylesheet rule is added here.
+    EACH CONTROL IS A REAL BUTTON. A <button type="button"> is focusable, sits
+    in the tab order, is operated by Enter and Space with no key handling of
+    this file's own, and announces itself as a control; the chevron inside it
+    is decorative, hidden from assistive technology, so the accessible name is
+    the button's own label. Its target size comes from the vendored
+    .btn.btn-default.btn-lg box around the .fa-2x glyph, which clears the
+    44x44 minimum, so no dimension, no style attribute and no stylesheet rule
+    is added here.
 
     NEITHER CARRIES aria-expanded. These are action buttons, not disclosure
     controls: they own no single region whose state they could report, they
     address every region in scope, and the script matches [data-report-toggle]
     by exact attribute name, so it never synchronises a control carrying
-    data-report-toggle-all. A static value would therefore be a permanent lie.
-    aria-controls names the region they act on - div#report, which each detail
-    page emits exactly once, on its element-tree container - and the
-    disclosure controls inside that region keep their own synchronized
-    aria-expanded.
+    data-report-toggle-all - a static value would be a permanent lie.
+    aria-controls names the region they act on, div#report, which each detail
+    page emits exactly once on its element-tree container, and the disclosure
+    controls inside that region keep their own synchronised aria-expanded.
 
     IT TAKES NO ARGUMENT AND CONSUMES NO COLLAPSE ID. Both pages emit the same
     region id, both emit it once, and nothing here is numbered. -#}

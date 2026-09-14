@@ -7,7 +7,7 @@ node {
         if(isUnix()){
             sh "sh scripts/run_tests.sh"
         } else {
-            bat "powershell -ExecutionPolicy Bypass -File scripts\\run_tests.ps1"
+            bat "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts\\run_tests.ps1"
         }
     }
 

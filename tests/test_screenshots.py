@@ -15,20 +15,37 @@ Subjects
     ``normalize_*`` functions, which guard a *result-controlled* attachment on
     its way to a template) is the subject of
     ``tests/test_png_embedding_contract.py``; the two meet at
+    :func:`~app.reporting.screenshots.png_defect` and its predicate form
     :func:`~app.reporting.screenshots.is_png_bytes`, the one definition of "is
-    a PNG" in the project, which both assert against.
+    a PNG" in the project, which both assert against.  That definition is
+    *structural* -- the format's chunks, CRCs, geometry and image data, not
+    its first eight bytes -- and the contract module owns its rule set clause
+    by clause, while this module owns what the capture path does with its
+    verdict.
 
-``features/environment.py``
-    ``after_scenario``, driven at integration level: the real
-    :func:`~app.reporting.screenshots.capture_png` runs against that same
-    recorder, and only the session teardown is substituted, because quitting a
-    driver is the one thing in the function that has no observable stand-in of
-    its own.
+Both subjects port ``Hooks.java:11-18``: capture when the scenario failed
+(``:13-14``), attach the bytes with ``"image/png"`` and the scenario name
+(``:15``), then quit the driver unconditionally (``:17``).  That hook never
+ran -- ``Hooks.java:5`` imports ``@After`` from ``org.junit.After``, and the
+committed baseline carries a failed scenario with no ``embeddings`` and no
+``after`` key -- and AAP Conflict 6 registers it as a real hook rather than
+reproducing the defect (deviation 6).  So **no observed artifact pins the
+embedding shape**: AAP 0.6 derives it from the attach call, and this module,
+being that specification's only executable form, asserts the shape key by key
+rather than against a golden file.
 
-The Java anchor
----------------
-Both subjects port eight lines of ``Hooks.java`` -- ``Hooks.java:11-18`` at the
-pinned reference revision ``47e9d697e4a9a85da889f94a846fdf47af28a240``::
+What AAP 0.6 fixes and this module pins: capture on failure only, exactly once,
+before the driver is quit, with no enable flag and no passing-scenario path;
+the embedding ``{"mime_type": "image/png", "data": "<base64 PNG>", "name":
+"<scenario name>"}``, whose underscore spelling is the field name downstream
+readers expect; a capture failure logged and suppressed, the scenario's status
+unchanged (deviation 19) and the record naming the scenario that lost its
+evidence, because a screenshot is evidence about a result and never part of
+one; and a payload refused rather than repaired unless its media type is
+exactly ``image/png``, its bytes carry PNG's complete eight-byte signature and
+its size is within ``MAX_EMBEDDING_BYTES``.  Past that signature the content is
+opaque -- no sniff and no re-encode -- so undecodable image data is carried
+through byte-exactly.
 
     @After                                                       // :11
     public void teardownScenario(Scenario scenario){
@@ -68,31 +85,34 @@ What AAP §0.6 fixes, and this module pins
   and the scenario's status is unchanged.  That suppression is AAP deviation 19,
   and the reason it is safe is the reason it is mandatory: a screenshot is
   evidence about a result, never part of one.
-* The payload is **a PNG or it is not evidence**.  An attachment reaches both
-  HTML writers as result-controlled data and is inlined into a document a human
+* The payload is **a PNG or it is not evidence**.  An attachment reaches every
+  writer as result-controlled data and is inlined into a document a human
   opens, so the module owns the one strict test every consumer applies: the
-  media type is *exactly* ``image/png``, the bytes begin with PNG's complete
-  eight-byte signature, and the image is within
-  :data:`~app.reporting.screenshots.MAX_EMBEDDING_BYTES`.  A payload failing it
-  is refused rather than repaired -- ``capture_png`` logs and answers ``None``,
-  ``build_embedding`` raises ``ValueError`` -- and the refusal costs the
-  evidence and nothing else.
-* Beyond the signature the content stays **opaque**.  The source attaches
-  whatever ``getScreenshotAs(OutputType.BYTES)`` returned and its POM declares
-  no imaging dependency, so a PNG whose compressed image data no longer decodes
-  is carried through byte-exactly, with no format sniff, no dimension test, no
-  re-encode and no log record.  Both halves are asserted below, and neither
-  means anything without the other.
+  media type is *exactly* ``image/png``, and the bytes are a structurally
+  valid PNG within :data:`~app.reporting.screenshots.MAX_EMBEDDING_BYTES` --
+  the complete eight-byte signature, an ``IHDR`` first chunk, geometry inside
+  the dimension, pixel and decompressed-size budgets, a CRC-checked walk of
+  every chunk, a terminal ``IEND`` with nothing behind it, and image data that
+  inflates to exactly the size its header declares.  A payload failing any of
+  that is refused rather than repaired -- ``capture_png`` logs the defect and
+  answers ``None``, ``build_embedding`` raises ``ValueError`` carrying it --
+  and the refusal costs the evidence and nothing else.
+* The image is **never transformed**.  The source attaches whatever
+  ``getScreenshotAs(OutputType.BYTES)`` returned and its POM declares no
+  imaging dependency, so an accepted payload is carried through byte-exactly:
+  no resize, no crop, no re-encode and no repair, and no imaging distribution
+  anywhere -- the walk is byte arithmetic and the standard library's ``zlib``.
+  Validating a payload is not transforming it, and both halves are asserted
+  below: what is refused, and that what is accepted comes back identical.
 * A suppressed capture **says which scenario lost its evidence**.  Both capture
   entry points take a keyword-only ``scenario_id``; it is rendered with ``%r``
   into the suppression record and reaches nothing else -- not the embedding, not
   an artifact -- and omitting it leaves the record reading exactly as it did
-  before identities existed.  Asserted on the paths whose record is composed by
-  the module's own ``_suppression_record`` helper: the dead session, the driver
-  that cannot be photographed, and the unusable payload.  The signature and
-  size refusals build their record with ``logger.error`` directly and so carry
-  no identity segment; the refusal tests below assert the record those paths do
-  emit rather than the one they should.
+  before identities existed.  Every suppression path composes its record
+  through the module's own ``_suppression_record`` helper -- the dead session,
+  the driver that cannot be photographed, the unusable return type and the
+  invalid payload -- so all four carry the identity, and the refusal tests
+  below assert it alongside the defect.
 
 Raw bytes at the hook, base64 in the artifact
 ---------------------------------------------
@@ -121,6 +141,7 @@ import ast
 import base64
 import importlib.util
 import logging
+import zlib
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -165,20 +186,30 @@ SCREENSHOTS_LOGGER: str = "app.reporting.screenshots"
 
 #: The exported surface of the module under test, in the order it declares.
 #: Four groups, and the module is the authority for all four: the two messages
-#: and the five constants a consumer asserts against instead of restating; the
-#: four capture-and-embed helpers that port ``Hooks.java:14-15``; the three
-#: payload-level validators (:func:`is_png_bytes`,
+#: and the constants a consumer asserts against instead of restating -- the two
+#: base64 prefixes a character-scanning guard compares against, and the bounds
+#: on encoded length, decoded length, structural minimum, dimension, pixel
+#: count, decompressed size and chunk count that no consumer may re-derive; the
+#: four capture-and-embed helpers that port ``Hooks.java:14-15``; the four
+#: payload-level validators (:func:`png_defect`, :func:`is_png_bytes`,
 #: :func:`decode_png_payload`, :func:`canonical_png_payload`); and the five
 #: normalizers through which a result-controlled attachment reaches a template.
-#: The private ``_TakesScreenshot`` protocol and the private
-#: ``_suppression_record`` helper are deliberately absent -- neither has a
-#: runtime role outside this module.
+#: The private ``_TakesScreenshot`` protocol, the private ``_ImageHeader``
+#: tuple, the private helpers behind :func:`png_defect` and the private
+#: ``_suppression_record`` helper are deliberately absent -- none has a runtime
+#: role outside this module.
 EXPECTED_EXPORTS: list[str] = [
     "CAPTURE_FAILURE_MESSAGE",
     "DEFAULT_MIME_TYPE",
     "INVALID_EMBEDDING_MESSAGE",
+    "MAX_DECOMPRESSED_BYTES",
     "MAX_EMBEDDING_BASE64_CHARS",
     "MAX_EMBEDDING_BYTES",
+    "MAX_IMAGE_DIMENSION",
+    "MAX_IMAGE_PIXELS",
+    "MAX_PNG_CHUNKS",
+    "MIN_PNG_BYTES",
+    "PNG_BASE64_HEADER",
     "PNG_BASE64_SIGNATURE",
     "PNG_SIGNATURE",
     "build_embedding",
@@ -193,6 +224,7 @@ EXPECTED_EXPORTS: list[str] = [
     "normalize_embeddings",
     "normalize_feature_attachments",
     "normalize_features_attachments",
+    "png_defect",
 ]
 
 #: Every module ``app/reporting/screenshots.py`` is permitted to import.  The
@@ -200,12 +232,24 @@ EXPECTED_EXPORTS: list[str] = [
 #: edge in the AAP dependency graph is to ``app/utils``, and this module needs
 #: nothing even from there.  ``base64`` and ``binascii`` are the embedding
 #: contract's own decoder -- strict base64 decoding raises ``binascii.Error``,
-#: which has to be named to be caught -- and ``collections.abc`` supplies the
+#: which has to be named to be caught -- ``collections.abc`` supplies the
 #: ``Mapping``/``Sequence`` tests the normalizers apply to result-controlled
-#: containers.  No imaging distribution appears, and none may: the source POM
-#: declares none.
+#: containers, and ``zlib`` is what makes structural validation possible
+#: without a dependency: it supplies both the CRC-32 every PNG chunk carries
+#: and the inflater the image data has to survive.  **No imaging distribution
+#: appears, and none may** -- the source POM declares none and the plan forbids
+#: adding one -- which is precisely why the validation is written against
+#: ``zlib`` and byte arithmetic rather than against a decoder.
 EXPECTED_IMPORTS: frozenset[str] = frozenset(
-    {"__future__", "base64", "binascii", "collections.abc", "logging", "typing"}
+    {
+        "__future__",
+        "base64",
+        "binascii",
+        "collections.abc",
+        "logging",
+        "typing",
+        "zlib",
+    }
 )
 
 #: Names whose presence would mean this module reaches the filesystem.  AAP §0.6
@@ -246,17 +290,24 @@ LONG_PAYLOAD: bytes = bytes(range(256)) * 2
 #: mangled here would be mangled in every artifact at once.
 HOSTILE_SCENARIO_NAME: str = 'Le "devis" de l\'été: CRM & Sales \\ 100%'
 
-#: Names whose presence would mean the module inspects a payload *beyond* the
-#: one test the embedding contract fixes.  That contract is a signature test and
-#: a size bound and stops there: AAP §0.6 fixes a no-imaging, no-transform
-#: design -- the source attaches whatever ``getScreenshotAs(OutputType.BYTES)``
-#: returned and the source POM declares no imaging dependency -- so a format
-#: sniff, a chunk walk or a dimension test would each be an addition the parity
-#: obligation forbids.  ``startswith`` is deliberately *not* here: it is how the
-#: sanctioned signature test is spelled, and the module-surface test below
-#: asserts that it is present as well as alone.  Kept to vocabulary that can
-#: only mean further inspection, so that an unrelated edit to the module cannot
-#: trip it.
+#: Names whose presence would mean the module had acquired an **imaging
+#: dependency or a format-sniffing library**, which is what AAP §0.6's
+#: no-imaging, no-transform design forbids: the source attaches whatever
+#: ``getScreenshotAs(OutputType.BYTES)`` returned and the source POM declares
+#: no imaging dependency, so a copy through ``PIL``, a sniff through ``imghdr``
+#: or ``magic``, or a header unpacked with ``struct`` would each be a
+#: dependency the plan does not have and a decoder's opinion substituted for
+#: the format's own rules.
+#:
+#: Validating the format is *not* on this list, deliberately: the module walks
+#: the chunks, checks their CRCs and inflates the image data, all of it with
+#: ``zlib`` and byte arithmetic from the standard library, because a signature
+#: test is what let a signature-and-junk payload into a report page.  What the
+#: list still rules out is bringing in something to do that walking *for* the
+#: module, and turning an accepted payload into a different payload.
+#: ``startswith`` is deliberately absent from it: it is how the sanctioned
+#: signature test is spelled, and the module-surface test below asserts that it
+#: is present as well as spelled exactly once.
 BEYOND_SIGNATURE_NAMES: frozenset[str] = frozenset(
     {
         "Image",
@@ -276,29 +327,74 @@ BEYOND_SIGNATURE_NAMES: frozenset[str] = frozenset(
 )
 
 #: The parameter names that carry screenshot bytes through the module.  A slice
-#: or an index of one of them is how a hand-rolled header check is spelled
-#: without a library, so their absence from every subscript is what keeps the
-#: signature test the exported constant's business rather than an offset
-#: comparison someone wrote twice.
-PAYLOAD_PARAMETER_NAMES: frozenset[str] = frozenset({"png"})
+#: or an index of one of them is how a header check is spelled by hand, so
+#: *where* they are subscripted is what says whether the format is inspected in
+#: one place or several: the chunk walk in :func:`png_defect` and the header
+#: reader it calls address fields by offset, which is what a walk is, and no
+#: other function may -- a second, weaker header check beside the walk is
+#: exactly the shape the original defect had.
+PAYLOAD_PARAMETER_NAMES: frozenset[str] = frozenset({"png", "data", "body"})
 
 #: Every numeric literal the module is permitted to contain, by the top-level
-#: declaration or function that owns it.  Three owners, and each number in them
-#: is arithmetic the contract states rather than a fact about an image:
+#: declaration or function that owns it.  The point of the assertion is not
+#: that numbers are forbidden -- validating a format requires the format's own
+#: field widths -- but that **every number is owned by a named declaration
+#: that says what it is**.  A magic number written inside the walk fails this
+#: and is reported with its owner's name.
 #:
-#: * ``MAX_EMBEDDING_BYTES`` -- 32 MiB, spelled ``32 * 1024 * 1024``;
-#: * ``MAX_EMBEDDING_BASE64_CHARS`` -- the encoded length that bound implies,
-#:   base64 emitting four characters per three bytes rounded up;
-#: * ``decode_png_payload`` -- base64's four-character quantum, which an
-#:   encoded length must be a positive multiple of.
+#: Three groups, and each is a different kind of fact:
 #:
-#: Nothing on the image path may carry a number at all: no offset, no
-#: dimension, no minimum size.  A magic number written anywhere else fails the
-#: content test below and is reported with its owner's name.
+#: * **the format's own constants**, which are not this project's to choose:
+#:   chunk field widths, ``IHDR``'s thirteen-byte body, the 31-bit chunk-length
+#:   ceiling, the colour-type and bit-depth table, the compression, filter and
+#:   interlace methods, the five scanline filter types, Adam7's seven passes,
+#:   the palette entry size, the 256-entry palette ceiling, and which of a
+#:   chunk type's four characters carries the reserved bit;
+#: * **this project's budgets**, each documented where it is declared: the
+#:   encoded and decoded ceilings, the dimension, pixel and decompressed-size
+#:   limits, the chunk cap and the inflation block size;
+#: * **arithmetic the clauses need** -- base64's four-character quantum and
+#:   three-byte group, a bit count, a scanline's filter byte, and the small
+#:   offsets and indices the walk and the header reader use to address fields
+#:   whose widths the constants above already name.
 EXPECTED_NUMERIC_LITERALS: dict[str, list[int | float]] = {
-    "MAX_EMBEDDING_BYTES": [32, 1024],
-    "MAX_EMBEDDING_BASE64_CHARS": [2, 3, 4],
-    "decode_png_payload": [0, 4],
+    "MAX_DECOMPRESSED_BYTES": [256, 1024],
+    "MAX_EMBEDDING_BASE64_CHARS": [16, 1024],
+    "MAX_IMAGE_DIMENSION": [16384],
+    "MAX_IMAGE_PIXELS": [40000000],
+    "MAX_PNG_CHUNKS": [65536],
+    "_ADAM7_PASSES": [0, 1, 2, 4, 8],
+    "_BASE64_QUANTUM_BYTES": [3],
+    "_BASE64_QUANTUM_CHARS": [4],
+    "_BITS_PER_BYTE": [8],
+    "_BIT_DEPTHS_BY_COLOUR_TYPE": [0, 1, 2, 3, 4, 6, 8, 16],
+    "_CHANNELS_BY_COLOUR_TYPE": [0, 1, 2, 3, 4, 6],
+    "_CHUNK_FIELD_BYTES": [4],
+    "_CHUNK_OVERHEAD_BYTES": [3],
+    "_COLOUR_TYPE_INDEXED": [3],
+    "_COMPRESSION_METHOD_DEFLATE": [0],
+    "_FILTER_BYTE_PER_ROW": [1],
+    "_FILTER_METHOD_ADAPTIVE": [0],
+    "_FIRST_CHUNK_POSITION": [1],
+    "_GREYSCALE_COLOUR_TYPES": [0, 4],
+    "_IHDR_BODY_BYTES": [13],
+    "_INFLATE_BLOCK_BYTES": [1024],
+    "_INTERLACE_ADAM7": [1],
+    "_INTERLACE_METHODS": [0, 1],
+    "_MAX_CHUNK_BODY_BYTES": [2147483647],
+    "_MAX_PALETTE_ENTRIES": [256],
+    "_MIN_IMAGE_DIMENSION": [1],
+    "_PLTE_ENTRY_BYTES": [3],
+    "_RESERVED_CHARACTER_INDEX": [2],
+    "_SCANLINE_FILTER_TYPES": [0, 1, 2, 3, 4],
+    "_ScanlineWalker": [0, 1],
+    "_chunk_type_defect": [0],
+    "_header_defect": [2],
+    "_image_data_defect": [0],
+    "_palette_defect": [1],
+    "_scanline_layout": [0, 1],
+    "_scanline_length": [1],
+    "png_defect": [0, 1, 2],
 }
 
 #: The eight-byte PNG signature, spelled here independently of the module under
@@ -337,12 +433,88 @@ TRUNCATED_PNG: bytes = PNG_SIGNATURE[:4]
 CORRUPTED_SIGNATURE_PNG: bytes = flip_byte(DEFAULT_SCREENSHOT_PNG, 3)
 
 #: The 1x1 PNG with a byte inverted inside its compressed image data: the
-#: signature still identifies it as a PNG, the pixels no longer decode.  The one
-#: payload in this corpus that must be **carried**, and the case that catches a
-#: *transforming* or *validating* change -- a re-encode, a copy through an
-#: imaging library or a CRC check would each repair or reject it, and
-#: byte-exactness would fail.
-CORRUPTED_BODY_PNG: bytes = flip_byte(DEFAULT_SCREENSHOT_PNG, len(DEFAULT_SCREENSHOT_PNG) // 2)
+#: signature still identifies it as a PNG, and the image no longer decodes.
+#: The case that tells a signature test and a structural validator apart at
+#: the *producer*, because a session dying mid-transfer produces exactly this
+#: shape -- and embedding it would put a broken image in the report under the
+#: media type ``image/png``, which is worse than reporting no evidence at all.
+#:
+#: The inverted byte is located rather than guessed: it sits inside the
+#: compressed stream of the ``IDAT`` chunk, four bytes past the chunk's type,
+#: so the corruption is in the *image* and the chunk's CRC is what reports it.
+#: A byte chosen by halving the file lands in a length field instead, and the
+#: case would then assert a different clause than the one it is named for.
+IDAT_STREAM_OFFSET: int = DEFAULT_SCREENSHOT_PNG.index(b"IDAT") + 8
+
+CORRUPTED_BODY_PNG: bytes = flip_byte(DEFAULT_SCREENSHOT_PNG, IDAT_STREAM_OFFSET)
+
+
+def _png_chunk(kind: bytes, body: bytes) -> bytes:
+    """One PNG chunk: length, type, body, and the CRC-32 of type and body."""
+    return (
+        len(body).to_bytes(4, "big")
+        + kind
+        + body
+        + zlib.crc32(kind + body).to_bytes(4, "big")
+    )
+
+
+def _reimaged(png: bytes, filter_type: int) -> bytes:
+    """Return *png* with its single row re-stated under *filter_type*.
+
+    The image data is inflated, its leading filter byte replaced, and the
+    stream recompressed into a correctly checksummed ``IDAT`` -- so the result
+    differs from the input in **one byte of the picture** and in nothing else.
+    Every other clause still holds: the signature, the header, the geometry,
+    the chunk CRCs, the compressed stream's own checksum, the decompressed
+    size and the terminal ``IEND``.
+
+    :param png: A valid single-row PNG.
+    :param filter_type: The filter type the row will declare.
+    :returns: The rebuilt payload.
+    """
+    at = png.index(b"IDAT")
+    length = int.from_bytes(png[at - 4 : at], "big")
+    raw = zlib.decompress(png[at + 4 : at + 4 + length])
+    return (
+        png[: at - 4]
+        + _png_chunk(b"IDAT", zlib.compress(bytes((filter_type,)) + raw[1:], 9))
+        + png[at + 8 + length :]
+    )
+
+
+#: The 1x1 PNG whose row declares filter type 5, which the specification does
+#: not define -- it names five, 0 to 4.  Everything else about the payload is
+#: correct, including the size the image data inflates to, so it is refused by
+#: the row-framing clause alone.
+#:
+#: This is the payload that separates a *complete* structural validator from
+#: one that walks the chunks and counts the inflated bytes: the independent
+#: re-verification of this work found the counting version accepted it, and
+#: through it ``decode_png_payload``, ``normalize_embedding`` and the report
+#: lightbox accepted it too.  It is refused at the producer here, and dropped
+#: by every writer in ``tests/test_png_embedding_contract.py``.
+MALFORMED_SCANLINE_PNG: bytes = _reimaged(DEFAULT_SCREENSHOT_PNG, 5)
+
+#: PNG's eight signature bytes and nothing else: no ``IHDR``, no image data,
+#: no ``IEND``.  Canonically encoded and unmistakably PNG-signed, so a
+#: signature test calls it an image; it is the payload the security review
+#: named, and it is refused.
+SIGNATURE_ONLY_PNG: bytes = PNG_SIGNATURE
+
+#: The signature with arbitrary bytes behind it, long enough to clear the
+#: structural length floor.  The same defect as above with the cheap length
+#: test satisfied, so only a structural walk refuses it.
+SIGNATURE_AND_FILLER_PNG: bytes = PNG_SIGNATURE + b"\x00" * 64
+
+#: The 1x1 PNG with its terminating ``IEND`` chunk cut off: the shape a
+#: truncated transfer takes, and one whose remaining bytes are all valid.
+TRUNCATED_BODY_PNG: bytes = DEFAULT_SCREENSHOT_PNG[:-12]
+
+#: A complete, valid 1x1 PNG with a second document behind its ``IEND``: the
+#: polyglot shape, which every clause except "and nothing follows IEND"
+#: accepts.
+POLYGLOT_PNG: bytes = DEFAULT_SCREENSHOT_PNG + b"<script>alert(1)</script>"
 
 #: Bytes that could not be an image in any format -- a short ASCII payload, the
 #: shape an HTTP error page substituted for a screenshot response would have.
@@ -366,28 +538,58 @@ SINGLE_BYTE: bytes = b"\x00"
 #: that prefix admits a byte string that is not a PNG at all.
 SIX_BYTE_PREFIX_PAYLOAD: bytes = PNG_SIGNATURE[:6] + b"\x00\x00" + b"\x00" * 16
 
-#: Every payload the module must **refuse**, one reported case each: none of
-#: them begins with PNG's eight-byte signature, so none of them may reach a
-#: ``data:`` URI in a document a human opens.  Shared by the four refusal tests
-#: below so that a payload added here is immediately driven through the unit
-#: helpers, the composed entry point and the hook.
+#: Every payload the module must **refuse**, paired with the fragment its
+#: suppression record has to carry, so that each case is asserted to be
+#: refused *for its own reason* rather than merely refused.
+#:
+#: The first six are not PNG-signed at all.  The five after them are, and they
+#: are the interesting half: each one passed the signature test that used to be
+#: the whole of this contract, and each is a concrete thing that test admitted
+#: -- a signature with nothing behind it, a signature with junk behind it, a
+#: capture truncated before its terminator, an image whose compressed data no
+#: longer decodes, and a valid image carrying a second document behind its
+#: ``IEND``.  None of them may reach a ``data:`` URI in a document a human
+#: opens.  Shared by the four refusal tests below so that a payload added here
+#: is immediately driven through the unit helpers, the composed entry point and
+#: the hook.
 REFUSED_PAYLOADS: list[Any] = [
-    pytest.param(TRUNCATED_PNG, id="truncated-png-header"),
-    pytest.param(CORRUPTED_SIGNATURE_PNG, id="corrupted-png-signature"),
-    pytest.param(SIX_BYTE_PREFIX_PAYLOAD, id="six-byte-prefix-only"),
-    pytest.param(NON_IMAGE_TEXT, id="non-image-text"),
-    pytest.param(JPEG_HEADER, id="jpeg-header"),
-    pytest.param(SINGLE_BYTE, id="single-byte"),
+    pytest.param(TRUNCATED_PNG, "is 4 bytes", id="truncated-png-header"),
+    pytest.param(
+        CORRUPTED_SIGNATURE_PNG,
+        "does not begin with PNG's eight-byte signature",
+        id="corrupted-png-signature",
+    ),
+    pytest.param(SIX_BYTE_PREFIX_PAYLOAD, "is 24 bytes", id="six-byte-prefix-only"),
+    pytest.param(NON_IMAGE_TEXT, "is 29 bytes", id="non-image-text"),
+    pytest.param(JPEG_HEADER, "is 4 bytes", id="jpeg-header"),
+    pytest.param(SINGLE_BYTE, "is 1 bytes", id="single-byte"),
+    pytest.param(SIGNATURE_ONLY_PNG, "is 8 bytes", id="signature-only"),
+    pytest.param(
+        SIGNATURE_AND_FILLER_PNG,
+        "chunk type is not four ASCII letters",
+        id="signature-and-filler",
+    ),
+    pytest.param(TRUNCATED_BODY_PNG, "no IEND chunk", id="truncated-png-body"),
+    pytest.param(CORRUPTED_BODY_PNG, "CRC does not match", id="corrupted-png-body"),
+    pytest.param(POLYGLOT_PNG, "bytes after its IEND chunk", id="polyglot-png"),
+    pytest.param(
+        MALFORMED_SCANLINE_PNG,
+        "filter type 5, which the format does not define",
+        id="undefined-scanline-filter-type",
+    ),
 ]
 
-#: Every payload the module must **carry byte-exactly**: both are PNG-signed, so
-#: both satisfy the whole of the contract, and one of them is not a decodable
-#: image at all.  Driven through the same four levels as the refused corpus,
-#: because "refuses what is not PNG" and "judges nothing else" are one contract
-#: and neither half means anything alone.
+#: Every payload the module must **carry byte-exactly**: a genuinely valid PNG,
+#: carried through unchanged and unlogged.  Driven through the same four levels
+#: as the refused corpus, because "refuses what is not a PNG" and "changes
+#: nothing about one that is" are one contract and neither half means anything
+#: alone.  The breadth of *valid* shapes -- every colour type, every bit depth,
+#: both interlace methods, multi-chunk and stored images, real encoders' files
+#: -- is covered by ``tests/test_png_embedding_contract.py``, which owns the
+#: validator's rule set; what this file owns is the capture path's behaviour
+#: around a payload it accepts.
 CARRIED_PAYLOADS: list[Any] = [
     pytest.param(DEFAULT_SCREENSHOT_PNG, id="pristine-png"),
-    pytest.param(CORRUPTED_BODY_PNG, id="corrupted-png-body"),
 ]
 
 #: A diagnostic scenario identity of the shape ``features/environment.py``
@@ -1119,22 +1321,25 @@ def test_build_embedding_rejects_every_media_type_but_png(mime_type: Any) -> Non
 @pytest.mark.parametrize(
     "png",
     [
-        pytest.param(PNG_SIGNATURE, id="signature-only"),
-        pytest.param(PNG_SIGNATURE + b"\x00" * 64, id="signature-and-filler"),
+        pytest.param(SIGNATURE_ONLY_PNG, id="signature-only"),
+        pytest.param(SIGNATURE_AND_FILLER_PNG, id="signature-and-filler"),
     ],
 )
-def test_build_embedding_accepts_any_png_signed_payload(png: bytes) -> None:
-    """The payload test is the signature and the size bound, and stops there.
+def test_build_embedding_refuses_a_payload_that_is_only_png_signed(png: bytes) -> None:
+    """A PNG signature is not a PNG, and the signature no longer vouches for one.
 
-    A file that is *only* the signature is not a decodable image, and it is
-    accepted: the contract is about the signature and the encoding, and no
-    imaging dependency exists in this project to decode with.  A rejection here
-    would mean the module had grown a test it is forbidden to perform.
+    Both payloads here carry PNG's complete eight-byte signature and neither is
+    an image: the first has no ``IHDR``, no image data and no ``IEND``, and the
+    second has arbitrary bytes where its first chunk header should be.  A
+    signature test accepts both -- ``iVBORw0KGgo=`` is the encoded form of the
+    first, and it became an ``image/png`` ``data:`` URI in a document a human
+    opens.  The validator refuses both, and does so without any imaging
+    dependency: the walk is byte arithmetic and the standard library's
+    ``zlib``, so the plan's no-imaging constraint is intact and what it forbids
+    -- transforming the image -- is still not done anywhere.
     """
-    embedding = build_embedding(png, "UPGN-287 CRM")
-
-    assert embedding["data"] == base64.b64encode(png).decode("ascii")
-    assert base64.b64decode(embedding["data"]) == png
+    with pytest.raises(ValueError, match="must be a valid PNG"):
+        build_embedding(png, "UPGN-287 CRM")
 
 
 def test_build_embedding_data_is_the_unchunked_base64_of_the_input() -> None:
@@ -1248,26 +1453,32 @@ def test_capture_failure_embedding_suppresses_an_encoding_failure(
 #
 # Two halves of one contract, and neither means anything without the other.
 #
-# **Refused.**  An attachment is result-controlled data that both HTML writers
-# inline into a document a human opens, so ``app/reporting/screenshots.py``
+# **Refused.**  An attachment is result-controlled data that every writer
+# inlines into a document a human opens, so ``app/reporting/screenshots.py``
 # owns the single strict test every consumer applies: the media type is exactly
-# ``image/png``, the bytes begin with PNG's complete eight-byte signature, and
-# the image is within ``MAX_EMBEDDING_BYTES``.  A payload failing it is
-# discarded and logged -- never repaired, never re-encoded and never rendered.
-# A six-byte test admits ``iVBORw0KAAAA``, which is base64 of a byte string
-# that is not a PNG, so the whole signature is the test -- and
-# ``SIX_BYTE_PREFIX_PAYLOAD`` is the corpus case that tells the two tests
-# apart, since it differs from an image in bytes seven and eight alone.
+# ``image/png``, and the bytes are a structurally valid PNG within
+# ``MAX_EMBEDDING_BYTES`` -- signature, ``IHDR``, sane geometry, CRC-checked
+# chunks, a terminal ``IEND`` with nothing behind it, and image data that
+# inflates to the size its own header declares.  A payload failing it is
+# discarded and logged with the defect -- never repaired, never re-encoded and
+# never rendered.
 #
-# **Carried.**  Beyond the signature and the bound, nothing is judged.
+# A six-byte test admits ``iVBORw0KAAAA``, base64 of a byte string that is not
+# a PNG; an eight-byte test admits ``iVBORw0KGgo=``, the signature alone, and
+# also every corrupted, truncated and polyglot payload behind a valid
+# signature.  ``SIX_BYTE_PREFIX_PAYLOAD`` is the corpus case that tells the
+# first two apart, and ``SIGNATURE_ONLY_PNG``, ``SIGNATURE_AND_FILLER_PNG``,
+# ``TRUNCATED_BODY_PNG``, ``CORRUPTED_BODY_PNG`` and ``POLYGLOT_PNG`` are the
+# cases that tell an eight-byte test from the structural one.
+#
+# **Carried.**  A payload that *is* a valid PNG is carried byte-exactly.
 # ``Hooks.java:14-15`` attaches whatever ``getScreenshotAs(OutputType.BYTES)``
 # returned, the source POM declares no imaging dependency, and the module
 # states the consequence -- "The image is not transformed.  No resize, crop,
-# annotation or format conversion".  So a PNG-signed payload whose compressed
-# image data no longer decodes, and a payload that is *only* the signature, are
-# both carried through byte-exactly and unlogged: the bytes are evidence, and a
-# module that repaired or re-encoded them would replace what the browser
-# actually produced with its own opinion of it.
+# annotation or format conversion".  Validating a payload is not transforming
+# it: the accepted bytes come back identical, which the carried half asserts,
+# and no imaging distribution is involved in establishing that they are
+# acceptable.
 #
 # Why the refusal costs nothing but the evidence: a screenshot is evidence
 # about a result, never part of one.  Every refusal below leaves the scenario's
@@ -1281,13 +1492,17 @@ def test_the_payload_corpus_divides_exactly_as_the_contract_does() -> None:
 
     Every refusal test below is only decisive if its payload really is one the
     contract must reject, and every passthrough test is only decisive if its
-    payload really is PNG-signed.  The division is therefore measured here,
-    against this module's own spelling of the signature, and the deliberate
-    exception is stated with it: the body-corrupted PNG keeps a valid
-    signature, so it belongs with the carried payloads and is what catches a
-    re-encoding, repairing or CRC-checking change.
+    payload really is a valid PNG.  The division is measured here, against
+    this module's own spelling of the signature -- and the part that matters
+    most is the *second* group: six payloads carrying PNG's complete
+    eight-byte signature and refused anyway, which is the whole difference
+    between the signature test this contract used to be and the structural one
+    it is.  The last of the six is the one that also separates a structural
+    walk from a *complete* one: it satisfies every clause about the file and
+    fails only on what the picture says.
     """
     assert DEFAULT_SCREENSHOT_PNG.startswith(PNG_SIGNATURE)
+    assert screenshots.is_png_bytes(DEFAULT_SCREENSHOT_PNG)
 
     signatureless = [
         TRUNCATED_PNG,
@@ -1315,10 +1530,43 @@ def test_the_payload_corpus_divides_exactly_as_the_contract_does() -> None:
     assert len(CORRUPTED_SIGNATURE_PNG) == len(DEFAULT_SCREENSHOT_PNG)
     assert CORRUPTED_SIGNATURE_PNG != DEFAULT_SCREENSHOT_PNG
 
-    assert CORRUPTED_BODY_PNG.startswith(PNG_SIGNATURE)
+    # Signed, and refused: each of these is what a signature test called an
+    # image.
+    signed_but_not_images = [
+        SIGNATURE_ONLY_PNG,
+        SIGNATURE_AND_FILLER_PNG,
+        TRUNCATED_BODY_PNG,
+        CORRUPTED_BODY_PNG,
+        POLYGLOT_PNG,
+        MALFORMED_SCANLINE_PNG,
+    ]
+    for payload in signed_but_not_images:
+        assert payload.startswith(PNG_SIGNATURE), payload[:16]
+        assert not screenshots.is_png_bytes(payload), payload[:16]
+
+    # Each one differs from the valid image in exactly the way its name says.
     assert len(CORRUPTED_BODY_PNG) == len(DEFAULT_SCREENSHOT_PNG)
     assert CORRUPTED_BODY_PNG != DEFAULT_SCREENSHOT_PNG
-    assert screenshots.is_png_bytes(CORRUPTED_BODY_PNG)
+    assert TRUNCATED_BODY_PNG == DEFAULT_SCREENSHOT_PNG[: len(TRUNCATED_BODY_PNG)]
+    assert POLYGLOT_PNG.startswith(DEFAULT_SCREENSHOT_PNG)
+    assert len(POLYGLOT_PNG) > len(DEFAULT_SCREENSHOT_PNG)
+
+    # The mis-filtered image shares the valid one's signature, header and
+    # terminator byte for byte: only its image data differs, and that data
+    # inflates to the same size.  So no clause about the *file* can refuse
+    # it -- which is what makes it the case for the clause about the rows.
+    header_bytes = DEFAULT_SCREENSHOT_PNG.index(b"IDAT") - 4
+    assert MALFORMED_SCANLINE_PNG[:header_bytes] == DEFAULT_SCREENSHOT_PNG[:header_bytes]
+    assert MALFORMED_SCANLINE_PNG[-12:] == DEFAULT_SCREENSHOT_PNG[-12:]
+    assert MALFORMED_SCANLINE_PNG != DEFAULT_SCREENSHOT_PNG
+    assert "filter type 5" in screenshots.png_defect(MALFORMED_SCANLINE_PNG)
+    # And the same rebuild under a filter type the format *does* define is
+    # accepted, so the refusal is about the value and not about the rebuild.
+    assert screenshots.is_png_bytes(_reimaged(DEFAULT_SCREENSHOT_PNG, 4))
+
+    # And the corpus covers both halves, so neither test family is empty.
+    assert len(REFUSED_PAYLOADS) == len(signatureless) + len(signed_but_not_images)
+    assert len(CARRIED_PAYLOADS) >= 1
 
     assert len(SINGLE_BYTE) == 1
 
@@ -1339,21 +1587,26 @@ def test_the_exported_signature_is_pngs_own_eight_bytes() -> None:
     assert screenshots.PNG_SIGNATURE == b"\x89" + b"PNG" + b"\r\n" + b"\x1a" + b"\n"
 
 
-@pytest.mark.parametrize("payload", REFUSED_PAYLOADS)
+@pytest.mark.parametrize(("payload", "reason"), REFUSED_PAYLOADS)
 def test_capture_png_refuses_a_payload_that_is_not_png(
     stub_driver: StubDriver,
     caplog: pytest.LogCaptureFixture,
     payload: bytes,
+    reason: str,
 ) -> None:
-    """A payload without PNG's signature is refused, logged once, and costs
+    """A payload that is not a valid PNG is refused, logged once, and costs
     nothing else.
 
     The whole gate in one assertion set: ``None`` rather than the bytes, from
     exactly one capture, with exactly one ERROR record that carries
-    :data:`CAPTURE_FAILURE_MESSAGE` and the payload's length -- and **not** the
-    payload.  Embedding these bytes under the media type ``image/png`` is the
-    one thing the contract forbids, because both HTML writers turn the value
-    into a ``data:`` URI in a document a human opens.
+    :data:`CAPTURE_FAILURE_MESSAGE` and **the defect it found** -- and never
+    the payload.  The reason is asserted per case rather than generically,
+    because "refused" alone would pass even if every payload were refused for
+    the wrong reason, and the five PNG-signed members of the corpus exist
+    precisely to be refused for reasons a signature test cannot state.
+    Embedding these bytes under the media type ``image/png`` is the one thing
+    the contract forbids, because every writer turns the value into a
+    ``data:`` URI in a document a human opens.
     """
     stub_driver.screenshot_png = payload
 
@@ -1369,8 +1622,7 @@ def test_capture_png_refuses_a_payload_that_is_not_png(
     assert records[0].levelno == logging.ERROR
 
     message = records[0].getMessage()
-    assert str(len(payload)) in message
-    assert "signature" in message
+    assert reason in message
     # A suppression record identifies the failure, never the picture: neither
     # the bytes nor their encoding may appear in an operator's log.
     assert base64.b64encode(payload).decode("ascii") not in message
@@ -1378,19 +1630,33 @@ def test_capture_png_refuses_a_payload_that_is_not_png(
 
 
 @pytest.mark.parametrize("payload", CARRIED_PAYLOADS)
-def test_capture_png_carries_a_png_signed_payload_through_byte_exactly(
+def test_capture_png_carries_a_valid_payload_through_byte_exactly(
     stub_driver: StubDriver,
     caplog: pytest.LogCaptureFixture,
     payload: bytes,
 ) -> None:
-    """A PNG-signed payload comes back unchanged and unlogged, whatever its
-    pixels say.
+    """A valid PNG comes back unchanged and unlogged.
 
-    The no-transform half of the contract: the returned object is ``bytes``,
-    equal to what the driver handed over, obtained from exactly one capture,
-    and the screenshots logger said nothing at WARNING or above.  A format
-    sniff, a CRC check or a dimension test would each turn the body-corrupted
-    case into ``None`` plus a record; a re-encode would break the equality.
+    The no-transform half of the contract, and it survived the validator
+    getting stricter: validating a payload is not transforming it.  The
+    returned object is ``bytes``, **identical** to what the driver handed
+    over, obtained from exactly one capture, and the screenshots logger said
+    nothing at WARNING or above.  A re-encode, a copy through an imaging
+    library or any repair would break the equality -- which is what makes this
+    the assertion that keeps the new validation from turning into
+    transformation.
+
+    It is also the assertion that settles a question the security review
+    raised and this contract answers in the negative: a **canonical
+    re-encode**, the usual way to neutralise a hostile image, is not performed
+    here.  It would need an imaging distribution the plan's pinned dependency
+    set does not contain, and it would replace the bytes the scenario actually
+    produced with bytes a library produced -- so the plan's no-transform
+    constraint and its no-new-dependency constraint each forbid it on their
+    own.  This module's answer is rejection instead of repair: the structural
+    validation is exhaustive precisely because nothing downstream sanitises
+    what it lets through, and every payload it refuses is discarded rather
+    than rewritten.
     """
     stub_driver.screenshot_png = payload
 
@@ -1403,10 +1669,11 @@ def test_capture_png_carries_a_png_signed_payload_through_byte_exactly(
     assert screenshot_warning_records(caplog) == []
 
 
-@pytest.mark.parametrize("payload", REFUSED_PAYLOADS)
+@pytest.mark.parametrize(("payload", "reason"), REFUSED_PAYLOADS)
 def test_build_embedding_refuses_a_payload_that_is_not_png(
     caplog: pytest.LogCaptureFixture,
     payload: bytes,
+    reason: str,
 ) -> None:
     """``build_embedding`` raises rather than encoding bytes that are not a PNG.
 
@@ -1419,14 +1686,17 @@ def test_build_embedding_refuses_a_payload_that_is_not_png(
     since the exception is the report.
     """
     with caplog.at_level(logging.DEBUG, logger=SCREENSHOTS_LOGGER):
-        with pytest.raises(ValueError, match="signature"):
+        with pytest.raises(ValueError, match="must be a valid PNG") as raised:
             build_embedding(payload, "UPGN-287 CRM")
 
+    # The exception is the report, so it carries the defect the validator
+    # found rather than a generic refusal.
+    assert reason in str(raised.value)
     assert screenshot_warning_records(caplog) == []
 
 
 @pytest.mark.parametrize("payload", CARRIED_PAYLOADS)
-def test_build_embedding_encodes_a_png_signed_payload_without_judging_its_pixels(
+def test_build_embedding_encodes_a_valid_payload_without_transforming_it(
     caplog: pytest.LogCaptureFixture,
     payload: bytes,
 ) -> None:
@@ -1450,11 +1720,12 @@ def test_build_embedding_encodes_a_png_signed_payload_without_judging_its_pixels
     assert screenshot_warning_records(caplog) == []
 
 
-@pytest.mark.parametrize("payload", REFUSED_PAYLOADS)
+@pytest.mark.parametrize(("payload", "reason"), REFUSED_PAYLOADS)
 def test_capture_failure_embedding_refuses_a_payload_that_is_not_png(
     stub_driver: StubDriver,
     caplog: pytest.LogCaptureFixture,
     payload: bytes,
+    reason: str,
 ) -> None:
     """Capture and attach, composed, emit no embedding for a payload that is not
     a PNG.
@@ -1471,11 +1742,13 @@ def test_capture_failure_embedding_refuses_a_payload_that_is_not_png(
 
     assert embedding is None
     assert operation_log(stub_driver) == ["get_screenshot_as_png"]
-    assert len(capture_failure_records(caplog)) == 1
+    records = capture_failure_records(caplog)
+    assert len(records) == 1
+    assert reason in records[0].getMessage()
 
 
 @pytest.mark.parametrize("payload", CARRIED_PAYLOADS)
-def test_capture_failure_embedding_carries_a_png_signed_payload_end_to_end(
+def test_capture_failure_embedding_carries_a_valid_payload_end_to_end(
     stub_driver: StubDriver,
     caplog: pytest.LogCaptureFixture,
     payload: bytes,
@@ -1503,7 +1776,7 @@ def test_capture_failure_embedding_carries_a_png_signed_payload_end_to_end(
     assert screenshot_warning_records(caplog) == []
 
 
-@pytest.mark.parametrize("payload", REFUSED_PAYLOADS)
+@pytest.mark.parametrize(("payload", "reason"), REFUSED_PAYLOADS)
 def test_after_scenario_attaches_nothing_for_a_payload_that_is_not_png(
     hook_module: ModuleType,
     fake_context: FakeContext,
@@ -1511,6 +1784,7 @@ def test_after_scenario_attaches_nothing_for_a_payload_that_is_not_png(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
     payload: bytes,
+    reason: str,
 ) -> None:
     """The hook loses the evidence and nothing else.
 
@@ -1522,15 +1796,13 @@ def test_after_scenario_attaches_nothing_for_a_payload_that_is_not_png(
     scenario's status is untouched**: both recorders keep every attempted
     write, so that last point is an assertion rather than an assumption.
 
-    The record's *identity segment* is asserted at unit level instead, by
-    :func:`test_a_suppressed_capture_names_the_scenario_it_belongs_to`.  The
-    hook does supply the identity -- ``capture_png(context.driver,
-    scenario_id=_scenario_identity(scenario))`` -- but the signature refusal in
-    ``app/reporting/screenshots.py`` composes its record with ``logger.error``
-    directly rather than through the module's ``_suppression_record`` helper, so
-    on this one path the identity reaches nothing.  What is asserted here is
-    therefore the record that exists: its level, its logger and the refusal it
-    reports.
+    The record carries the scenario's identity as well as the defect, because
+    the hook supplies it -- ``capture_png(context.driver,
+    scenario_id=_scenario_identity(scenario))`` -- and the refusal path
+    composes its record through the module's ``_suppression_record`` helper
+    like every other suppression.  In a shard that ran many scenarios that is
+    what makes missing evidence attributable to the scenario that lost it, so
+    it is asserted here rather than only at unit level.
     """
     monkeypatch.setattr(hook_module, "quit_driver", quit_driver_recorder(stub_driver))
     stub_driver.screenshot_png = payload
@@ -1545,7 +1817,9 @@ def test_after_scenario_attaches_nothing_for_a_payload_that_is_not_png(
     assert len(records) == 1
     assert records[0].name == SCREENSHOTS_LOGGER
     assert records[0].levelno == logging.ERROR
-    assert "signature" in records[0].getMessage()
+    message = records[0].getMessage()
+    assert reason in message
+    assert "UPGN-287 Create a new opportunity" in message
 
     assert operation_log(stub_driver) == ["get_screenshot_as_png", "quit"]
     assert stub_driver.quit_count == 1
@@ -1557,7 +1831,7 @@ def test_after_scenario_attaches_nothing_for_a_payload_that_is_not_png(
 
 
 @pytest.mark.parametrize("payload", CARRIED_PAYLOADS)
-def test_after_scenario_attaches_a_png_signed_payload_and_completes_the_lifecycle(
+def test_after_scenario_attaches_a_valid_payload_and_completes_the_lifecycle(
     hook_module: ModuleType,
     fake_context: FakeContext,
     stub_driver: StubDriver,
@@ -1681,31 +1955,43 @@ def test_an_omitted_scenario_identity_leaves_the_record_as_it_was(
     assert "None" not in records[0].getMessage()
 
 
-def test_the_signature_test_is_the_only_content_test(
+def test_the_format_is_validated_without_a_library_and_in_one_place(
     screenshots_source: ast.Module,
 ) -> None:
-    """The module's code can perform the contract's test and nothing further.
+    """The module validates the format itself, and nothing else does it for it.
 
-    Five facts about the syntax tree, each narrow and each necessary for a
-    *further* content check to exist:
+    Five facts about the syntax tree.  The first three are what keep the
+    validation honest; the last two are what keep it in one place, which is
+    the property the project actually depends on -- three surfaces consume this
+    module's verdict, and a second definition of "is a PNG" anywhere would be
+    a disagreement waiting to happen.
 
-    * **One bytes literal, and it is the signature.**  A magic number has to be
-      written down somewhere; this module writes exactly one, and it is PNG's
-      own eight bytes bound to the exported constant.  A JPEG marker, an IEND
-      chunk or any second magic number would appear here.
-    * **Numeric literals only where the contract needs arithmetic** -- see
-      :data:`EXPECTED_NUMERIC_LITERALS`.  No number appears anywhere on the
-      image path, which rules out the index-and-compare spelling
-      (``png[0] == 0x89``) and every dimension or minimum-size test.
-    * **No vocabulary beyond the signature test** -- see
+    * **Bytes literals are the format's own vocabulary and nothing else.**
+      PNG's eight-byte signature, the four critical chunk types the walk
+      reasons about, the ASCII letter sets a chunk type and its reserved
+      character are drawn from, the eleven uncompressed ancillary chunk types
+      an attachment may carry, and the empty string the inflater is drained
+      with.  A JPEG marker, a second signature or a payload of any kind would
+      appear here -- and so would a chunk type nothing in the module's prose
+      explains, which is what keeps the ancillary allowlist reviewable: it is
+      asserted here as a list, in order, rather than counted.
+    * **Numeric literals only where a named declaration owns them** -- see
+      :data:`EXPECTED_NUMERIC_LITERALS`.  The format has field widths and this
+      project has budgets; both are named constants, so the walk reads as the
+      specification does and a magic number in it fails here.
+    * **No imaging distribution and no format-sniffing library** -- see
       :data:`BEYOND_SIGNATURE_NAMES`.  The import set is asserted whole
-      elsewhere, so an imaging library cannot arrive either.
-    * **The signature test is delegated, once.**  ``startswith`` appears
-      against :data:`PNG_SIGNATURE` in :func:`is_png_bytes`, and every other
-      caller asks that function rather than restating the test, so there is one
-      definition of "is a PNG" in the project.
-    * **No slice or index of a payload.**  A hand-rolled header comparison is
-      spelled that way without a library, and none appears.
+      elsewhere, so nothing can arrive that way either.
+    * **The signature test is spelled once.**  ``startswith`` appears against
+      :data:`PNG_SIGNATURE` in one private helper, and every other caller asks
+      that helper or :func:`png_defect`, so the cheap prefix question has a
+      single definition rather than being restated as an index comparison.
+    * **A payload is subscripted only inside the validator.**  The chunk walk
+      addresses fields by offset, which is what a walk is; no other function
+      or class -- not ``capture_png``, not ``build_embedding``, not a
+      normalizer, and not the scanline walker, which sees inflated rows and
+      never the encoded file -- indexes a payload, so no second, weaker header
+      check can exist beside the one the walk performs.
 
     A text search would be defeated by the module's own prose, which discusses
     signatures, transformation and imaging dependencies at length -- hence the
@@ -1716,7 +2002,27 @@ def test_the_signature_test_is_the_only_content_test(
         for node in ast.walk(screenshots_source)
         if isinstance(node, ast.Constant) and isinstance(node.value, (bytes, bytearray))
     ]
-    assert byte_literals == [PNG_SIGNATURE]
+    assert byte_literals == [
+        PNG_SIGNATURE,
+        b"IHDR",
+        b"PLTE",
+        b"IDAT",
+        b"IEND",
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz",
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        b"tRNS",
+        b"cHRM",
+        b"gAMA",
+        b"sBIT",
+        b"sRGB",
+        b"bKGD",
+        b"hIST",
+        b"sPLT",
+        b"pHYs",
+        b"tIME",
+        b"tEXt",
+        b"",
+    ]
 
     assert numeric_literals_by_owner(screenshots_source) == EXPECTED_NUMERIC_LITERALS
 
@@ -1740,31 +2046,40 @@ def test_the_signature_test_is_the_only_content_test(
         "the signature test must be spelled once, against the exported constant"
     )
 
-    payload_subscripts = [
-        ast.unparse(node)
-        for node in ast.walk(screenshots_source)
-        if isinstance(node, ast.Subscript)
-        and isinstance(node.value, ast.Name)
-        and node.value.id in PAYLOAD_PARAMETER_NAMES
-    ]
-    assert payload_subscripts == []
+    subscripting: dict[str, list[str]] = {}
+    for statement in screenshots_source.body:
+        if not isinstance(statement, (ast.FunctionDef, ast.ClassDef)):
+            continue
+        for node in ast.walk(statement):
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in PAYLOAD_PARAMETER_NAMES
+            ):
+                subscripting.setdefault(statement.name, []).append(ast.unparse(node))
+
+    assert sorted(subscripting) == ["_header_defect", "png_defect"], subscripting
 
 
-def test_capture_png_gates_on_the_type_the_signature_and_the_declared_bound(
+def test_capture_png_gates_on_the_type_and_delegates_the_whole_payload_test(
     screenshots_source: ast.Module,
 ) -> None:
-    """``capture_png``'s payload tests are exactly the four documented ones.
+    """``capture_png``'s own tests are the type ones; the payload test is
+    delegated.
 
     The types named in its ``isinstance`` calls are ``bytearray``,
     ``memoryview`` and ``bytes`` -- the normalisation of a well-behaved but
     unusual return, and the bytes-like requirement itself -- emptiness is
-    ``not png``, the signature test is delegated to
-    :func:`~app.reporting.screenshots.is_png_bytes`, and the only comparison in
-    the function is the size bound against the exported constant.  Scoped to
-    this one function because it is the capture gate: everything downstream
-    receives a payload it has already accepted.  A minimum size, a dimension
-    test or a hand-rolled header comparison would each add a comparison here
-    and fail.
+    ``not png``, and **everything about the payload's content is one call to**
+    :func:`~app.reporting.screenshots.png_defect`, whose verdict the function
+    only reports.  So the single comparison left in the function is
+    ``defect is not None``: the size bound, the signature, the geometry and
+    the image data are all the validator's, which is what makes the capture
+    gate and the two rendering guards the same rule rather than three similar
+    ones.  Scoped to this function because it is the capture gate -- everything
+    downstream receives a payload it has already accepted -- and a
+    hand-rolled header comparison or a second size check would each add a
+    comparison here and fail.
     """
     function = next(
         node
@@ -1790,16 +2105,16 @@ def test_capture_png_gates_on_the_type_the_signature_and_the_declared_bound(
         for node in ast.walk(function)
         if isinstance(node, ast.Compare)
     ]
-    assert comparisons == ["len(png) > MAX_EMBEDDING_BYTES"]
+    assert comparisons == ["defect is not None"]
 
     delegated = [
         ast.unparse(node)
         for node in ast.walk(function)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
-        and node.func.id == "is_png_bytes"
+        and node.func.id in {"png_defect", "is_png_bytes"}
     ]
-    assert delegated == ["is_png_bytes(png)"]
+    assert delegated == ["png_defect(png)"]
 
 
 # --------------------------------------------------------------------------- #
