@@ -82,8 +82,13 @@
       the reference had none. They stay excluded.
     - A STEP THAT PROVIDES NO RESULT INFORMATION IS NOT LISTED: no result
       mapping, an empty one, or one carrying no status. A status the port's
-      vocabulary does not recognise is still information and is counted, as a
-      non-pass.
+      vocabulary does not recognise counts as no information either, since
+      status_token - the project's single status authority, which this page
+      reads its statuses through - answers 'unknown' for a blank status and
+      for an unrecognised one alike, and a row cannot report a result it never
+      understood. The aggregation records the full reasoning; the case cannot
+      arise from this port's own writer, which folds an unrecognised data
+      status to "untested".
     - A STEP WITH NO IMPLEMENTATION IS NOT LISTED. An undefined step carries
       matched false and an empty match, so it names no implementation; there
       is no key to aggregate it under and a row with an empty Implementation
@@ -171,23 +176,28 @@
 
     app/static/css/main.css, the port's own, is loaded last and is entirely
     prefixed, so adding its names alongside the generator's cannot collide
-    with them. Four are added and each earns its place:
+    with them. Five are added and each earns its place:
       tqa-table          on the table. Its cell rule brings overflow-wrap,
                          which is what stops a long dotted implementation path
                          overflowing the column on a narrow viewport - the
                          generator's own stylesheet sets no wrapping at all.
       tqa-duration       on all five duration cells: tabular numerals, so the
                          column's digits line up, and monospace.
-      data-tqa-status    on the ratio cell, the status hook the port's
-                         stylesheet reads. Both values this page can emit,
-                         passed and failed, are in its enumeration.
+      data-report-status on the ratio cell - the project's one status hook,
+                         which its stylesheet reads. Both values this page can
+                         emit, passed and failed, are in its enumeration.
       tqa-empty          on the no-rows notice.
-    Four more were considered and rejected, so the omissions are not
+      tqa-table-wrap     on the bounded scroll region around the table, which
+                         is what keeps six columns inside a narrow screen -
+                         see the responsive note below for the measurement
+                         that made it necessary. It carries tabindex, a role
+                         and an accessible name, because a region a reader
+                         scrolls has to be reachable by keyboard.
+    Three more were considered and rejected, so the omissions are not
     oversights: tqa-count and tqa-badge are inline-flex pills and would break
     a table cell's layout; tqa-header is the page-header region, not a table
-    header row; tqa-page and tqa-table-wrap impose their own box on markup the
-    Bootstrap grid already lays out, which is also what carries this page's
-    responsive and print behaviour.
+    header row; tqa-page imposes its own box - width, max-width, margin and
+    padding - on markup the Bootstrap grid already lays out.
 
   WHAT THE RESPONSIVE BEHAVIOUR ACTUALLY IS, measured in a browser on the
   emitted page rather than assumed, because the next reader will otherwise
@@ -195,23 +205,30 @@
     - At 1440 wide the page does not scroll horizontally at all: the document
       is exactly the viewport width and every cell's content sits inside its
       own box.
-    - At 390 wide the six-column table is 627 wide, so the page scrolls
-      horizontally. Nothing is clipped, nothing overlaps and nothing is
-      unreachable - measured: zero cell-box overflows, zero text rectangles
-      outside their cell, zero overlaps between neighbouring cells - and a
-      long implementation path wraps inside its own column onto eight lines
-      rather than widening it. That residual width is the six header labels,
-      which the port's stylesheet keeps on one line each.
+    - At 390 wide the six columns do not fit, and WHERE THE OVERFLOW GOES was
+      the defect. Unwrapped, it went to the document: measured at a 390px
+      window, this page's document scrolled to 643px against a 488px
+      viewport, so the whole page - navigation, lead, footer and all - moved
+      sideways and the Ratio column sat off-screen. The table is inside a
+      tqa-table-wrap now, so the constraint lands on that element: the page
+      itself stays at the viewport width and the region scrolls.
+    - An earlier revision left it unwrapped deliberately, on the grounds that
+      the reference has no such container and the Bootstrap grid carries the
+      layout. That reasoning does not survive the measurement above: the grid
+      sets a column width, it does not bound a child's overflow, and whole-
+      page horizontal scrolling with a column off the edge is the reflow
+      failure the plan's responsive requirement exists to prevent. Acceptance
+      of these artifacts is structural, so one wrapper element costs no
+      parity.
     - Under print emulation all six headers, every body row and the footer row
       render; the navigation bar and the page footer are dropped and the status
-      tints go transparent, which is the stylesheet's own print behaviour.
-  A wide data table that scrolls sideways on a phone is the reference's own
-  behaviour and is left alone deliberately: the grid carries the layout here,
-  and the alternative - wrapping the table in its own scroll box - would add a
-  container the reference has no counterpart for. The one thing that WAS worth
-  correcting is already above: without tqa-table these identifiers are single
-  unbreakable tokens and force the column wider than the page several times
-  over, which is why that class is on the table.
+      tints go transparent, which is the stylesheet's own print behaviour. The
+      wrapper's own print rule drops its overflow constraint and its border,
+      so the table prints at full width rather than cropped to a scroll box.
+  The second correction is tqa-table on the table itself: without it these
+  dotted identifiers are single unbreakable tokens and force their column
+  wider than the page several times over, which is why that class is there
+  too.
 
   NO PRESENTATION STATE. None of the stylesheet's three boolean hooks and none
   of the script's three run-time state classes. Their absence is the state a
@@ -246,6 +263,12 @@
 -#}
 {% extends "pretty/_layout.html" %}
 {% import 'pretty/_macros.html' as fmt %}
+{#- Status normalisation, from the project's single authority. The plain from-
+    import form is this folder's own: the macro reads no ambient template
+    variable, so the same call answers identically here and in a test harness.
+    A name that _macros.html imports is not re-exported through its namespace,
+    which is why this is a second import rather than fmt.status_token. -#}
+{% from 'partials/status_badge.html' import status_token %}
 
 {#- The layout's own context, set here rather than passed, which is the form
     it documents. The title becomes "Cucumber Reports  - Steps Overview", the
@@ -262,8 +285,20 @@
 
     The heading opens on the block tag's own line so the layout's surrounding
     indentation is reproduced exactly; a newline there would insert a blank
-    line the reference does not have. -#}
-{% block lead %}    <h2>Steps Statistics</h2>
+    line the reference does not have.
+
+    THE HEADING IS AN h1 AT THE MEASURED 24px, THROUGH THE .h3 UTILITY. The
+    reference emits an h2, which leaves the page with no level-one heading for
+    a reader to jump to. The utility class reads wrong until the cascade is
+    followed: cucumber.css:8-10 pins `h2 { font-size: 24px }`, a bare type
+    selector that beats bootstrap.min.css's own `.h2,h2{font-size:30px}` on
+    load order and cannot match an h1 - so `<h1 class="h2">` would render 30px,
+    measured in Chrome against the reference's 24px. `.h3,h3{font-size:24px}`
+    is the vendored utility whose size equals the measurement, and cucumber.css
+    declares no h3 rule to disturb it. Every page in this folder does the same,
+    id included, so the lead is one shape across the emitted tree.
+    -#}
+{% block lead %}    <h1 class="h3" id="report-heading">Steps Statistics</h1>
       <p>The following graph shows step statistics for this build. Below list is based on results.
  step does not provide information about result then is not listed below.
  Additionally @Before and @After are not counted because they are part of the scenarios, not steps.</p>
@@ -329,11 +364,39 @@
                     {%- set match = step.match|default({}, true) -%}
                     {%- set location = match.location|default('', true)|string|trim -%}
                     {%- set result = step.result|default({}, true) -%}
-                    {%- set status = result.status|default('', true)|string|trim -%}
+                    {#- THE STATUS IS NORMALISED BY status_token AND BY NOTHING
+                        ELSE. It is the project's single status authority, so
+                        this page reads a status exactly as the badge, the
+                        element tree and the statistics table read it, and
+                        "Passed", " passed " and "passed" cannot be counted as
+                        three different things here and as one thing there. It
+                        answers one of the seven tokens the result model
+                        produces, or 'unknown' for anything else - an absent
+                        status, a blank one, a number, or a word this port's
+                        vocabulary does not recognise. -#}
+                    {%- set status = status_token(result.status)|string|trim -%}
                     {#- Both conditions are the lead's own exclusions: no
                         status is no result information, and no location is no
-                        implementation to aggregate under. -#}
-                    {%- if location and status -%}
+                        implementation to aggregate under.
+
+                        'unknown' IS "NO RESULT INFORMATION", which is the one
+                        decision this normalisation forces and it is taken
+                        deliberately. For well-formed data nothing changes: the
+                        seven tokens pass through and an absent or blank status
+                        is excluded exactly as before. The case that moves is a
+                        status outside the seven, which used to count as an
+                        occurrence it could never count as a pass - so one such
+                        step dragged its row's Ratio below 100% and coloured it
+                        failed, asserting a failure nobody read. Excluding it
+                        instead reports only the steps whose result this port
+                        actually understands, which is what the lead's own
+                        sentence promises. The case is degenerate in any event:
+                        app/reporting/cucumber_json.py folds an unrecognised
+                        status to "untested" in the DATA, so a token outside
+                        the seven cannot reach this page from the port's own
+                        writer - only from a hand-built or corrupted result
+                        set. -#}
+                    {%- if location and status != 'unknown' -%}
                         {%- set duration = result.duration|default(0, true) -%}
                         {%- set nanos = duration|int(0) if (duration is number and duration >= 0) else 0 -%}
                         {%- if location not in buckets -%}
@@ -348,14 +411,14 @@
                             {%- set _ = rows.append(fresh) -%}
                         {%- endif -%}
                         {%- set bucket = buckets.get(location) -%}
-                        {#- Only the pass test is needed here, so the project's
-                            seven-token status fold is not borrowed: the two
-                            classes this page can emit are passed and failed,
-                            both of which the generator's stylesheet and the
-                            port's status hook already declare. -#}
+                        {#- The binary pass tally, derived from the normalised
+                            token above rather than from a fold of its own.
+                            The two classes this page can emit are passed and
+                            failed, both of which the generator's stylesheet
+                            and the port's status hook already declare. -#}
                         {%- set _ = bucket.update({
                                 'occurrences': bucket.occurrences + 1,
-                                'passed': bucket.passed + (1 if status|lower == 'passed' else 0),
+                                'passed': bucket.passed + (1 if status == 'passed' else 0),
                                 'total_ns': bucket.total_ns + nanos,
                                 'max_ns': [bucket.max_ns, nanos]|max
                             }) -%}
@@ -389,7 +452,23 @@
 <div class="container-fluid" id="report">
   <div class="row">
     <div class="col-md-10 col-md-offset-1">
+      {#- The bounded scroll region. Six columns, one of them a long unbroken
+          dotted implementation path, do not fit a narrow screen: measured
+          unwrapped in a browser at a 390px window, this page's document
+          scrolled to 643px against a 488px viewport, so the whole page moved
+          sideways and the Ratio column left the screen. main.css confines the
+          overflow to this element, and a region a reader scrolls has to be
+          reachable by keyboard, which is what the tabindex, the role and the
+          accessible name are for. Its print rule drops the constraint, so the
+          table still prints at full width. #}
+      <div class="tqa-table-wrap" tabindex="0" role="region" aria-label="Step implementation durations and pass ratios">
       <table id="tablesorter" class="stats-table table-hover tqa-table">
+        {#- The table's accessible name, in the vendored visually-hidden
+            class so nothing new renders, and first child of the table as a
+            caption must be. A caption rather than aria-labelledby pointing
+            at the page heading: it names the table from inside the table,
+            with no id agreement to keep between two elements. #}
+        <caption class="sr-only">Steps statistics</caption>
 
         <thead>{#- ONE header row, class "header" and nothing else. The grouped
             overviews add dont-sort to exclude their grouping row from the
@@ -415,12 +494,62 @@
         pass count cannot fall through to the failed branch. -#}
     {%- set ratio_class = 'passed' if (row.occurrences > 0 and row.passed >= row.occurrences) else 'failed' %}
             <tr>
-              <td class="location">{{ row.location }}</td>
+              {#- The implementation identifies its row, so it is the row's
+                  own header cell rather than a data cell: a reader hearing a
+                  duration in the fourth column hears which step
+                  implementation it belongs to.
+
+                  THREE DECLARATIONS TRAVEL WITH THE CELL, and each one undoes
+                  a rule that began matching only because the element changed.
+                  Every one was measured in Chrome against the reference page
+                  rather than reasoned about:
+
+                  text-align: left. cucumber.css:181-184 declares
+                    `table.stats-table td.location, .location { font-family:
+                    monospace; text-align: left }`. The bare .location half
+                    still matches a th, so the monospace family survives - but
+                    at (0,1,0) it loses to the table's own
+                    `table.stats-table th` centring rule at (0,1,2), and the
+                    column was measured re-centred against left on the
+                    reference. These are long dotted implementation paths,
+                    which centring makes markedly harder to scan.
+                  white-space: normal. This table carries tqa-table, whose
+                    `.tqa-table th` rule sets white-space: nowrap - right for
+                    a header row, wrong for a body cell holding a
+                    70-character dotted path. Measured: the column grew to
+                    660px and the table to 1162px, 110px past its col-md-10
+                    container and 4px past the viewport, squeezing the Ratio
+                    column to 48px so "100.00%" and the "Totals" label broke
+                    mid-word. With the declaration the table measures its
+                    container exactly.
+                  background-color: transparent. The same rule paints a th
+                    with the header background, which tinted this body column
+                    where the reference leaves it white.
+
+                  The remaining difference, font-weight 700, is left alone: a
+                  row header reading bolder than its data is correct. No
+                  vendored or prefixed class can carry any of this - the
+                  centring selector is (0,1,2) and .tqa-table th is a direct
+                  rule on the cell - and the durable home is a prefixed rule
+                  in the port's own stylesheet, which this template does not
+                  own. #}
+              <th scope="row" class="location" style="text-align: left; white-space: normal; background-color: transparent">{{ row.location }}</th>
               <td>{{ row.occurrences }}</td>
               {{ fmt.duration_cell(row.average_ns, 'tqa-duration') }}
               {{ fmt.duration_cell(row.max_ns, 'tqa-duration') }}
               {{ fmt.duration_cell(row.total_ns, 'tqa-duration') }}
-              <td class="{{ ratio_class }}" data-tqa-status="{{ ratio_class }}">{{ fmt.percent_text(row.passed, row.occurrences) }}</td>
+              {#- The ratio keeps its percentage on one line. tqa-table's cell
+                  rule sets overflow-wrap: anywhere, which is what lets the
+                  narrow six-column layout break inside a token: measured in
+                  Chrome, this column settles at 61.6px against the 55.4px
+                  "100.00%" needs after padding, and 14 of the fixture's 17
+                  rows rendered as "100.00" over "%". nowrap is what the
+                  vendored stylesheet already gives the duration columns
+                  (cucumber.css:171-175) for the same reason, and measured
+                  here it costs nothing: the column takes 66.4px, the table
+                  stays 1036.66px inside its 1036.66px container and the page
+                  stays at the viewport width with no horizontal scroll. #}
+              <td class="{{ ratio_class }}" data-report-status="{{ ratio_class }}" style="white-space: nowrap">{{ fmt.percent_text(row.passed, row.occurrences) }}</td>
             </tr>
 {%- endfor %}
         </tbody>
@@ -438,7 +567,8 @@
           </tr>
         </tfoot>
 
-      </table>{% if not step_rows %}{#- The table above still renders its header
+      </table>
+      </div>{% if not step_rows %}{#- The table above still renders its header
           and its footer, so the page's shape never depends on the data; this
           says in words what an empty body cannot. Anchored to the tag so that
           a page WITH rows is left byte-identical to the reference here. #}

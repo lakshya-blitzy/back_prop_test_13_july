@@ -68,6 +68,15 @@ worked example, is one line with the timeout supplied per call:
 
     from app.automation import wait_visible   # timeout passed at the call site
 
+Both visibility helpers take a ``(By.X, "value")`` locator rather than an
+already-resolved element, so a step passes the upper-case constant its page
+object declares - ``page.CALENDAR_BUTTON``, never ``page.calendar_button``.
+``wait_visible_element`` is the port of ``visibilityOf`` applied to a
+``PageFactory`` field, and that field's proxy re-located the element inside
+the predicate on every poll; passing the locator is what keeps the lookup
+inside the wait, where the call site's timeout governs it.
+``app/automation/waits.py`` carries the reasoning in full.
+
 ``By`` is the one Selenium name re-exported, and it is authorized by name:
 specification section 0.4.2 lists *"``By``, re-exported so locator
 construction needs no Selenium import elsewhere"*, with its import sites given

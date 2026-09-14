@@ -159,39 +159,60 @@
 
   ---------------------------------------------------------------------------
   THREE DELIBERATE DEPARTURES FROM THE REFERENCE MARKUP, each recorded because
-  a reader comparing this page against report-tag_4059758862.html will see it
+  a reader comparing this page against report-tag_4059758862.html will see it.
+  Each is a correction or a content-shape difference, and none of them changes
+  what the page reports
   ---------------------------------------------------------------------------
   1. id="report" IS EMITTED ONCE, on the element-tree container. The reference
      emits it twice - on the statistics wrapper and again on the tree wrapper
      - which is invalid HTML and leaves the scope of any '#report ...'
      selector ambiguous. The statistics wrapper here carries no id.
 
-  2. NO EXPAND-ALL / COLLAPSE-ALL CONTROL, and the reference does carry one:
-     two chevron blocks, one above the tree and one below it, each driven by
-     an inline onClick="javascript:$('#report .collapsable-details')
-     .collapse(...)" handler. Both are omitted. Inline script is forbidden on
-     this surface, the sibling vocabulary forbids it "in any form", and the
-     report script's own data-report-toggle-all attribute is not a substitute:
-     it drives step-detail regions, not the vendored widget's collapse
-     containers, so wiring it here would put a second state machine on
-     containers that widget owns. What survives regardless is the property a
-     reader actually needs - the failure-bearing containers ship expanded, by
-     the measured rule the element tree applies.
+  2. THE EXPAND-ALL / COLLAPSE-ALL CONTROL IS NOT THE REFERENCE'S MARKUP,
+     though it is in both of the reference's positions. Both clean reference
+     tag pages carry the chevron pair twice - once immediately above the tree
+     and once below it, before the trailing <br/> - and both blocks are
+     driven by an inline onClick="javascript:$('#report .collapsable-details')
+     .collapse(...)" handler. The positions and the wrapper are reproduced;
+     the handler is not. Inline script is forbidden on this surface in any
+     form - it is exactly what a page needs CSP unsafe-inline for - and the
+     reference reached for it only because the vendored plugin has no
+     declarative way to say show-all or hide-all. AAP 0.3.4 gives expand and
+     collapse to app/static/js/report.js, _element_tree.html now emits every
+     region as one of that script's own [data-report-detail] regions with a
+     real button beside it, and the two controls here carry that script's
+     data-report-toggle-all. So the page keeps the control a reader needs, on
+     one driver, with no inline handler. Both controls come from
+     pretty/_macros.html, shared with feature.html, so the four blocks across
+     the two detail pages cannot drift apart.
 
-  3. THE ELEMENTS FORM IS THE FEATURE-GROUPED ONE: div.feature per feature,
-     each holding div.elements.inner-level, and no <b>Feature:</b> opener row
-     on any element. The reference tag page uses the other measured form -
-     div.elements with no inner-level, an opener row per element, and no
-     Background occurrences at all - which pretty/_element_tree.html documents
-     from the same measurement and exposes as parameters. This page takes the
-     grouped form because the feature wrapper carries the feature identity
-     that the opener row would otherwise carry, one heading per feature rather
-     than one link per scenario, and because it is the form that keeps a
-     scenario's Background beside it. A tag spanning several features
-     therefore renders several feature wrappers, in the order the model
-     carries them - feature source order, then line order within each - which
-     is what AAP 0.6 asks of every writer when it requires the page set to be
-     identical for identical inputs.
+  3. THE ELEMENTS FORM FOLLOWS THE CONTENT SHAPE, and only one of the two is
+     a departure. pretty/_element_tree.html documents both measured forms from
+     the same measurement and exposes them as one parameter:
+
+       the flat path - THE ONE app/reporting/pretty_reports.py TAKES, which
+         hands this page the tag's already-selected elements each carrying a
+         feature link - renders plain div.elements with an opener row per
+         element, inner_level=false. That IS the reference's form, and it is
+         no departure at all: report-tag_4059758862.html emits exactly one
+         div.elements, without inner-level, and the word "Background" does not
+         occur on it.
+       the grouped path, for a caller that hands over the whole feature list
+         instead, renders div.feature per feature, each holding
+         div.elements.inner-level, and no opener row on any element. THAT is
+         the departure: the feature wrapper carries the feature identity the
+         opener row would otherwise carry, one heading per feature rather than
+         one link per scenario, and it is the form that keeps a scenario's
+         Background beside it. A tag spanning several features renders several
+         wrappers, in the order the model carries them - feature source order,
+         then line order within each - which is what AAP 0.6 asks of every
+         writer when it requires the page set to be identical for identical
+         inputs.
+
+     inner-level marks a list nested INSIDE a feature wrapper, so it belongs
+     to the grouped path and to nothing else. Passing it on the flat path
+     would put a nesting class on an unnested list - visible in the emitted
+     page, and a break from both clean reference tag pages.
 
   ---------------------------------------------------------------------------
   MEASURED DETAILS THIS PAGE OWNS
@@ -202,8 +223,10 @@
     - NO NAVIGATION ITEM IS CURRENT. Both reference detail pages leave all
       four plain, so active_page is not set and the layout handles its
       absence.
-    - THE LEAD IS <h2>Tag Report</h2> AND NOTHING ELSE. No paragraph, unlike
-      the four overviews, and matching feature.html.
+    - THE LEAD IS "Tag Report" AND NOTHING ELSE. No paragraph, unlike the four
+      overviews, and matching feature.html. The reference's element is h2;
+      this page emits <h1 class="h2">, the same type scale, for the reason
+      recorded at the block itself.
     - THE STATISTICS TABLE IS <table class="stats-table"> - no id, no
       table-hover - which is what sortable=false selects. A single row has
       nothing to sort, and the layout's tablesorter initialisation binds to
@@ -239,30 +262,39 @@
     - NO MERGE-CONFLICT MARKER, EVER. The reference's markers stay in the
       read-only reference checkout; every writer of this port emits clean
       output.
-    - NO INLINE JAVASCRIPT. This page has no chart, so head_extra is left
-      untouched, and the tablesorter initialisation belongs to the layout.
-    - NO PRESENTATION STATE OF THE PORT'S OWN: none of main.css's three
-      boolean hooks - data-tqa-collapsed, data-tqa-filtered, data-tqa-open -
-      and none of report.js's three runtime state classes. The stylesheet
+    - NO INLINE JAVASCRIPT, in any form: no handler attribute, no javascript:
+      destination and no script block. This page has no chart, so head_extra
+      is left untouched, the tablesorter initialisation belongs to the layout,
+      and the two collapse-all controls carry a declarative attribute the
+      report script answers.
+    - NO PRESENTATION STATE OF THE PORT'S OWN: none of the three runtime
+      state classes - report-is-collapsed, report-is-filtered-out,
+      report-lightbox-is-open - which report.js alone writes and main.css
+      alone reads, and which are the whole of this project's state
+      vocabulary. The stylesheet
       reads their absence as expanded, visible and closed, so server output
       always describes a fully expanded, fully visible page and stays correct
-      with scripting off and on paper. The vendored widget's own "in" class is
-      a different thing, is generator vocabulary, and is applied by the
-      element tree to failure-bearing containers alone. Selection attributes
-      are a different thing again and are allowed: data-report-root marks the
-      tree so the report script's filter scopes to it.
+      with scripting off and on paper. Selection attributes are a different
+      thing and are allowed: data-report-root marks the tree so the report
+      script's filter scopes to it, each filter button carries
+      data-report-filter, and data-report-toggle-all names the action each
+      collapse-all control performs on the tree.
     - CLASS VOCABULARY: the bare generator classes the vendored stylesheet
       declares, and alongside them the port's own tqa- classes and its
-      data-tqa-status hook. main.css is entirely tqa- prefixed with no bare
-      element, class or id selector, so the two sets are declared over
-      disjoint selectors and no collision with cucumber.css is possible. Two
-      of its classes are deliberately NOT applied to the reference's bootstrap
-      containers - tqa-page and tqa-table-wrap set width, max-width, margin
-      and padding, so putting either on a container-fluid would change the
-      measured layout - and tqa-table is withheld from the statistics table by
-      _stats_table.html for its own measured reason. What is emitted here is
-      data-tqa-status, whose main.css rules set custom properties only and so
-      paint nothing by themselves.
+      data-report-status hook. Every main.css selector is led by a tqa-
+      class, a data-report- hook or one of the three report-is- runtime
+      classes, so the two sets meet in exactly one deliberate place: main.css
+      restates the bare status classes, scoped inside this project's own
+      containers, where the vendored palette's colour is not the one the
+      required palette specifies - and that restatement is why
+      _stats_table.html puts tqa-table on the statistics table it renders for
+      this page. Everywhere else they are disjoint. One of its classes is
+      deliberately NOT applied to the reference's bootstrap containers:
+      tqa-page sets width, max-width, margin and padding, so putting it on a
+      container-fluid would change the measured layout. What this page emits
+      of its own is data-report-status, whose main.css rules set custom
+      properties only and so paint nothing by themselves, data-report-root,
+      and tqa-filter with tqa-filter-btn on the status filter group.
     - THE SOURCE'S INCONSISTENCIES ARE RENDERED, NOT TIDIED, per AAP 0.2.2:
       two pairs of features share a JSON id because they share a title,
       Contact.feature's header is mis-titled "Inventory feature" and
@@ -273,22 +305,28 @@
       redacts or flags any of it; report metadata uses whatever the data
       itself carries.
 
-  ACCESSIBILITY. The invisible part is applied because it costs nothing
-  visually: the heading is a real h2 inside the layout's lead region, the
-  table is a real thead/tbody split with a scope on every header cell, every
-  status is spelt out in words beside its background colour so colour is never
-  the only carrier of meaning, and the element tree names each collapse region
-  and reports its expanded state. The two visible defaults this contract fixes
-  by measurement - the chrome's missing lang and viewport declarations, and
-  the collapse control's absence from the tab order - are flagged where they
-  are emitted, in _layout.html and _element_tree.html, rather than restated
-  here.
+  ACCESSIBILITY. The page's lead heading is the document's primary heading and
+  is therefore a real h1, rendered at the measured 24px through the vendored
+  .h3 utility - the lead note below records why that utility and not .h2 - so
+  the rendered page is unchanged while the heading hierarchy starts where a
+  reader expects it; it sits inside the landmarks _layout.html emits. The statistics table is a real thead/tbody split with a scope on
+  every header cell, every status is spelt out in words beside its background
+  colour so colour is never the only carrier of meaning, and the element tree
+  names each collapse region and reports its expanded state. The two
+  collapse-all controls are real buttons - focusable, operated by Enter and
+  Space, named for the action they perform, and sized by the vendored button
+  box rather than by a bare glyph; pretty/_macros.html records that decision
+  where the markup is emitted, as _layout.html and _element_tree.html record
+  the ones they own.
 -#}
 {% extends "pretty/_layout.html" %}
 {#- The three helpers of this folder, each in the plain import form it
     documents: none of them reads an ambient template variable, so every value
     they need is passed at the call site and the same call renders identically
-    from here, from feature.html and from a test harness. -#}
+    from here, from feature.html and from a test harness. pretty/_macros.html
+    supplies two names to this page - the duration coercion the statistics row
+    applies to a supplied value, and the collapse-all control the two detail
+    pages share. -#}
 {% import 'pretty/_stats_table.html' as stats %}
 {% import 'pretty/_element_tree.html' as tree %}
 {% import 'pretty/_macros.html' as fmt %}
@@ -330,8 +368,20 @@
 {#- The lead. The heading opens on the block tag's own line so the layout's
     surrounding indentation is reproduced exactly; a newline there would
     insert a blank line the reference does not have. NO PARAGRAPH: measured
-    absent on both reference tag pages, unlike the four overviews. -#}
-{% block lead %}    <h2>Tag Report</h2>
+    absent on both reference tag pages, unlike the four overviews.
+
+    THE HEADING IS AN h1 AT THE MEASURED 24px, THROUGH THE .h3 UTILITY. The
+    reference emits an h2, which leaves the page with no level-one heading for
+    a reader to jump to. The utility class reads wrong until the cascade is
+    followed: cucumber.css:8-10 pins `h2 { font-size: 24px }`, a bare type
+    selector that beats bootstrap.min.css's own `.h2,h2{font-size:30px}` on
+    load order and cannot match an h1 - so `<h1 class="h2">` would render 30px,
+    measured in Chrome against the reference's 24px. `.h3,h3{font-size:24px}`
+    is the vendored utility whose size equals the measurement, and cucumber.css
+    declares no h3 rule to disturb it. Every page in this folder does the same,
+    id included, so the lead is one shape across the emitted tree.
+    -#}
+{% block lead %}    <h1 class="h3" id="report-heading">Tag Report</h1>
 {%- endblock %}
 
 {#- head_extra is deliberately NOT overridden. The two chart-bearing overviews
@@ -597,6 +647,46 @@
     answers this attribute with custom properties only, so it paints nothing
     by itself and the generator's own palette remains what a reader sees. -#}
 {%- set page_status = tree.steps_status([{'result': {'status': row.status}}], empty='unknown')|string|trim -%}
+
+{#- ---------------------------------------------------------------------
+    THE STATUS FILTER'S OWN INPUT: which statuses the elements this page
+    renders actually carry, and how many carry each.
+
+    BOTH PATHS FEED IT. The grouped path renders every element of every
+    feature wrapper it built; the flat path renders flat_elements. The same
+    walk covers both, so the controls describe what the reader sees whichever
+    path produced it - and it is deliberately NOT the `subjects` list the
+    statistics row is derived from, which holds tag-carrying scenarios only
+    and excludes the Background occurrences kept beside them.
+
+    THE STATUS READ HERE IS THE ONE THE ROWS EMIT. element_status is the
+    macro element_block itself uses when no status is passed to it, so a
+    button can never name a status no element carries and its count cannot
+    disagree with the number of elements the script hides.
+    --------------------------------------------------------------------- -#}
+{%- set filter_counts = {} -%}
+{%- set filtered_rows = [] -%}
+{%- if groups -%}
+    {%- for feature in groups -%}
+        {%- for element in feature.get('elements') -%}
+            {%- set _ = filtered_rows.append(element) -%}
+        {%- endfor -%}
+    {%- endfor -%}
+{%- else -%}
+    {%- for element in flat_elements -%}
+        {%- set _ = filtered_rows.append(element) -%}
+    {%- endfor -%}
+{%- endif -%}
+{%- for element in filtered_rows -%}
+    {%- set token = tree.element_status(element)|string|trim -%}
+    {%- set _ = filter_counts.update({token: filter_counts.get(token, 0) + 1}) -%}
+{%- endfor -%}
+{%- set filter_tokens = [] -%}
+{%- for token in tree.STATUS_PRECEDENCE + ('unknown',) -%}
+    {%- if filter_counts.get(token) -%}
+        {%- set _ = filter_tokens.append(token) -%}
+    {%- endif -%}
+{%- endfor -%}
 {#- ---------------------------------------------------------------------
     THE STATISTICS BLOCK. NO id="report" HERE: the page emits that id once,
     on the element-tree container below. sortable=false is what drops the
@@ -615,35 +705,76 @@
   </div>
 </div>
 
+{# The first of the two collapse-all controls, immediately above the tree,
+    which is where both reference tag pages carry it. It sits OUTSIDE
+    div#report on purpose, as measured: the report script resolves a
+    toggle-all control's scope from its closest [data-report-root] and falls
+    back to the whole document when it has none, so a control outside the
+    root still reaches every region inside it. #}
+{{ fmt.collapse_all_control() }}
+
 {# ---------------------------------------------------------------------
     THE ELEMENT TREE. The page's single id="report" sits here, on the
     container that holds the collapsible tree, which is the only element any
-    '#report ...' selector has reason to scope to. data-report-root beside it
-    is a selection attribute, not a state hook: it tells the report script to
-    scope its status filter to this subtree, and the script falls back to the
-    whole document without it. No expand-all or collapse-all control is
-    emitted, for the reason recorded in the header.
+    '#report ...' selector has reason to scope to, and the region the two
+    collapse-all controls name through aria-controls. data-report-root beside
+    it is a selection attribute, not a state hook: it tells the report script
+    to scope its status filter to this subtree, and the script falls back to
+    the whole document without it.
 
     Grouped by feature, one wrapper each, in the order the model carries them.
-    inner_level=true is the inside-a-feature-wrapper form, so every
-    div.elements on this page carries inner-level, and because each element
-    is passed without a feature destination, no <b>Feature:</b> opener row
-    can appear. With no feature grouping available the flat elements render
-    through the same vocabulary in the same form.
+    inner_level=true is the inside-a-feature-wrapper form, so a div.elements
+    INSIDE a feature wrapper carries inner-level; because each element is
+    passed without a feature destination, no <b>Feature:</b> opener row can
+    appear. With no feature grouping available the flat elements render
+    through the same vocabulary in the OTHER measured form - plain
+    div.elements, inner_level=false - because there is no wrapper for them to
+    sit inside, which is what both reference tag pages emit.
 
     The container is emitted even when nothing matched - a container that
     disappears makes an empty report look like a broken page - and the note
     beside it says in words what an empty tree cannot.
     --------------------------------------------------------------------- -#}
-<div class="container-fluid" id="report" data-tqa-status="{{ page_status }}" data-report-root>
+<div class="container-fluid" id="report" data-report-status="{{ page_status }}" data-report-root>
   <div class="row">
     <div class="col-md-10 col-md-offset-1">
+{%- if filter_tokens %}
+      {# THE STATUS FILTER CONTROLS. Every element below advertises itself as
+          filterable and carries its status; without controls those hooks were
+          one-sided and the filtering AAP 0.3.4 requires of this surface was
+          impossible. Each control is a non-navigating button, because
+          report.js never suppresses an authored default action, and the group
+          sits inside this container so that the script's scope - the
+          data-report-root beside this id - is the subtree the buttons filter.
+
+          THE AUTHORED PRESSED STATE IS THE UNFILTERED PAGE'S OWN: the
+          script's show-set is empty until a reader chooses a status, and an
+          empty set shows everything, so the reserved "all" control is the one
+          that is pressed. The script re-synchronises both attributes on init,
+          so nothing announced changes under the reader as it loads. #}
+      <div class="tqa-filter" role="group" aria-label="Filter this tag's scenarios and Background occurrences by status">
+        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="true">
+          All ({{ filtered_rows|length }})
+        </button>
+{%- for token in filter_tokens %}
+        <button type="button" class="tqa-filter-btn" data-report-filter="{{ token }}" aria-pressed="false">
+          {{ token|capitalize }} ({{ filter_counts.get(token) }})
+        </button>
+{%- endfor %}
+      </div>
+{%- endif %}
 {%- if groups %}
 {%- for feature in groups %}
       {{ tree.feature_block(feature, tag_hrefs=tag_link_map, counter=ids, inner_level=true) }}
 {%- endfor %}
 {%- else %}
-      {{ tree.elements_block(flat_elements, counter=ids, inner_level=true, tag_hrefs=tag_link_map) }}
+{#- inner_level=false, which is the plain div.elements form. There is no
+    feature wrapper on this path for the list to sit inside, and inner-level
+    is what marks a list that does - so true here would emit a nesting class
+    on an unnested list. Both clean reference tag pages emit exactly one
+    div.elements and neither carries inner-level; the grouped path above is
+    where true belongs, and this is the measured difference between them. -#}
+      {{ tree.elements_block(flat_elements, counter=ids, inner_level=false, tag_hrefs=tag_link_map) }}
 {%- if not flat_elements %}
       <p class="tqa-empty">No scenario carrying this tag was recorded for this run, so there is nothing to list here. Every artifact is still written when a run selects no scenario.</p>
 {%- endif %}
@@ -652,9 +783,14 @@
   </div>
 </div>
 
+{# The second control, below the tree and before the page's trailing break -
+    the reference's other position. A tag page can run to hundreds of lines,
+    so this is what lets a reader collapse the tree again without scrolling
+    back up. #}
+{{ fmt.collapse_all_control() }}
+
 {# Measured on both reference tag pages, immediately before the footer, and
     page-owned rather than part of the chrome - which is why _layout.html
     leaves it to the pages that carry it. -#}
 <br/>
 {%- endblock %}
-

@@ -21,9 +21,14 @@
 # The branch itself, the stage names and their order are the pipeline's and
 # are unchanged: shell selection stays with isUnix(), so this file is a
 # payload and not a platform abstraction. The report publisher is a separate
-# later stage (Jenkins:15) and owns all thresholding - its six thresholds are
-# -1 and its sorting is ALPHABETICAL - so nothing here thresholds, sorts,
-# inspects or post-processes a report.
+# later stage (Jenkins:15) and owns all REPORT thresholding - its six
+# thresholds are -1 and its sorting is ALPHABETICAL - so nothing here
+# thresholds, sorts, inspects or post-processes a report artifact.
+#
+# The coverage thresholds step 5 applies are a different thing entirely and
+# must not be confused with those six: they gate the line coverage of this
+# port's own Python code, the Makefile's `coverage` target is their canonical
+# declaration, and they say nothing about a scenario, a feature or a report.
 #
 # HOW IT IS INVOKED, AND THE TWO CONSEQUENCES
 # -------------------------------------------
@@ -49,24 +54,25 @@
 #           other candidate.
 #
 # Every argument this script receives is forwarded verbatim to the run-tests
-# console script in step 5, and nowhere else. No option is defined, defaulted
+# console script in step 6, and nowhere else. No option is defined, defaulted
 # or interpreted here, so with no arguments - exactly how Jenkins invokes it -
 # the behaviour is identical to invoking run-tests bare: the @Smoke default
 # from behave.ini and the --clean default from app/cli.py stay in force.
 #
-# THE FIVE STEPS, IN ORDER
-# ------------------------
+# THE SIX STEPS, IN ORDER
+# -----------------------
 #   1. Locate a Python 3.14.6 interpreter, or fail loudly.
 #   2. Create .venv with that interpreter if it is missing; refuse a drifted
-#      one rather than replacing it.
+#      or redirected one rather than replacing it.
 #   3. Install the pinned dependencies, then this project itself (editable).
 #   4. Run the pytest unit gate.
-#   5. exec the run-tests console script out of .venv/bin.
+#   5. Run the four per-package coverage gates, in order, first miss fails.
+#   6. exec the run-tests console script out of .venv/bin.
 #
 # EXIT STATUS: two different semantics, deliberately not blurred
 # -------------------------------------------------------------
 #   * Bootstrap failures of this script - the working directory, steps 1 to 3
-#     and a missing entry point in step 5 - exit 1. app/cli.py never returns
+#     and a missing entry point in step 6 - exit 1. app/cli.py never returns
 #     1: its published set is 0, 2, 3, 4 and 5, with 1 left out on purpose.
 #     So a 1 from this stage always means the bootstrap failed and never that
 #     the suite reported something.
@@ -74,7 +80,11 @@
 #     quality gate. pytest's exit code 5, "no tests collected", is forwarded
 #     unchanged too, because a unit gate that collects nothing is a real
 #     problem rather than a pass.
-#   * The suite run in step 5 propagates the run-tests status UNALTERED.
+#   * The coverage gates in step 5 PROPAGATE too, with the status of the first
+#     scope that misses its threshold. They gate this port's own test work and
+#     have no bearing on the scenario exit contract below - a coverage miss is
+#     never a scenario outcome.
+#   * The suite run in step 6 propagates the run-tests status UNALTERED.
 #     A test outcome never reaches it: pom.xml:25 sets
 #     <testFailureIgnore>true</testFailureIgnore> and all six publisher
 #     thresholds on Jenkins:15 are -1, so failing scenarios, errors,
@@ -100,7 +110,8 @@
 # No Maven invocation - there is no Maven build after the port and pom.xml is
 # retained as historical reference only. No make: it is optional developer
 # convenience and CI must never depend on it, as the Makefile's own header
-# states. No report artifact path of any kind - app/utils/paths.py is their
+# states, which is exactly why step 5 spells the four coverage gates out here
+# instead of invoking `make coverage`. No report artifact path of any kind - app/utils/paths.py is their
 # sole owner - and no emptying or inspection of the build output directory,
 # which is the runner's --clean, on by default. No --tags, --browser,
 # --workers or any other option value. No git command: the pipeline performs
@@ -286,18 +297,50 @@ printf '%s\n' "run_tests.sh: using $(command -v "$PYTHON_BIN") ($REQUIRED_PYTHON
 
 # --------------------------------------------------------------------------
 # Step 2 - the virtual environment: create it when it is missing, refuse a
-# drifted one.
+# drifted or redirected one.
 #
-# .venv at the repository root is the sanctioned location: .gitignore
-# excludes both .venv/ and venv/, so creating it here leaves git status clean
-# by design.
+# .venv at the repository root is the sanctioned location, and step 3 installs
+# into it: .gitignore excludes both .venv/ and venv/, so creating it here
+# leaves git status clean by design.
 #
-# An existing .venv built by some other interpreter is precisely the
-# CI-versus-development drift the pin exists to prevent, so it is rejected.
-# It is NOT deleted: silently destroying a developer's environment would be a
-# destructive act nobody asked for, so the operator is told what to remove
-# and the run stops.
+# THREE rejections, in this order, and the order matters:
+#
+#   a. A REDIRECTED .venv - a symbolic link, or any entry whose physical path
+#      is not this repository's own .venv. This is checked FIRST, before the
+#      directory and version tests, because both of those follow links: POSIX
+#      `-d` is true for a link to a directory, so a .venv pointing at a
+#      shared, home or system-wide 3.14.6 environment would pass every later
+#      check and step 3 would then pip-install into that external
+#      environment, modifying something outside the checkout. The install has
+#      to stay repository-local, so the link is refused instead.
+#   b. A .venv that exists but is not a directory at all.
+#   c. A .venv whose interpreter is not exactly the pinned version - precisely
+#      the CI-versus-development drift the pin exists to prevent.
+#
+# None of the three deletes anything. Silently destroying a developer's
+# environment, or following a link and destroying something outside the
+# checkout, would be a destructive act nobody asked for: the operator is told
+# what to remove and the run stops.
 # --------------------------------------------------------------------------
+
+# (a) The link test comes first. `-L` is POSIX and, unlike -d/-e, does not
+# follow the link it is testing.
+if [ -L .venv ]; then
+    printf '%s\n' \
+        "run_tests.sh: .venv is a symbolic link, which is not accepted." \
+        "  path : $(pwd)/.venv" \
+        "" \
+        "The two pip installs in step 3 install INTO this path, so it has to" \
+        "be a real directory inside the checkout. A link would send both" \
+        "installs into whatever it points at - a shared, home or system-wide" \
+        "environment - and modify something outside the repository." \
+        "" \
+        "Remove or rename that link and re-run; this script will not delete" \
+        "it for you, and it deliberately does not follow it." >&2
+    exit 1
+fi
+
+# (b)
 if [ -e .venv ] && [ ! -d .venv ]; then
     printf '%s\n' \
         "run_tests.sh: .venv exists but is not a directory." \
@@ -308,6 +351,40 @@ if [ -e .venv ] && [ ! -d .venv ]; then
 fi
 
 if [ -d .venv ]; then
+    # (a, continued) A second, independent proof that the directory step 3 is
+    # about to install into really is this repository's own .venv: canonicalise
+    # it and require physical equality with the expected path. `cd` plus
+    # `pwd -P` is the portable way to canonicalise a directory, so this needs
+    # no non-POSIX tool.
+    #
+    # It does not depend on the `-L` test above having run, which is the point
+    # of having it: either check alone refuses a redirected environment. Its
+    # limit, measured rather than assumed: a bind mount reports the mount
+    # point itself, so this comparison does not detect one - the version check
+    # below is what rejects that case, since a bind-mounted directory carries
+    # no pinned interpreter.
+    venv_expected_path=$(pwd -P)
+    case "$venv_expected_path" in
+        */) venv_expected_path="${venv_expected_path}.venv" ;;
+        *)  venv_expected_path="$venv_expected_path/.venv" ;;
+    esac
+    venv_actual_path=$(cd .venv 2>/dev/null && pwd -P)
+    if [ "$venv_actual_path" != "$venv_expected_path" ]; then
+        printf '%s\n' \
+            "run_tests.sh: .venv does not resolve inside this repository." \
+            "  expected : $venv_expected_path" \
+            "  resolves : ${venv_actual_path:-could not be entered}" \
+            "" \
+            "The two pip installs in step 3 install INTO that path, so it has" \
+            "to be this repository's own .venv and nothing else. Installing" \
+            "into an environment outside the checkout would modify state this" \
+            "run does not own." \
+            "" \
+            "Remove or rename the .venv entry and re-run; this script will not" \
+            "delete it for you." >&2
+        exit 1
+    fi
+
     venv_version=$(interpreter_version .venv/bin/python)
     if [ "$venv_version" != "$REQUIRED_PYTHON_VERSION" ]; then
         printf '%s\n' \
@@ -374,7 +451,7 @@ fi
 # nothing else. No index URL is set either, so pip uses whatever the agent is
 # configured for.
 #
-# The second install is the project distribution, and step 5 cannot run
+# The second install is the project distribution, and step 6 cannot run
 # without it: installing -r manifests installs DEPENDENCIES ONLY, while the
 # run-tests console script declared in pyproject.toml under
 #     [project.scripts] run-tests = "app.cli:run_tests"
@@ -431,14 +508,13 @@ fi
 # is what keeps the behave step definitions under features/steps/ out of the
 # unit suite: they are glue matched by phrase at scenario run time and define
 # no pytest tests. So no path argument is passed here, and no coverage flag
-# either: the four per-package coverage gates (app/utils 90, app/pages 85,
-# app/automation 80, app/reporting 80) live in the Makefile's coverage target
-# and in exactly one place, which is not this file. make is not invoked from
-# here for any target - CI must not depend on it being installed.
+# either - measurement is step 5's job, and keeping it out of this run means a
+# coverage miss and a test failure are reported as the separate problems they
+# are.
 #
-# The status PROPAGATES, unlike step 5's. pytest's exit code 5, "no tests
+# The status PROPAGATES, unlike step 6's. pytest's exit code 5, "no tests
 # collected", propagates as well: a unit gate that collects nothing has not
-# passed. On failure the suite run is not started.
+# passed. On failure neither the coverage gates nor the suite run is started.
 # --------------------------------------------------------------------------
 printf '%s\n' "run_tests.sh: running the unit gate"
 .venv/bin/python -m pytest
@@ -455,7 +531,84 @@ fi
 
 
 # --------------------------------------------------------------------------
-# Step 5 - the suite run, through the one sanctioned entry point.
+# Step 5 - the coverage gates: four scopes, in order, first miss fails.
+#
+# A single --cov-fail-under cannot express four different per-package
+# thresholds, so pytest runs once per scope and each run measures and gates
+# only its own package. The four scopes and their minimums are exactly
+#   app/utils 90, app/pages 85, app/automation 80, app/reporting 80
+# and the Makefile's `coverage` target is their canonical declaration. They
+# are spelled out again here rather than reached through `make coverage`
+# because CI must not depend on make being installed - so the developer
+# command and the CI command are the same four commands, and a threshold that
+# ever changes changes in all three files together.
+#
+# This is where the thresholds are actually ENFORCED on a CI agent. Without
+# this step the pipeline would run the suite with the gates declared but never
+# applied, which is indistinguishable from having no gates at all.
+#
+# The first non-zero status is propagated and nothing after it runs, so the
+# stage fails on the first scope that misses and the suite run is not started.
+# These gates cover this port's own test code only; they say nothing about a
+# scenario outcome, which keeps them clear of the exit contract step 6 carries.
+# --------------------------------------------------------------------------
+
+# Report a missed gate. Kept in one place so the four call sites below stay
+# readable and each one shows its scope and threshold literally.
+coverage_gate_failed() {
+    # $1 the --cov scope, $2 its minimum percentage, $3 pytest's exit status
+    printf '%s\n' \
+        "run_tests.sh: the coverage gate for $1 failed (pytest exit status $3)." \
+        "  scope   : $1" \
+        "  minimum : $2 percent" \
+        "" \
+        "pytest's own coverage report above names every line that is not" \
+        "covered. The remaining gates and the suite run were NOT started," \
+        "and this stage fails with pytest's status." \
+        "" \
+        "Raise the coverage of that package with real tests. The threshold is" \
+        "part of the specification and is not the thing to change: lowering" \
+        "it, or dropping the scope, removes the only check that this port's" \
+        "own code is exercised at all." >&2
+}
+
+printf '%s\n' "run_tests.sh: running the coverage gates"
+
+printf '%s\n' "run_tests.sh: coverage gate 1 of 4 - app/utils, minimum 90 percent"
+.venv/bin/python -m pytest --cov=app/utils --cov-fail-under=90
+coverage_status=$?
+if [ "$coverage_status" -ne 0 ]; then
+    coverage_gate_failed app/utils 90 "$coverage_status"
+    exit "$coverage_status"
+fi
+
+printf '%s\n' "run_tests.sh: coverage gate 2 of 4 - app/pages, minimum 85 percent"
+.venv/bin/python -m pytest --cov=app/pages --cov-fail-under=85
+coverage_status=$?
+if [ "$coverage_status" -ne 0 ]; then
+    coverage_gate_failed app/pages 85 "$coverage_status"
+    exit "$coverage_status"
+fi
+
+printf '%s\n' "run_tests.sh: coverage gate 3 of 4 - app/automation, minimum 80 percent"
+.venv/bin/python -m pytest --cov=app/automation --cov-fail-under=80
+coverage_status=$?
+if [ "$coverage_status" -ne 0 ]; then
+    coverage_gate_failed app/automation 80 "$coverage_status"
+    exit "$coverage_status"
+fi
+
+printf '%s\n' "run_tests.sh: coverage gate 4 of 4 - app/reporting, minimum 80 percent"
+.venv/bin/python -m pytest --cov=app/reporting --cov-fail-under=80
+coverage_status=$?
+if [ "$coverage_status" -ne 0 ]; then
+    coverage_gate_failed app/reporting 80 "$coverage_status"
+    exit "$coverage_status"
+fi
+
+
+# --------------------------------------------------------------------------
+# Step 6 - the suite run, through the one sanctioned entry point.
 #
 # The run-tests console script from the virtual environment's bin directory,
 # never the Flask CLI and never python -m: pyproject.toml declares this entry

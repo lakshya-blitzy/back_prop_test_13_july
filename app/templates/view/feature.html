@@ -137,10 +137,14 @@
                      An element with no steps is unknown.
     3. Feature       The same precedence applied across the steps of ALL this
        status        feature's elements, backgrounds included.
-    4. Duration      The sum of the duration values that are PRESENT, in
-                     nanoseconds, rendered as seconds to three decimals. With
-                     no duration key present at all the total is unknown rather
-                     than zero, and renders an em dash.
+    4. Duration      The sum of the duration values that are PRESENT AND
+                     USABLE, in nanoseconds, rendered as seconds to three
+                     decimals. Usable is the step partial's own exported
+                     predicate - a non-negative integer that is not a boolean -
+                     so an element's total can never count a sample its own
+                     step rows decline to render. With no usable duration at
+                     all the total is unknown rather than zero, and renders an
+                     em dash.
     5. Scenario      The number of elements whose type is "scenario", and NEVER
        count         the element count, which double-counts every feature's
                      scenarios in this suite.
@@ -206,6 +210,14 @@
   exactly what it means with scripting turned off and on paper. Nothing here
   hides collapsible detail from the accessibility tree either.
 
+  THE ONE CONTROL STATE THAT IS AUTHORED is aria-pressed, and it is authored to
+  say what the unfiltered page shows: the script's filter model is a show-set
+  in which an empty set means every scenario is visible, so the reserved "all"
+  control is pressed exactly while no status is selected. "all" is authored
+  pressed and each status control unpressed - the same values the script writes
+  as it initialises - so a reader with scripting disabled is told the truth and
+  a reader with it enabled sees no state flip as the script loads.
+
   Standing prohibitions, each with its reason: automatic escaping is never
   turned off and no value is ever marked pre-escaped, because element
   descriptions, step names and assertion text in this data carry quotes,
@@ -220,9 +232,19 @@
   those. And nothing that starts, or appears to start, a test run.
 -#}
 {% extends "base.html" %}
-{% set active_nav = "reports" %}
+{#- "reports-detail", not "reports": this page sits BELOW the overview, so the
+    shell offers both report destinations - reaching this page at all proves the
+    results file usable - and marks neither as the current page. The overview
+    link is an ancestor here, and aria-current="page" on it would tell a reader
+    they are on the overview when they are on a feature. The breadcrumb below
+    names the current item, which is where a reader's position is stated. -#}
+{% set active_nav = "reports-detail" %}
 {% from "partials/status_badge.html" import status_badge, status_token %}
-{% from "partials/step_row.html" import step_row %}
+{#- duration_is_usable is imported beside the row it belongs to: the row
+    renders a duration only for a non-negative, non-boolean integer, so the
+    element, feature and run totals below admit exactly the same values and
+    cannot count a sample no step row shows. -#}
+{% from "partials/step_row.html" import step_row, duration_is_usable %}
 {% from "partials/lightbox.html" import screenshots, lightbox_overlay %}
 
 {#- Rule 2 of the aggregation contract, as data, and the same sequence
@@ -411,11 +433,17 @@
             {%- set token = status_token(result_map.get('status'))|string|trim -%}
             {%- set _ = el_tokens.append(token) -%}
             {%- set _ = tally.steps.append(token) -%}
-            {#- A skipped step may carry no duration key at all, and a
-                non-numeric one would poison the sum, so both count as no
-                sample rather than as zero. -#}
+            {#- A skipped step may carry no duration key at all, and a value
+                the step row would decline to render - a float, a negative
+                count, a boolean, anything but a non-negative integer - must
+                not reach a total shown beside that row. Both count as no
+                sample rather than as zero, and the test is the step partial's
+                own exported predicate rather than a second one stated here,
+                so one reading of a duration serves the step, the element, the
+                feature and the run. Zero passes it, which is deliberate: a
+                skipped or undefined step records the integer zero. -#}
             {%- set step_duration = result_map.get('duration') -%}
-            {%- if step_duration is number -%}
+            {%- if duration_is_usable(step_duration)|trim != '' -%}
                 {%- set el_time.duration_ns = el_time.duration_ns + step_duration -%}
                 {%- set el_time.samples = el_time.samples + 1 -%}
                 {%- set tally.duration_ns = tally.duration_ns + step_duration -%}
@@ -454,6 +482,15 @@
 
     {%- set feature_status = worst_token(tally.steps)|string|trim -%}
     {%- set scenario_blocks = blocks|selectattr('kind', 'equalto', 'scenario')|list -%}
+
+    {#- The blocks that will actually emit a step list, which is the only thing
+        on this page an expand-or-collapse control can act on: the steps_list
+        macro emits one detail region per element that has steps, and the step
+        partial emits its own inside that. A feature whose elements carry no
+        step at all therefore has no controllable region, and the two controls
+        would be inert furniture - so they are gated on this, not on the
+        presence of elements. -#}
+    {%- set detail_blocks = blocks|selectattr('steps')|list -%}
 
     {#- The statuses the scenario blocks actually carry, in severity order,
         which is what the filter controls offer. Offering a status no scenario
@@ -595,7 +632,7 @@
             {%- for token in STATUS_READING_ORDER %}
             {%- set counted = count_of(tally.steps, token)|int %}
             {%- if counted %}
-            <li class="tqa-count" data-tqa-status="{{ token }}">
+            <li class="tqa-count" data-report-status="{{ token }}">
                 {{ status_badge(token) }}
                 <strong>{{ counted }}</strong>
             </li>
@@ -616,19 +653,33 @@
         order they ran in. This feature's background is repeated before each
         scenario and is rendered in every one of those positions rather than
         folded into one, because that repetition is both what the run did and
-        part of the structure this page has to reproduce. Each scenario name
-        links to its own detail view, keyed by its position among this feature's
-        scenarios.
+        part of the structure this page has to reproduce.
+        {%- if scenario_blocks %}
+        Each scenario name links to its own detail view, keyed by its position
+        among this feature's scenarios.
+        {%- endif %}
     </p>
 
-    {#- Filter controls. Each button names a status the scenario blocks below
-        actually carry; "all" is the reserved value that clears the filter.
-        They are non-navigating buttons because the behaviour script never
-        suppresses an authored default action, and they are authored unpressed
-        because the unfiltered page is the authored state. Only scenarios are
-        filterable, which is why the counts here are scenario counts. -#}
+    {#- Filter controls, gated on the scenario blocks rather than on the
+        elements: a scenario is the only filterable unit here, so with none of
+        them these controls would offer "All scenarios (0)" and filter nothing
+        at all. Each button names a status the scenario blocks below actually
+        carry; "all" is the reserved value that clears the filter. They are
+        non-navigating buttons because the behaviour script never suppresses an
+        authored default action. Only scenarios are filterable, which is why
+        the counts here are scenario counts.
+
+        THE AUTHORED PRESSED STATE IS THE UNFILTERED PAGE'S OWN. The behaviour
+        script's filter model is a show-set per scope in which an EMPTY set
+        means every scenario is shown, so "all" is pressed exactly while no
+        status is selected - which is the state this page is authored in, and
+        the state a reader with scripting disabled stays in. "all" is therefore
+        authored pressed and each status button unpressed, which is what the
+        script itself writes when it initialises, so the announced state cannot
+        change under the reader as the script loads. -#}
+    {%- if scenario_blocks %}
     <div class="tqa-filter" role="group" aria-label="Filter scenarios by status">
-        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="false">
+        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="true">
             All scenarios ({{ scenario_blocks|length }})
         </button>
         {%- for token in filter_statuses %}
@@ -637,12 +688,17 @@
         </button>
         {%- endfor %}
     </div>
+    {%- endif %}
 
     {#- Expand and collapse everything the page can expand - the step lists
         here and the step partial's own detail regions inside them. The
         behaviour script reads this hook BY VALUE and acts only on expand and
         collapse, so there are two controls rather than one bare attribute,
-        which it would ignore. -#}
+        which it would ignore. Gated on the blocks that emit a step list,
+        because that is what these two act on: with no step anywhere in the
+        feature there is no detail region in the page, and a control that
+        expands nothing is a defect rather than a courtesy. -#}
+    {%- if detail_blocks %}
     <div class="tqa-filter" role="group" aria-label="Step detail">
         <button type="button" class="tqa-filter-btn" data-report-toggle-all="expand">
             Expand all detail
@@ -651,6 +707,24 @@
             Collapse all detail
         </button>
     </div>
+    {%- endif %}
+
+    {#- A feature whose elements hold no scenario at all - a background, or an
+        element of a type this model does not name, and nothing else. It is a
+        complete reading of what the run recorded, not a missing-data state, so
+        the elements below still render in their own positions and in source
+        order; what this says is why there is no scenario to filter, and no
+        scenario link to follow. -#}
+    {%- if not scenario_blocks %}
+    <p class="tqa-empty">
+        This feature records no scenario. Every element below ran as part of it
+        and is shown in the order the results file carries it, but none of them
+        is a scenario, so there is nothing here to filter by status and no
+        scenario detail view to open. The
+        <a class="tqa-link" href="{{ url_for('web.reports_overview') }}">report overview</a>
+        lists the other features in the same results.
+    </p>
+    {%- endif %}
 
     {%- for block in blocks %}
     {%- set el = block.element %}
@@ -690,9 +764,16 @@
         list is passed straight in. A list of embeddings carried directly is
         accepted by the same call. It is rendered once and its own emptiness is
         the test: a failed scenario with no screenshot is a wholly normal
-        state, because a capture that fails is logged and suppressed. -#}
+        state, because a capture that fails is logged and suppressed.
+
+        THIS ELEMENT'S OWN LABEL GOES IN AS THE FALLBACK CAPTION, never as the
+        caption: the partial uses a fallback only when neither an explicit
+        caption nor the embedding's own name carries text, so a capture named
+        by the run keeps its name and one whose name arrived blank is still
+        labelled - alt text, a caption and an accessible name on its trigger -
+        rather than shipped as unlabelled failure evidence. -#}
     {%- set raw_hooks = el.get('after') if el.get('after') is not none else el.get('embeddings') %}
-    {%- set shots = screenshots(raw_hooks) %}
+    {%- set shots = screenshots(raw_hooks, fallback_caption=el_label) %}
     {#- One block per element, in place. A scenario is the filterable unit and
         carries both behaviour hooks plus the status attribute the stylesheet
         colours its accent from. A BACKGROUND CARRIES NEITHER, deliberately: it
@@ -705,7 +786,7 @@
         either, since it has no scenario key to link to. -#}
     <section class="{{ 'tqa-background' if block.kind == 'background' else 'tqa-scenario' }}"
              id="{{ el_dom_id }}"
-             {%- if block.kind == 'scenario' %} data-tqa-status="{{ el_token }}" data-report-filterable data-report-status="{{ el_token }}"{% endif %}>
+             {%- if block.kind == 'scenario' %} data-report-status="{{ el_token }}" data-report-filterable{% endif %}>
         <h3 class="tqa-scenario-name">
             {%- if block.kind == 'scenario' %}
             <a class="tqa-link"
@@ -803,4 +884,3 @@
         and writes the image source itself when a reader opens it. -#}
     {{ lightbox_overlay() }}
 {% endblock %}
-

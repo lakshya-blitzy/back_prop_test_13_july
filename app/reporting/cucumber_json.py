@@ -108,14 +108,17 @@ and is not normalised.  ``name`` is the substituted text.
   :func:`app.reporting.events.widen_quoted_span` owns them.  An argument whose
   value is ``None`` contributes an empty ``{}`` entry rather than being
   dropped.
-* ``result`` **omits fields rather than emitting zeros**, which is the whole of
-  ``createResultMap``: ``status`` always and lowercase, ``error_message`` only
-  when there is an error, and ``duration`` **only when it is non-zero** --
-  whatever the status.  The baseline proves the last rule holds across statuses:
-  it contains 14 ``{duration, status}`` passed, 2 ``{duration, error_message,
-  status}`` failed, 2 bare ``{status}`` skipped *and* one ``{duration, status}``
-  skipped with ``duration: 1000000``.  Durations are integer nanoseconds
-  (``30202000000`` is 30.202 s); a float is never emitted.
+* ``result`` **omits fields rather than emitting zeros**: ``status`` always and
+  lowercase, ``error_message`` only when there is an error, and ``duration``
+  only when it is non-zero **and** the status is not ``skipped`` -- a skipped
+  result is ``{"status": "skipped"}``, which specification section 0.6 states
+  as a rule.  ``createResultMap`` itself gates the field on the duration alone,
+  and the baseline shows that clause's four shapes: 14 ``{duration, status}``
+  passed, 2 ``{duration, error_message, status}`` failed, 2 bare ``{status}``
+  skipped *and* one ``{duration, status}`` skipped with ``duration: 1000000``.
+  The last of those is the one shape this writer does not reproduce;
+  :func:`_build_result` records why and what it costs.  Durations are integer
+  nanoseconds (``30202000000`` is 30.202 s); a float is never emitted.
 
 **Scenario ``id``** is ``TestSourcesModel.calculateId``: a plain scenario is
 ``<feature-slug>;<scenario-slug>`` and an Examples row appends the Examples
@@ -206,6 +209,7 @@ __all__ = [
     "STATUS_ALIASES",
     "STATUS_FALLBACK",
     "STATUS_PASSED",
+    "STATUS_SKIPPED",
     "STATUS_UNDEFINED",
     "STEP_KEYS",
     "build_cucumber_json",
@@ -237,6 +241,14 @@ STATUS_PASSED: Final[str] = "passed"
 #: the empty object.
 STATUS_UNDEFINED: Final[str] = "undefined"
 
+#: Status token whose presence *removes* ``result.duration``: specification
+#: section 0.6 requires a skipped result to be ``{"status": "skipped"}`` with
+#: no ``duration`` key, so :func:`_build_result` reads this name as the second
+#: gate on that field.  Named for the same reason as
+#: :data:`STATUS_UNDEFINED` -- an omission rule keyed on a status is easier to
+#: trust when the status is not a bare literal at the point of the test.
+STATUS_SKIPPED: Final[str] = "skipped"
+
 #: The status vocabulary a Cucumber report may carry.  Anything outside this
 #: set is folded by :data:`STATUS_ALIASES` or, failing that, by
 #: :data:`STATUS_FALLBACK`, because the publisher parses these names and an
@@ -245,7 +257,7 @@ CUCUMBER_STATUSES: Final[frozenset[str]] = frozenset(
     {
         STATUS_PASSED,
         "failed",
-        "skipped",
+        STATUS_SKIPPED,
         "pending",
         STATUS_UNDEFINED,
         "untested",
@@ -571,12 +583,61 @@ def _mappings(value: Any) -> list[JsonDict]:
 def _build_result(result: JsonDict, *, matched: bool, dry_run: bool) -> JsonDict:
     """Build a ``result`` map, omitting fields rather than emitting zeros.
 
-    ``createResultMap`` is the whole rule and it has three clauses: ``status``
-    always, ``error_message`` only when the result carries an error, and
-    ``duration`` only when it is non-zero.  The last clause is *not* qualified
-    by status -- the baseline contains both a bare ``{"status": "skipped"}``
-    and a ``{"duration": 1000000, "status": "skipped"}``, which is why this
-    writer tests the duration and never the status when deciding.
+    Three clauses, in the emitted order, are the whole of the rule:
+
+    * ``status`` **unconditionally**, lower-cased and folded onto the Cucumber
+      vocabulary by :func:`map_step_status`, so no consumer has to test for it;
+    * ``duration`` when it is non-zero **and** the mapped status is not
+      :data:`STATUS_SKIPPED` -- a skipped result therefore carries ``status``
+      alone, whatever duration the internal document recorded;
+    * ``error_message`` when the result carries one, LF-normalised by
+      :func:`normalize_error_message`.
+
+    The second clause is the plan's, stated as a rule: specification section
+    0.6 requires that "skipped is ``{"status": "skipped"}`` with **no**
+    ``duration`` key".  That is the requirement this builder implements, and
+    it is what decides the one place where measurement of the JVM disagrees.
+
+    **The measured divergence.**  The generator this writer ports --
+    ``createResultMap`` in ``io.cucumber:cucumber-core:7.2.3`` -- gates the
+    field on the duration alone::
+
+        if (!result.getDuration().isZero())
+
+    and never consults the status.  Measured over the 19 steps of the
+    committed ``tests/fixtures/golden_cucumber.json``, that clause produces
+    exactly four result shapes:
+
+    * 14 x ``{duration, status}``, status ``passed``
+    * 2 x ``{duration, error_message, status}``, status ``failed``
+    * 2 x bare ``{status}``, status ``skipped``
+    * 1 x ``{"duration": 1000000, "status": "skipped"}``
+
+    The first three this writer reproduces.  The fourth -- a ``skipped``
+    result that *carries* a duration -- is the one shape it deliberately does
+    **not** reproduce: the plan states the stricter rule as a rule, and the
+    plan outranks both the generator's clause and an inference drawn from the
+    fixture comparison.  So ``tests/fixtures/golden_cucumber.json``, which is
+    byte-pinned and is never edited to match a writer, differs from this
+    writer's output in that one field.  That is a **third** expected
+    difference, alongside the feature-directory prefix of ``uri`` that
+    specification section 0.4.1 names and the CRLF-to-LF normalisation of
+    ``error_message`` that deviation 16 names; a comparison against the
+    fixture has to allow for all three.
+
+    **No live behaviour changes with it.**  behave reports duration ``0`` for
+    a step skipped after a failure in the same scenario, and a zero duration
+    was already omitted, so every skipped step of a real run emitted
+    ``{"status": "skipped"}`` before this gate existed and does so after it.
+    The shape carrying a duration is reachable only from a document that
+    recorded a non-zero one -- a JVM-authored artifact, or a hand-built
+    document -- which is exactly where the status gate now applies.
+
+    Hook results reach this same builder from :func:`_build_after` with
+    ``matched=True`` and ``dry_run=False``: a hook's recorded status (folded by
+    :data:`STATUS_ALIASES`, which already covers ``hook_error`` and
+    ``cleanup_error``) and its error text pass through this one generic path
+    rather than through a second rule.
 
     Args:
         result: The internal result mapping.
@@ -587,12 +648,43 @@ def _build_result(result: JsonDict, *, matched: bool, dry_run: bool) -> JsonDict
     Returns:
         The result map.  ``status`` is always present, so a consumer never has
         to test for it.
+
+    Examples:
+        A non-zero duration survives for a status the contract allows it on:
+
+        >>> _build_result({"status": "passed", "duration": 30202000000},
+        ...               matched=True, dry_run=False)
+        {'status': 'passed', 'duration': 30202000000}
+
+        A skipped result carries ``status`` alone, whether the recorded
+        duration is zero or not:
+
+        >>> _build_result({"status": "skipped", "duration": 0},
+        ...               matched=True, dry_run=False)
+        {'status': 'skipped'}
+        >>> _build_result({"status": "skipped", "duration": 1000000},
+        ...               matched=True, dry_run=False)
+        {'status': 'skipped'}
+
+        A failure carries all three fields, and ``error_message`` arrives
+        LF-normalised:
+
+        >>> failed = _build_result(
+        ...     {"status": "error", "duration": 4000000,
+        ...      "error_message": "expected 8\\r\\nwas 89"},
+        ...     matched=True, dry_run=False)
+        >>> list(failed)
+        ['status', 'duration', 'error_message']
+        >>> failed["status"], failed["duration"]
+        ('failed', 4000000)
+        >>> failed["error_message"]
+        'expected 8\\nwas 89'
     """
     status = map_step_status(result.get("status"), matched=matched, dry_run=dry_run)
     built: JsonDict = {"status": status}
 
     duration = _as_int(result.get("duration"))
-    if duration:
+    if duration and status != STATUS_SKIPPED:
         built["duration"] = duration
 
     message = normalize_error_message(result.get("error_message"))

@@ -167,10 +167,13 @@
                    step at all is unknown. Each step's status is normalised
                    through the status partial, the project's single
                    normalisation point.
-    2. Duration    The sum of the duration values that are PRESENT, in
-                   nanoseconds, rendered as seconds to three decimals. With no
-                   duration key present at all the total is unknown rather than
-                   zero, and renders an em dash.
+    2. Duration    The sum of the duration values that are PRESENT AND USABLE,
+                   in nanoseconds, rendered as seconds to three decimals.
+                   Usable is the step partial's own exported predicate - a
+                   non-negative integer that is not a boolean - so a total here
+                   can never count a sample the step rows below it decline to
+                   render. With no usable duration at all the total is unknown
+                   rather than zero, and renders an em dash.
     3. Separately  THE BACKGROUND'S STATUS AND DURATION ARE ITS OWN. They are
                    derived from its steps alone and rendered in its own
                    section, and the scenario's are derived from the scenario's
@@ -251,6 +254,14 @@
   the failure text and the screenshot, and both live inside collapsible detail.
   Nothing here hides collapsible detail from the accessibility tree either.
 
+  THE ONE CONTROL STATE THAT IS AUTHORED is aria-pressed, and it is authored to
+  say what the unfiltered page shows: the script's filter model is a show-set
+  in which an empty set means every step is visible, so the reserved "all"
+  control is pressed exactly while no status is selected. "all" is authored
+  pressed and each status control unpressed - the same values the script writes
+  as it initialises - so a reader with scripting disabled is told the truth and
+  a reader with it enabled sees no state flip as the script loads.
+
   Standing prohibitions, each with its reason: automatic escaping is never
   turned off and no value is ever marked pre-escaped - this is the page that
   renders assertion text and tracebacks, the reference generator's own output
@@ -266,9 +277,19 @@
   that starts, or appears to start, a test run.
 -#}
 {% extends "base.html" %}
-{% set active_nav = "reports" %}
+{#- "reports-detail", not "reports": this page sits two levels BELOW the
+    overview, so the shell offers both report destinations - reaching this page
+    at all proves the results file usable - and marks neither as the current
+    page. Both the overview and the feature page are ancestors here, and
+    aria-current="page" on either would misstate where the reader is. The
+    breadcrumb below names the current item. -#}
+{% set active_nav = "reports-detail" %}
 {% from "partials/status_badge.html" import status_badge, status_token %}
-{% from "partials/step_row.html" import step_row %}
+{#- duration_is_usable is imported beside the row it belongs to: the row
+    renders a duration only for a non-negative, non-boolean integer, so the
+    scenario and background totals below admit exactly the same values and
+    cannot count a sample no step row shows. -#}
+{% from "partials/step_row.html" import step_row, duration_is_usable %}
 {% from "partials/lightbox.html" import screenshots, lightbox_overlay %}
 
 {#- Rule 1 of the aggregation contract, as data, and the same sequence
@@ -467,11 +488,16 @@
         {%- set result_map = result if result is mapping else {} -%}
         {%- set token = status_token(result_map.get('status'))|string|trim -%}
         {%- set _ = scenario_tokens.append(token) -%}
-        {#- A skipped step may carry no duration key at all, and a non-numeric
-            one would poison the sum, so both count as no sample rather than as
-            zero. -#}
+        {#- A skipped step may carry no duration key at all, and a value the
+            step row would decline to render - a float, a negative count, a
+            boolean, anything but a non-negative integer - must not reach a
+            total shown beside that row. Both count as no sample rather than as
+            zero, and the test is the step partial's own exported predicate
+            rather than a second one stated here, so one reading of a duration
+            serves the step and the totals above it. Zero passes it, which is
+            deliberate: a skipped or undefined step records the integer zero. -#}
         {%- set step_duration = result_map.get('duration') -%}
-        {%- if step_duration is number -%}
+        {%- if duration_is_usable(step_duration)|trim != '' -%}
             {%- set scenario_time.duration_ns = scenario_time.duration_ns + step_duration -%}
             {%- set scenario_time.samples = scenario_time.samples + 1 -%}
         {%- endif -%}
@@ -492,8 +518,11 @@
         {%- set result = step.get('result') if step is mapping else none -%}
         {%- set result_map = result if result is mapping else {} -%}
         {%- set _ = background_tokens.append(status_token(result_map.get('status'))|string|trim) -%}
+        {#- The same exported predicate as the scenario's own loop above, for
+            the same reason: the background's total counts exactly the samples
+            its step rows render. -#}
         {%- set step_duration = result_map.get('duration') -%}
-        {%- if step_duration is number -%}
+        {%- if duration_is_usable(step_duration)|trim != '' -%}
             {%- set background_time.duration_ns = background_time.duration_ns + step_duration -%}
             {%- set background_time.samples = background_time.samples + 1 -%}
         {%- endif -%}
@@ -522,9 +551,16 @@
         list is passed straight in. A list of embeddings carried directly is
         accepted by the same call. It is rendered once and its own emptiness is
         the test: a failed scenario with no screenshot is a wholly normal
-        state, because a capture that fails is logged and suppressed. -#}
+        state, because a capture that fails is logged and suppressed.
+
+        THIS SCENARIO'S OWN HEADING GOES IN AS THE FALLBACK CAPTION, never as
+        the caption: the partial uses a fallback only when neither an explicit
+        caption nor the embedding's own name carries text, so a capture named
+        by the run keeps its name and one whose name arrived blank is still
+        labelled - alt text, a caption and an accessible name on its trigger -
+        rather than shipped as unlabelled failure evidence. -#}
     {%- set raw_hooks = scenario_map.get('after') if scenario_map.get('after') is not none else scenario_map.get('embeddings') -%}
-    {%- set shots = screenshots(raw_hooks) -%}
+    {%- set shots = screenshots(raw_hooks, fallback_caption=scenario_heading) -%}
     {%- set has_shots = shots|trim != '' -%}
 
     {#- Tag markup, built once. A macro can only answer with text, so its
@@ -568,7 +604,7 @@
     </nav>
 
 
-    <section class="tqa-scenario" data-tqa-status="{{ scenario_status }}">
+    <section class="tqa-scenario" data-report-status="{{ scenario_status }}">
         {#- The scenario's name is already this page's h1, rendered by the shell
             from the title block, so this heading names the section and carries
             the aggregate status beside it rather than repeating the name. -#}
@@ -675,7 +711,7 @@
             {%- for token in STATUS_READING_ORDER %}
             {%- set counted = count_of(scenario_tokens, token)|int %}
             {%- if counted %}
-            <li class="tqa-count" data-tqa-status="{{ token }}">
+            <li class="tqa-count" data-report-status="{{ token }}">
                 {{ status_badge(token) }}
                 <strong>{{ counted }}</strong>
             </li>
@@ -692,13 +728,21 @@
         on. Each filter button names a status the steps below actually carry;
         "all" is the reserved value that clears the filter. They are
         non-navigating buttons because the behaviour script never suppresses an
-        authored default action, and they are authored unpressed because the
-        unfiltered page is the authored state. THE FILTERABLE UNIT HERE IS THE
-        STEP, so these counts span every step the page renders - the
-        background's included - which is what the filter will actually hide. -#}
+        authored default action. THE FILTERABLE UNIT HERE IS THE STEP, so these
+        counts span every step the page renders - the background's included -
+        which is what the filter will actually hide.
+
+        THE AUTHORED PRESSED STATE IS THE UNFILTERED PAGE'S OWN. The behaviour
+        script's filter model is a show-set per scope in which an EMPTY set
+        means every step is shown, so "all" is pressed exactly while no status
+        is selected - which is the state this page is authored in, and the
+        state a reader with scripting disabled stays in. "all" is therefore
+        authored pressed and each status button unpressed, which is what the
+        script itself writes when it initialises, so the announced state cannot
+        change under the reader as the script loads. -#}
     {%- if page_tokens %}
     <div class="tqa-filter" role="group" aria-label="Filter steps by status">
-        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="false">
+        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="true">
             All steps ({{ page_tokens|length }})
         </button>
         {%- for token in filter_statuses %}
@@ -828,7 +872,8 @@
                     filterable=true,
                     show_location=true,
                     inline_args=true,
-                    embeddings=(raw_hooks if (failure.position is not none and loop.index0 == failure.position) else none)) }}
+                    embeddings=(raw_hooks if (failure.position is not none and loop.index0 == failure.position) else none),
+                    screenshot_fallback_caption=scenario_heading) }}
         {%- endfor %}
     </div>
     {%- else %}

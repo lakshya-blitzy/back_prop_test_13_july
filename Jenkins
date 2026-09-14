@@ -1,17 +1,17 @@
 node {
     stage('Clone code') {
-        git 'https://github.com/BalamiRR/Upgenix-QA.git'
+        checkout scm
     }
 
     stage('Run tests'){
         if(isUnix()){
-            sh "mvn clean test"
+            sh "sh scripts/run_tests.sh"
         } else {
-            bat "mvn clean test"
+            bat "powershell -ExecutionPolicy Bypass -File scripts\\run_tests.ps1"
         }
     }
 
     stage('Generate report'){
-           cucumber failedFeaturesNumber: -1, failedScenariosNumber: -1, failedStepsNumber: -1, fileIncludePattern: '**/*.json', pendingStepsNumber: -1, skippedStepsNumber: -1, sortingMethod: 'ALPHABETICAL', undefinedStepsNumber: -1
+           cucumber failedFeaturesNumber: -1, failedScenariosNumber: -1, failedStepsNumber: -1, fileIncludePattern: 'target/cucumber.json', pendingStepsNumber: -1, skippedStepsNumber: -1, sortingMethod: 'ALPHABETICAL', undefinedStepsNumber: -1
     }
 }

@@ -244,9 +244,11 @@ def create_app(config_overrides: Mapping[str, object] | None = None) -> Flask:
     configure_logging()
 
     # The one blueprint, carrying all six read-only routes.  Importing
-    # ``app.web`` above bound its view functions to it, so registering the
-    # blueprint here registers the whole surface.  There is no second
-    # blueprint and no ``url_prefix``: the six rules carry absolute paths.
+    # ``app.web`` above ran that package's single call to
+    # ``register_routes(web_bp)``, which binds the six view functions, so
+    # registering the blueprint here registers the whole surface.  There is no
+    # second blueprint and no ``url_prefix``: the six rules carry absolute
+    # paths.
     flask_app.register_blueprint(web_bp)
 
     # The 404 and 500 handlers.  Registered after the blueprint so that the

@@ -26,20 +26,28 @@
     are unchanged: shell selection stays with isUnix(), so this file is a
     payload and not a platform abstraction. It performs no platform detection
     of its own and never delegates to its POSIX counterpart. The report
-    publisher is a separate later stage (Jenkins:15) which owns all
+    publisher is a separate later stage (Jenkins:15) which owns all REPORT
     thresholding - its six thresholds are -1 and its sorting is ALPHABETICAL -
-    so nothing here thresholds, sorts, inspects or post-processes a report.
+    so nothing here thresholds, sorts, inspects or post-processes a report
+    artifact.
+
+    The coverage thresholds step 5 applies are a different thing entirely and
+    must not be confused with those six: they gate the line coverage of this
+    port's own Python code, the Makefile's `coverage` target is their canonical
+    declaration, and they say nothing about a scenario, a feature or a report.
 
     THE BEHAVIOURAL MIRROR OF scripts/run_tests.sh
     ----------------------------------------------
     That file is the POSIX branch's payload and this one is the Windows
-    branch's. The two are held to step-for-step parity: the same five steps in
+    branch's. The two are held to step-for-step parity: the same six steps in
     the same order, the same failure conditions, the same exit semantics and
     the same message content. Only platform mechanics differ - a Scripts
     directory with .exe shims instead of bin, the Windows Python launcher
-    among the interpreter candidates, and an explicit exit where the POSIX file
-    can hand its process over to the runner. A divergence beyond that is a
-    defect in whichever of the two drifted.
+    among the interpreter candidates, a reparse-point test where POSIX tests
+    for a symbolic link, the native-command wrapper the next section explains,
+    and an explicit exit where the POSIX file can hand its process over to the
+    runner. A divergence beyond that is a defect in whichever of the two
+    drifted.
 
     HOW IT IS INVOKED, AND THE FOUR CONSEQUENCES
     --------------------------------------------
@@ -55,7 +63,7 @@
          reached returns 0, which is why every path below exits explicitly.
          See EXIT STATUS and THE POWERSHELL TRAP.
       4. Arguments after the -File path reach this script, so the $args
-         forwarding in step 5 works from Jenkins, from a developer shell and
+         forwarding in step 6 works from Jenkins, from a developer shell and
          from the Makefile alike.
 
     CONFIGURATION SURFACE: one environment variable, and no options of its own
@@ -71,27 +79,28 @@
                    rejected like any other candidate.
 
     Every argument this script receives is forwarded verbatim to the run-tests
-    console script in step 5, and nowhere else. No option is defined,
+    console script in step 6, and nowhere else. No option is defined,
     defaulted or interpreted here, and the script declares no param block on
     purpose, so nothing can intercept, validate or reorder what it was given.
     With no arguments - exactly how Jenkins invokes it - the behaviour is
     identical to invoking run-tests bare: the tag default from behave.ini and
     the --clean default from app/cli.py stay in force.
 
-    THE FIVE STEPS, IN ORDER
-    ------------------------
+    THE SIX STEPS, IN ORDER
+    -----------------------
       1. Locate a Python 3.14.6 interpreter, or fail loudly.
       2. Create .venv with that interpreter if it is missing; refuse a drifted
-         one rather than replacing it.
+         or redirected one rather than replacing it.
       3. Install the pinned dependencies, then this project itself (editable).
       4. Run the pytest unit gate.
-      5. Invoke the run-tests console script out of the environment's Scripts
+      5. Run the four per-package coverage gates, in order, first miss fails.
+      6. Invoke the run-tests console script out of the environment's Scripts
          directory.
 
     EXIT STATUS: two different semantics, deliberately not blurred
     -------------------------------------------------------------
       * Bootstrap failures of this script - the working directory, steps 1 to
-        3 and a missing entry point in step 5 - exit 1. app/cli.py never
+        3 and a missing entry point in step 6 - exit 1. app/cli.py never
         returns 1: its published set is 0, 2, 3, 4 and 5, with 1 left out on
         purpose. So a 1 from this stage always means the bootstrap failed and
         never that the suite reported something.
@@ -99,7 +108,11 @@
         quality gate. pytest's exit code 5, "no tests collected", is forwarded
         unchanged too, because a unit gate that collects nothing is a real
         problem rather than a pass.
-      * The suite run in step 5 propagates the run-tests status UNALTERED. A
+      * The coverage gates in step 5 PROPAGATE too, with the status of the
+        first scope that misses its threshold. They gate this port's own test
+        work and have no bearing on the scenario exit contract below - a
+        coverage miss is never a scenario outcome.
+      * The suite run in step 6 propagates the run-tests status UNALTERED. A
         test outcome never reaches it: pom.xml:25 sets
         <testFailureIgnore>true</testFailureIgnore> and all six publisher
         thresholds on Jenkins:15 are -1, so failing scenarios, errors,
@@ -111,18 +124,39 @@
         exactly the classes that must reach Jenkins. Nothing in this file
         suppresses, swallows, remaps or adds to that status.
 
-    THE POWERSHELL TRAP THIS FILE IS BUILT AROUND
-    ---------------------------------------------
-    $ErrorActionPreference = 'Stop' governs PowerShell's own error records. It
-    does NOT cause a NATIVE program that returns non-zero - python.exe, pip,
-    pytest, the runner shim - to terminate the script. Left implicit, this
-    file would run to the end and return 0 whatever those programs reported,
-    and Jenkins would show a green stage over a failed unit gate or a failed
-    report writer. So every native invocation below captures $LASTEXITCODE
-    into a local variable on the very next line and checks it explicitly, and
-    the last statement of the file is an unconditional exit of the status
-    step 5 produced. Nothing here assigns $LASTEXITCODE, hard-codes a success
-    status, or wraps a gate in a try/catch that could swallow one.
+    THE TWO POWERSHELL TRAPS THIS FILE IS BUILT AROUND
+    --------------------------------------------------
+    FIRST: a non-zero native exit status is silent. $ErrorActionPreference =
+    'Stop' governs PowerShell's own error records. It does NOT cause a NATIVE
+    program that returns non-zero - python.exe, pip, pytest, the runner shim -
+    to terminate the script. Left implicit, this file would run to the end and
+    return 0 whatever those programs reported, and Jenkins would show a green
+    stage over a failed unit gate or a failed report writer. So every native
+    invocation below captures $LASTEXITCODE immediately and checks it
+    explicitly, and the last statement of the file is an unconditional exit of
+    the status step 6 produced. Nothing here assigns a success status,
+    hard-codes one, or wraps a gate in a try/catch that could swallow one.
+
+    SECOND, and it is the exact opposite failure: on Windows PowerShell 5.1
+    anything a native program writes to STDERR is turned into a PowerShell
+    error record, and under a global 'Stop' that record TERMINATES the script -
+    before the $LASTEXITCODE capture on the following line ever runs. pip
+    writes warnings to stderr, pytest writes to stderr, and app/cli.py
+    deliberately writes tolerated diagnostics to stderr while returning 0 for
+    every test outcome. So a global 'Stop' around native commands would fail
+    this stage on output alone, for a run the exit contract requires to pass,
+    and would do it inconsistently: PowerShell 7 changed that behaviour, so
+    the bug would appear only on the 5.1 runtime CI actually uses.
+
+    Invoke-NativeCommand below is the answer to both. It saves the current
+    $ErrorActionPreference, sets 'Continue' for the duration of the one native
+    call so stderr cannot terminate anything, invokes the program, captures
+    $LASTEXITCODE on the very next statement with nothing in between, and
+    restores the preference in a finally block. Every native invocation in
+    steps 2 to 6 goes through it; PowerShell cmdlets keep the file-scope
+    'Stop', which is where that preference belongs. A program that cannot be
+    launched at all reports no status, and that is treated as a bootstrap
+    failure rather than as a pass.
 
     Diagnostics go to true stderr through [Console]::Error.WriteLine, which
     bypasses PowerShell's error-record formatting and cannot perturb the exit
@@ -133,7 +167,9 @@
     No Maven invocation - there is no Maven build after the port and pom.xml is
     retained as historical reference only. No `make`: it is optional developer
     convenience, CI must never depend on it, and it is frequently absent from
-    a Windows agent altogether. No report artifact path of any kind -
+    a Windows agent altogether - which is exactly why step 5 spells the four
+    coverage gates out here instead of invoking `make coverage`. No report
+    artifact path of any kind -
     app/utils/paths.py is their sole owner - and no emptying or inspection of
     the generated output directory, which is the runner's --clean, on by
     default. No --tags, --browser, --workers or any other option value. No git
@@ -162,7 +198,8 @@
 .NOTES
     Runtime : Windows PowerShell 5.1 Desktop or later.
     Exit    : 1 for a bootstrap failure of this script; pytest's own status for
-              a unit-gate failure; the run-tests status verbatim otherwise.
+              a unit-gate or coverage-gate failure; the run-tests status
+              verbatim otherwise.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -187,6 +224,12 @@ $ProbeReport = New-Object 'System.Collections.Generic.List[string]'
 # Set by Test-PinnedInterpreter when a candidate matches, so that the progress
 # line can name the interpreter actually chosen rather than the name probed.
 $ResolvedInterpreterPath = ''
+
+# Set by Invoke-NativeCommand to the exit status of the program it just ran.
+# It is a script-scope variable rather than a return value on purpose: a
+# returned value would be written to the success output stream and would
+# interleave with the program's own stdout, which CI reads.
+$LastNativeExitCode = $null
 
 
 # --------------------------------------------------------------------------
@@ -214,6 +257,128 @@ function Write-Diagnostic {
     foreach ($text in $Line) {
         [Console]::Error.WriteLine($text)
     }
+}
+
+function Invoke-NativeCommand {
+    <#
+    .SYNOPSIS
+        Run one native program, safely, and record its exit status in
+        $script:LastNativeExitCode.
+    .DESCRIPTION
+        The single place this file invokes a native program outside the
+        tolerant probe in Get-InterpreterVersion, and it exists for the two
+        traps the file header sets out.
+
+        Windows PowerShell 5.1 turns whatever a native program writes to
+        stderr into a PowerShell error record. Under the file-scope
+        $ErrorActionPreference = 'Stop' that record is TERMINATING, so pip
+        writing a warning, or app/cli.py writing one of the diagnostics it
+        deliberately emits while returning 0, would end this script before the
+        following line could read $LASTEXITCODE - failing a stage the exit
+        contract requires to pass, and only on the 5.1 runtime, since
+        PowerShell 7 changed the behaviour.
+
+        So the preference is saved, set to 'Continue' for the duration of this
+        one call, and restored in a finally block. The assignment is scoped to
+        this function, which is what confines the relaxation to the native
+        call; the explicit restore keeps that true even if this body is ever
+        moved to file scope, and it survives a terminating error in the call.
+        Cmdlets elsewhere in the file keep 'Stop', which is the preference
+        that should govern them.
+
+        $LASTEXITCODE is captured on the statement IMMEDIATELY after the
+        invocation, with nothing in between that could replace it - no
+        cmdlet, no pipeline, no progress message. It is cleared first, so a
+        program that never launched is distinguishable from one that returned
+        0 rather than inheriting a stale status from an earlier call; that
+        case is a bootstrap failure and exits 1 here, because no status means
+        nothing ran.
+
+        The program's own stdout flows through this function's success output
+        stream to the caller's, unchanged and unbuffered by anything here.
+    .OUTPUTS
+        None. The exit status is left in $script:LastNativeExitCode.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $FilePath,
+
+        [Parameter(Mandatory = $false)]
+        [AllowEmptyCollection()]
+        [string[]] $ArgumentList = @()
+    )
+
+    $script:LastNativeExitCode = $null
+    $previousErrorActionPreference = $ErrorActionPreference
+    $launchFailureReason = ''
+
+    try {
+        $ErrorActionPreference = 'Continue'
+        $global:LASTEXITCODE = $null
+        & $FilePath @ArgumentList
+        $script:LastNativeExitCode = $LASTEXITCODE
+    }
+    catch {
+        $launchFailureReason = $_.Exception.Message
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+
+    if ($null -eq $script:LastNativeExitCode) {
+        if ([string]::IsNullOrWhiteSpace($launchFailureReason)) {
+            $launchFailureReason = 'it reported no exit status, so it did not run'
+        }
+        Write-Diagnostic @(
+            'run_tests.ps1: a required program could not be run.',
+            "  program : $FilePath",
+            "  reason  : $launchFailureReason",
+            '',
+            'Nothing ran, so there is no status to report and this is a',
+            'bootstrap failure rather than a test result. Check that the path',
+            'above exists and is executable by the account running this stage.'
+        )
+        exit 1
+    }
+}
+
+function Write-CoverageGateFailure {
+    <#
+    .SYNOPSIS
+        Report a coverage gate in step 5 that missed its threshold.
+    .DESCRIPTION
+        Kept in one place so the four call sites stay readable and each one
+        still shows its own scope and threshold literally. It only writes a
+        diagnostic: the caller sets the exit status on the following line, so
+        nothing here can alter it.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $Scope,
+
+        [Parameter(Mandatory = $true)]
+        [int] $Minimum,
+
+        [Parameter(Mandatory = $true)]
+        [int] $Status
+    )
+
+    Write-Diagnostic @(
+        "run_tests.ps1: the coverage gate for $Scope failed (pytest exit status $Status).",
+        "  scope   : $Scope",
+        "  minimum : $Minimum percent",
+        '',
+        'pytest''s own coverage report above names every line that is not',
+        'covered. The remaining gates and the suite run were NOT started, and',
+        'this stage fails with pytest''s status.',
+        '',
+        'Raise the coverage of that package with real tests. The threshold is',
+        'part of the specification and is not the thing to change: lowering',
+        'it, or dropping the scope, removes the only check that this port''s',
+        'own code is exercised at all.'
+    )
 }
 
 function Add-ProbeNote {
@@ -501,16 +666,32 @@ Write-Output "run_tests.ps1: using $pythonLabel [$ResolvedInterpreterPath] ($Req
 
 # --------------------------------------------------------------------------
 # Step 2 - the virtual environment: create it when it is missing, refuse a
-# drifted one.
+# drifted or redirected one.
 #
-# .venv at the repository root is the sanctioned location: .gitignore excludes
-# both .venv/ and venv/, so creating it here leaves git status clean by design.
+# .venv at the repository root is the sanctioned location, and step 3 installs
+# into it: .gitignore excludes both .venv/ and venv/, so creating it here
+# leaves git status clean by design.
 #
-# An existing .venv built by some other interpreter is precisely the
-# CI-versus-development drift the pin exists to prevent, so it is rejected. It
-# is NOT deleted: silently destroying a developer's environment would be a
-# destructive act nobody asked for, so the operator is told what to remove and
-# the run stops.
+# THREE rejections, in this order, and the order matters:
+#
+#   a. A REDIRECTED .venv - a directory symbolic link, an NTFS junction, a
+#      mounted-folder or any other reparse point. This is checked FIRST,
+#      before the container and version tests, because those follow reparse
+#      points: Test-Path -PathType Container is true for a junction to a
+#      directory, so a .venv pointing at a shared, profile or machine-wide
+#      3.14.6 environment would pass every later check and step 3 would then
+#      pip-install into that external environment, modifying something outside
+#      the checkout. The install has to stay repository-local, so the
+#      redirection is refused instead. This mirrors the `-L` test in
+#      scripts/run_tests.sh, where POSIX -d has the same defect.
+#   b. A .venv that exists but is not a directory at all.
+#   c. A .venv whose interpreter is not exactly the pinned version - precisely
+#      the CI-versus-development drift the pin exists to prevent.
+#
+# None of the three deletes anything. Silently destroying a developer's
+# environment, or following a link and destroying something outside the
+# checkout, would be a destructive act nobody asked for: the operator is told
+# what to remove and the run stops.
 #
 # Every path is built with Join-Path against the resolved repository root, one
 # child at a time because Windows PowerShell 5.1 has no -AdditionalChildPath,
@@ -522,6 +703,47 @@ $venvScriptDirectory = Join-Path -Path $venvDirectory -ChildPath 'Scripts'
 $venvPython = Join-Path -Path $venvScriptDirectory -ChildPath 'python.exe'
 $venvRunTests = Join-Path -Path $venvScriptDirectory -ChildPath 'run-tests.exe'
 
+# (a) -Force so a hidden entry is still seen, and SilentlyContinue so an
+# absent .venv - the ordinary first-run case - is simply $null here. The
+# attribute test is the gate because it covers every reparse-point kind at
+# once; LinkType and Target only enrich the diagnostic.
+$venvItem = Get-Item -LiteralPath $venvDirectory -Force -ErrorAction SilentlyContinue
+if ($null -ne $venvItem -and
+    (($venvItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq [System.IO.FileAttributes]::ReparsePoint)) {
+
+    $venvRedirectionKind = 'reparse point'
+    if ($venvItem.PSObject.Properties.Match('LinkType').Count -gt 0 -and
+        -not [string]::IsNullOrWhiteSpace($venvItem.LinkType)) {
+        $venvRedirectionKind = $venvItem.LinkType
+    }
+
+    $venvRedirectionTarget = 'not reported by this PowerShell version'
+    if ($venvItem.PSObject.Properties.Match('Target').Count -gt 0 -and $null -ne $venvItem.Target) {
+        $reportedTarget = ($venvItem.Target | Out-String).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($reportedTarget)) {
+            $venvRedirectionTarget = $reportedTarget
+        }
+    }
+
+    Write-Diagnostic @(
+        'run_tests.ps1: .venv is a link rather than a real directory, which is not accepted.',
+        "  path   : $venvDirectory",
+        "  kind   : $venvRedirectionKind",
+        "  target : $venvRedirectionTarget",
+        '',
+        'The two pip installs in step 3 install INTO this path, so it has to',
+        'be a real directory inside the checkout. A link, junction or mounted',
+        'folder would send both installs into whatever it points at - a',
+        'shared, profile or machine-wide environment - and modify something',
+        'outside the repository.',
+        '',
+        'Remove or rename that entry and re-run; this script will not delete',
+        'it for you, and it deliberately does not follow it.'
+    )
+    exit 1
+}
+
+# (b)
 if ((Test-Path -LiteralPath $venvDirectory) -and
     -not (Test-Path -LiteralPath $venvDirectory -PathType Container)) {
     Write-Diagnostic @(
@@ -533,6 +755,7 @@ if ((Test-Path -LiteralPath $venvDirectory) -and
     exit 1
 }
 
+# (c)
 if (Test-Path -LiteralPath $venvDirectory -PathType Container) {
     $venvVersion = Get-InterpreterVersion -Command $venvPython
     if ($venvVersion -ne $RequiredPythonVersion) {
@@ -560,8 +783,11 @@ if (Test-Path -LiteralPath $venvDirectory -PathType Container) {
 }
 else {
     Write-Output 'run_tests.ps1: creating .venv'
-    & $pythonCommand @pythonArgument -m venv .venv
-    $venvStatus = $LASTEXITCODE
+    $venvCreationArgument = @()
+    $venvCreationArgument += $pythonArgument
+    $venvCreationArgument += @('-m', 'venv', '.venv')
+    Invoke-NativeCommand -FilePath $pythonCommand -ArgumentList $venvCreationArgument
+    $venvStatus = $script:LastNativeExitCode
     if ($venvStatus -ne 0) {
         Write-Diagnostic @(
             'run_tests.ps1: failed to create the .venv virtual environment.',
@@ -630,7 +856,7 @@ if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
 # nothing else. No index URL is set either, so pip uses whatever the agent is
 # configured for.
 #
-# The second install is the project distribution, and step 5 cannot run
+# The second install is the project distribution, and step 6 cannot run
 # without it: installing -r manifests installs DEPENDENCIES ONLY, while the
 # run-tests console script declared in pyproject.toml under
 #     [project.scripts] run-tests = "app.cli:run_tests"
@@ -647,8 +873,11 @@ if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
 # installer is unambiguously the one just verified.
 # --------------------------------------------------------------------------
 Write-Output 'run_tests.ps1: installing pinned dependencies'
-& $venvPython -m pip install --quiet --disable-pip-version-check -r requirements.txt -r requirements-test.txt
-$dependencyStatus = $LASTEXITCODE
+Invoke-NativeCommand -FilePath $venvPython -ArgumentList @(
+    '-m', 'pip', 'install', '--quiet', '--disable-pip-version-check',
+    '-r', 'requirements.txt', '-r', 'requirements-test.txt'
+)
+$dependencyStatus = $script:LastNativeExitCode
 if ($dependencyStatus -ne 0) {
     Write-Diagnostic @(
         'run_tests.ps1: installing the pinned dependencies failed.',
@@ -664,8 +893,10 @@ if ($dependencyStatus -ne 0) {
 }
 
 Write-Output 'run_tests.ps1: installing the project (editable)'
-& $venvPython -m pip install --quiet --disable-pip-version-check -e .
-$projectStatus = $LASTEXITCODE
+Invoke-NativeCommand -FilePath $venvPython -ArgumentList @(
+    '-m', 'pip', 'install', '--quiet', '--disable-pip-version-check', '-e', '.'
+)
+$projectStatus = $script:LastNativeExitCode
 if ($projectStatus -ne 0) {
     Write-Diagnostic @(
         'run_tests.ps1: installing this project in editable mode failed.',
@@ -689,19 +920,17 @@ if ($projectStatus -ne 0) {
 # is what keeps the behave step definitions under features/steps/ out of the
 # unit suite: they are glue matched by phrase at scenario run time and define
 # no pytest tests. So no path argument is passed here, and no coverage flag
-# either: the four per-package coverage gates (app/utils 90, app/pages 85,
-# app/automation 80, app/reporting 80) live in the Makefile's coverage target
-# and in exactly one place, which is not this file. No Makefile target is
-# invoked from here - CI must not depend on that tool being installed, and on a
-# Windows agent it usually is not.
+# either - measurement is step 5's job, and keeping it out of this run means a
+# coverage miss and a test failure are reported as the separate problems they
+# are.
 #
-# The status PROPAGATES, unlike step 5's. pytest's exit code 5, "no tests
+# The status PROPAGATES, unlike step 6's. pytest's exit code 5, "no tests
 # collected", propagates as well: a unit gate that collects nothing has not
-# passed. On failure the suite run is not started.
+# passed. On failure neither the coverage gates nor the suite run is started.
 # --------------------------------------------------------------------------
 Write-Output 'run_tests.ps1: running the unit gate'
-& $venvPython -m pytest
-$pytestStatus = $LASTEXITCODE
+Invoke-NativeCommand -FilePath $venvPython -ArgumentList @('-m', 'pytest')
+$pytestStatus = $script:LastNativeExitCode
 if ($pytestStatus -ne 0) {
     Write-Diagnostic @(
         "run_tests.ps1: the unit gate failed (pytest exit status $pytestStatus).",
@@ -715,7 +944,73 @@ if ($pytestStatus -ne 0) {
 
 
 # --------------------------------------------------------------------------
-# Step 5 - the suite run, through the one sanctioned entry point.
+# Step 5 - the coverage gates: four scopes, in order, first miss fails.
+#
+# A single --cov-fail-under cannot express four different per-package
+# thresholds, so pytest runs once per scope and each run measures and gates
+# only its own package. The four scopes and their minimums are exactly
+#   app/utils 90, app/pages 85, app/automation 80, app/reporting 80
+# and the Makefile's `coverage` target is their canonical declaration. They
+# are spelled out again here rather than reached through `make coverage`
+# because CI must not depend on make being installed - and on a Windows agent
+# it usually is not installed at all - so the developer command and the CI
+# command are the same four commands, and a threshold that ever changes
+# changes in all three files together.
+#
+# This is where the thresholds are actually ENFORCED on a CI agent. Without
+# this step the pipeline would run the suite with the gates declared but never
+# applied, which is indistinguishable from having no gates at all.
+#
+# The first non-zero status is propagated and nothing after it runs, so the
+# stage fails on the first scope that misses and the suite run is not started.
+# These gates cover this port's own test code only; they say nothing about a
+# scenario outcome, which keeps them clear of the exit contract step 6 carries.
+# --------------------------------------------------------------------------
+Write-Output 'run_tests.ps1: running the coverage gates'
+
+Write-Output 'run_tests.ps1: coverage gate 1 of 4 - app/utils, minimum 90 percent'
+Invoke-NativeCommand -FilePath $venvPython -ArgumentList @(
+    '-m', 'pytest', '--cov=app/utils', '--cov-fail-under=90'
+)
+$coverageStatus = $script:LastNativeExitCode
+if ($coverageStatus -ne 0) {
+    Write-CoverageGateFailure -Scope 'app/utils' -Minimum 90 -Status $coverageStatus
+    exit $coverageStatus
+}
+
+Write-Output 'run_tests.ps1: coverage gate 2 of 4 - app/pages, minimum 85 percent'
+Invoke-NativeCommand -FilePath $venvPython -ArgumentList @(
+    '-m', 'pytest', '--cov=app/pages', '--cov-fail-under=85'
+)
+$coverageStatus = $script:LastNativeExitCode
+if ($coverageStatus -ne 0) {
+    Write-CoverageGateFailure -Scope 'app/pages' -Minimum 85 -Status $coverageStatus
+    exit $coverageStatus
+}
+
+Write-Output 'run_tests.ps1: coverage gate 3 of 4 - app/automation, minimum 80 percent'
+Invoke-NativeCommand -FilePath $venvPython -ArgumentList @(
+    '-m', 'pytest', '--cov=app/automation', '--cov-fail-under=80'
+)
+$coverageStatus = $script:LastNativeExitCode
+if ($coverageStatus -ne 0) {
+    Write-CoverageGateFailure -Scope 'app/automation' -Minimum 80 -Status $coverageStatus
+    exit $coverageStatus
+}
+
+Write-Output 'run_tests.ps1: coverage gate 4 of 4 - app/reporting, minimum 80 percent'
+Invoke-NativeCommand -FilePath $venvPython -ArgumentList @(
+    '-m', 'pytest', '--cov=app/reporting', '--cov-fail-under=80'
+)
+$coverageStatus = $script:LastNativeExitCode
+if ($coverageStatus -ne 0) {
+    Write-CoverageGateFailure -Scope 'app/reporting' -Minimum 80 -Status $coverageStatus
+    exit $coverageStatus
+}
+
+
+# --------------------------------------------------------------------------
+# Step 6 - the suite run, through the one sanctioned entry point.
 #
 # The run-tests console script from the virtual environment's Scripts
 # directory, never the Flask CLI and never python -m: pyproject.toml declares
@@ -742,10 +1037,18 @@ if (-not (Test-Path -LiteralPath $venvRunTests -PathType Leaf)) {
 
 # The status of this invocation is the status of the stage, and the next line
 # propagates it verbatim - deliberately, and as the whole point of the file.
-# The call operator runs the console script in the foreground of this process,
-# so its exit code lands in $LASTEXITCODE; the arguments are forwarded exactly
-# as received, none added, removed or defaulted here; and NOTHING runs between
-# these two lines, because a cmdlet, a pipeline or even a progress message in
-# between could replace the value being returned. Nothing may follow them.
-& $venvRunTests @args
-exit $LASTEXITCODE
+# Invoke-NativeCommand runs the console script in the foreground of this
+# process and captures its exit code on the statement immediately following
+# the call, with nothing in between that could replace the value being
+# returned; the arguments are forwarded exactly as received, none added,
+# removed or defaulted here. It also holds the native-command relaxation the
+# file header explains, without which app/cli.py writing one of the
+# diagnostics it deliberately emits on stderr while returning 0 could
+# terminate this script on a Windows PowerShell 5.1 agent and fail a stage the
+# exit contract requires to pass.
+#
+# $args is forwarded whatever its length: with no arguments, which is how
+# Jenkins invokes this file, the runner is invoked bare and every default
+# stays in force. Nothing may follow these two lines.
+Invoke-NativeCommand -FilePath $venvRunTests -ArgumentList $args
+exit $script:LastNativeExitCode

@@ -81,13 +81,13 @@ it and so reproduces text-only matching exactly.
 
 ``features/Inventory.feature`` shows why it matters, twice over.  Its
 Background step at ``:9`` is ``Given User login to test other features``, whose
-Java declaration is ``@When`` (``Session.java:12``); the baseline
-``target/cucumber.json`` records that step as ``"keyword":"Given "`` against
-``match.location`` ``Session.user_login_to_test_other_features()`` - direct
-evidence that the JVM matched across types.  And within this feature the three
-definitions Java declares ``@Then`` (#6, #8 and #9) are reached through ``And``
-and ``Then`` chains whose effective type can be ``When``; uniform ``@step``
-registration is what keeps them resolving regardless.
+Java declaration is ``@When`` (``Session.java:12``); the baseline JSON report
+records that step as ``"keyword":"Given "`` against ``match.location``
+``Session.user_login_to_test_other_features()`` - direct evidence that the JVM
+matched across types.  And within this feature the three definitions Java
+declares ``@Then`` (#6, #8 and #9) are reached through ``And`` and ``Then``
+chains whose effective type can be ``When``; uniform ``@step`` registration is
+what keeps them resolving regardless.
 
 Import boundary (AAP 0.4.2)
 ---------------------------
@@ -112,9 +112,11 @@ helper, one page class.  What is deliberately absent, and why:
 * **Neither session-lifecycle function.**  ``features/environment.py`` owns
   the scenario lifecycle exclusively (AAP 0.3.3: no step or page ever creates
   or quits a driver), and this module never opens or closes a session.
-* **Only ``wait_visible_element``** from the wait family: visibility of an
-  element already resolved is the only wait shape this class uses, at
-  ``Inventory.java:22`` and ``:38``.
+* **Only ``wait_visible_element``** from the wait family: ``visibilityOf``
+  applied to one of the page's own fields is the only wait shape this class
+  uses, at ``Inventory.java:22`` and ``:38``.  The field was a re-locating
+  proxy, so the helper takes this page's locator constant and performs that
+  lookup inside the wait, once per poll.
 * **No fixed delay.**  This class declares none - it is one of the five
   delay-free step classes, alongside login, logout, sales and session - so the
   seventeen fixed delays AAP 0.4.1 preserves elsewhere have no call site here.
@@ -253,7 +255,7 @@ def user_clicks_on_product_module(context) -> None:
         either lookup.
     """
     page = _page(context)
-    wait_visible_element(page.products, 20)
+    wait_visible_element(page.PRODUCTS, 20)
     page.products.click()
 
 
@@ -341,7 +343,7 @@ def user_clicks_the_save_button(context) -> None:
         either lookup.
     """
     page = _page(context)
-    wait_visible_element(page.save_btn, 20)
+    wait_visible_element(page.SAVE_BTN, 20)
     page.save_btn.click()
 
 

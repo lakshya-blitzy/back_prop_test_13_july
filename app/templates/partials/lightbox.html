@@ -20,9 +20,9 @@
                         has exactly one reference in 1,440,365 bytes, and it
                         is an inline data URI
       pretty/*.html     written into the generated report tree and opened
-                        straight from a Jenkins workspace over the file
-                        protocol, where every reference must resolve inside
-                        that tree
+                        straight from a continuous-integration workspace off
+                        the local filesystem, where every reference must
+                        resolve inside that tree
       view/*.html       served over HTTP by the read-only viewer, which
                         resolves its own assets in base.html and not here
 
@@ -33,11 +33,58 @@
   and is emitted verbatim - never truncated, rewrapped or reformatted, and
   never broken across lines inside the attribute value.
 
+  ===========================================================================
+  THE EMBEDDING CONTRACT: A VALIDATED PNG, AND NOTHING ELSE
+  ===========================================================================
+  The values below are RESULT-CONTROLLED. They arrive from a scenario's own
+  after-hook list, and this macro is the one place in the project that turns
+  them into a data URI - a URI the browser will fetch and decode. That makes
+  this the trust boundary for the whole screenshot path, so the shape is
+  checked here rather than assumed, and the media type in the emitted URI is
+  a FIXED LITERAL rather than the value that arrived.
+
+  An embedding is rendered only when every one of these holds:
+
+      mime_type   equals "image/png", compared case-insensitively after
+                  trimming. The plan's embedding shape is that media type and
+                  no other. A wider test - any image/ subtype - admits
+                  image/svg+xml, and an SVG is not a raster screenshot but an
+                  active document that can carry script, style and external
+                  references, none of which belongs in a report page that is
+                  otherwise guaranteed to reference nothing.
+      data        is canonical standard base64: every character drawn from
+                  the base64 alphabet plus its padding sign, a length that is
+                  a multiple of four, and padding only at the very end. A
+                  payload that is not base64 at all cannot be an image, and
+                  emitting it would produce a broken image where a reader
+                  expects failure evidence.
+      data        begins with the eight characters that are the base64
+                  encoding of the PNG signature. Base64 maps three bytes to
+                  four characters, so the first eight characters of the
+                  encoding of any byte string are fixed by its first six
+                  bytes; a PNG always begins 89 50 4E 47 0D 0A 1A 0A, so
+                  those eight characters are the same for every PNG that
+                  exists. Requiring them rejects base64 of something that is
+                  not a PNG, which the declared media type alone cannot.
+
+  Anything failing any of those renders the EMPTY STRING - no thumbnail, no
+  placeholder, no broken image, and above all no data URI. The behaviour
+  script applies the identical test before it will open an overlay, so the
+  two cannot disagree, and the emitted URI's prefix is written out here as a
+  literal so the media type cannot be influenced from the result at all.
+
+  The checks are whole-string operations rather than a character loop: a
+  screenshot payload runs to hundreds of thousands of characters, and a
+  per-character template loop over one would cost more than rendering the
+  rest of the page. Stripping the allowed characters from both ends and
+  asking whether anything is left is exactly the test "every character is
+  allowed", at the cost of one scan.
+
   THE INPUT MODEL
   ---------------
   One embedding mapping, as the result model carries it:
 
-      mime_type   the attached media type; only an image type is rendered
+      mime_type   the attached media type; only image/png is rendered
       data        the base64 payload, already encoded
       name        the scenario name, used as the caption and the alt text
 
@@ -52,27 +99,36 @@
       {% from 'partials/lightbox.html' import screenshot, screenshots,
                                               lightbox_overlay %}
 
-  screenshot(embedding, caption=none, extra_classes='', thumb_classes='')
-      embedding      REQUIRED. One embedding mapping as described above.
-      caption        Optional, defaults to none. Overrides the embedding's
-                     own name for both the alt text and the caption.
-      extra_classes  Optional, defaults to ''. Appended to the figure.
-      thumb_classes  Optional, defaults to ''. Appended to the image.
+  screenshot(embedding, caption=none, fallback_caption=none,
+             extra_classes='', thumb_classes='')
+      embedding        REQUIRED. One embedding mapping as described above.
+      caption          Optional, defaults to none. OVERRIDES the embedding's
+                       own name for both the alt text and the caption.
+      fallback_caption Optional, defaults to none. Used only when neither a
+                       caption argument nor the embedding's own name carries
+                       text. A caller that knows the scenario it is rendering
+                       - and every caller does - passes its heading here, so
+                       an embedding whose name arrived blank still produces
+                       named failure evidence rather than an unlabelled
+                       image. It never displaces a name the model carries.
+      extra_classes    Optional, defaults to ''. Appended to the figure.
+      thumb_classes    Optional, defaults to ''. Appended to the image.
       Renders one figure holding the screenshot at its natural size, capped
       by the stylesheet. Renders the EMPTY STRING when the embedding is
-      absent, undefined, not a mapping, carries no non-empty data, carries no
-      mime_type, or carries a mime_type that is not an image/ type - the same
-      check the report script applies before it will open an overlay.
-      With neither a caption nor a name the figure keeps an empty alt and no
-      caption element is emitted, which marks the image decorative rather
-      than inventing text for it.
+      absent, undefined, not a mapping, or fails any part of the embedding
+      contract above.
+      With no caption from any of the three sources the figure keeps an empty
+      alt and no caption element is emitted, which marks the image decorative
+      rather than inventing text for it.
 
-  screenshots(embeddings, caption=none, extra_classes='', thumb_classes='')
+  screenshots(embeddings, caption=none, fallback_caption=none,
+              extra_classes='', thumb_classes='')
       embeddings     REQUIRED. A list of embedding mappings. May also be the
                      scenario's own after-hook list, whose entries each carry
                      an embeddings list: one level of nesting is flattened,
                      so callers may pass that list straight in.
-      caption, extra_classes, thumb_classes - as above, applied to each.
+      caption, fallback_caption, extra_classes, thumb_classes - as above,
+                     applied to each.
       Renders zero or more figures and nothing else: no wrapper element, so
       an empty input leaves no node behind at all. Renders the EMPTY STRING
       when the input is absent, undefined, a string, a mapping or not
@@ -90,20 +146,27 @@
   STATE, AND WHY NONE OF IT IS SERVER-RENDERED
   --------------------------------------------
   The overlay ships CLOSED and the page ships fully visible. The stylesheet
-  reads the absence of its three boolean state attributes as expanded,
-  visible and closed, and the report script sets its own three runtime state
-  classes when the reader acts; this file emits neither vocabulary, so server
-  output always describes the no-scripting state and stays correct with
-  scripting disabled and on paper. Nor does this file emit any attribute that
-  would keep the overlay out of the accessibility tree or out of the rendered
-  page: the report script manages the visibility mirror itself, and a second
-  mechanism here could leave an overlay that the script opens and the browser
-  still refuses to show.
+  reads the absence of the report script's three runtime state classes as
+  expanded, visible and closed, and the script adds them when the reader
+  acts; this file emits none of them, so server output always describes the
+  no-scripting state and stays correct with scripting disabled and on paper.
+  Nor does this file emit any attribute that would keep the overlay out of
+  the accessibility tree or out of the rendered page: the report script
+  manages the visibility mirror itself, and a second mechanism here could
+  leave an overlay that the script opens and the browser still refuses to
+  show.
 
   The overlay image is deliberately emitted with NO source attribute at all -
   not a placeholder, not a single-pixel image. The script writes the source
   when it opens the overlay, copying it from the thumbnail that was clicked,
   and removes it again on close.
+
+  THERE IS NO BACKDROP ELEMENT. The overlay container is itself the
+  full-viewport layer the stylesheet dims, and a click whose target is that
+  container is the dismissal. An earlier revision emitted an empty child to
+  give the script a precise target; as a flex child with no content and no
+  rule of its own it had no size at all, so it could never be clicked, and
+  the hook it carried was dead the moment it was written.
 
   WHAT THIS PARTIAL DELIBERATELY DOES NOT OFFER
   ---------------------------------------------
@@ -118,63 +181,191 @@
   glyph is a character reference. No inline style attribute and no embedded
   stylesheet block: presentation belongs to main.css, which one writer
   inlines and the other copies. No class outside the set main.css declares,
-  which is why the caption and backdrop elements carry only their behaviour
-  hooks. And none of the vendored generator's own collapse attributes: the
-  report script is the single owner of interactivity across all three
-  surfaces.
+  which is why the caption element carries only its behaviour hook. And none
+  of the vendored generator's own collapse attributes: the report script is
+  the single owner of interactivity across all three surfaces.
 
   ESCAPING
   --------
   Jinja's automatic HTML escaping is relied on for every interpolated value,
   and no value is ever marked as trusted markup. Scenario names carry
   apostrophes and quotation marks, and assertion text carries angle brackets,
-  so this matters in both the alt attribute and the caption. The base64
-  payload needs no escaping by construction: its alphabet is letters,
-  digits, plus, slash and the padding sign, none of which the escaper
-  rewrites, so the payload survives a round trip byte for byte.
+  so this matters in the alt attribute, the button's accessible name and the
+  caption. The base64 payload needs no escaping by construction: its
+  alphabet is letters, digits, plus, slash and the padding sign, none of
+  which the escaper rewrites, so the payload survives a round trip byte for
+  byte - and the contract above has already established that it contains
+  nothing else.
 
   VOCABULARY - classes from app/static/css/main.css, behaviour hooks from
   app/static/js/report.js, and nothing invented in either namespace:
-      tqa-shot, tqa-shot-thumb, tqa-lightbox, tqa-lightbox-img,
-      tqa-lightbox-close
+      tqa-shot, tqa-shot-trigger, tqa-shot-thumb, tqa-lightbox,
+      tqa-lightbox-img, tqa-lightbox-close
       data-report-screenshot, data-report-screenshot-name,
-      data-report-lightbox and its image, caption, close and backdrop parts
+      data-report-lightbox and its image, caption and close parts
 
-  ACCESSIBILITY - a real figure and caption, a real button for the close
-  control, and alt text taken from the scenario name. The thumbnail is the
-  screenshot itself, displayed at up to the full width of its column, so the
-  overlay is a zoom convenience and never the only way to see the image: a
-  reader who cannot reach the overlay loses no content. The close control is
-  reachable and operable from the keyboard, the report script moves focus to
-  it on open and restores focus on close, and the Escape key dismisses.
+  ACCESSIBILITY
+  -------------
+  THE TRIGGER IS A REAL BUTTON. An image is not focusable and not
+  keyboard-activatable, so a bare img carrying the trigger hook left the
+  zoom interaction reachable by pointer only; wrapping it in a
+  <button type="button"> takes focusability, Enter and Space, the disabled
+  and pressed machinery and the focus ring from the platform instead of
+  reimplementing any of them. The button is given its own accessible name,
+  because a button whose only content is an image with an empty alt has none
+  at all. The stylesheet strips the platform's button chrome so the
+  screenshot looks exactly as it did as a bare image.
+
+  The thumbnail is the screenshot itself, displayed at up to the full width
+  of its column, so the overlay is a zoom convenience and never the only way
+  to see the image: a reader who cannot reach the overlay loses no content,
+  and the image is still there with no scripting at all.
+
+  The overlay is a modal dialog and behaves like one: the report script moves
+  focus to the close control on open, contains Tab and Shift+Tab inside it
+  while it is open, dismisses on Escape, and returns focus to the trigger
+  that opened it. Its caption element carries an id so the script can
+  associate the caption with the dialog as its description.
 -#}
+
+{#- The embedding contract, expressed once. Every constant below is part of
+    it, and each exists because the test it serves cannot be made without it.
+
+    BASE64_CHARS is the standard alphabet plus the padding sign - the set a
+    canonical payload's characters are drawn from, and deliberately NOT the
+    URL-safe alphabet, whose "-" and "_" are a different encoding.
+
+    PNG_BASE64_SIGNATURE is the base64 prefix that establishes PNG's COMPLETE
+    eight-byte signature 89 50 4E 47 0D 0A 1A 0A. Base64 maps each three bytes
+    onto four characters, so characters 1-8 are fixed by signature bytes 1-6
+    and characters 9-11 carry bytes 7 and 8 together with the top two bits of
+    byte 9. Byte 9 is the high byte of the length of a PNG's first chunk,
+    always IHDR at 13 bytes, so those two bits are always zero and the
+    eleventh character is always "o". Eleven characters therefore pin all
+    eight signature bytes and reject nothing a real PNG produces, where the
+    eight-character prefix pins only six - and a payload agreeing in six is
+    base64 of something that is not a PNG. The backend authority in
+    app/reporting/screenshots.py asserts this constant against a genuine PNG
+    encoding rather than trusting the arithmetic.
+
+    PAD1_TAIL_CHARS and PAD2_TAIL_CHARS are the canonicality test a character
+    scan cannot otherwise make. A payload ending in one "=" carries six unused
+    bits in its last data character, and a payload ending in "==" carries
+    four; canonical base64 requires those bits to be zero, so the preceding
+    character must come from the subset whose value is a multiple of four or
+    of sixteen respectively. Without this, iVBORw0KAB== passes - and its bytes
+    canonically encode as iVBORw0KAA==, so a reader has two spellings of one
+    payload to reconcile.
+
+    MAX_BASE64_CHARS mirrors the backend's decoded-size bound at the encoded
+    length that implies it: 32 MiB of image, four characters per three bytes. -#}
+{%- set BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=' -%}
+{%- set PNG_BASE64_SIGNATURE = 'iVBORw0KGgo' -%}
+{%- set PAD1_TAIL_CHARS = 'AEIMQUYcgkosw048' -%}
+{%- set PAD2_TAIL_CHARS = 'AQgw' -%}
+{%- set MAX_BASE64_CHARS = 44739244 -%}
+
+{#- The id the overlay's caption carries, so the script can point the dialog's
+    description at it. The overlay is emitted exactly once per page, so one
+    fixed value is unique by construction. -#}
+{%- set LIGHTBOX_CAPTION_ID = 'tqa-lightbox-caption' -%}
+
+{#- Is this payload canonical standard base64 carrying a PNG?
+
+    Five tests, in the order a failure is cheapest to detect. Every one is a
+    whole-string operation, because a template cannot decode base64 and a
+    per-character loop over a multi-megabyte payload is not an option:
+
+    1. type, a positive length that is a multiple of four, and the encoded
+       upper bound - the shape of any canonical base64 at all;
+    2. the eleven-character PNG prefix, which pins the complete eight-byte
+       signature (see the constants above);
+    3. the character set. trim(chars) strips from both ends any character in
+       the set and stops at the first that is not, so an empty result means
+       EVERY character was in the set - one scan rather than one template
+       iteration per character, and it rejects whitespace, newlines and the
+       URL-safe alphabet's "-" and "_" along with everything else foreign;
+    4. padding position. Stripping the padding sign from both ends and asking
+       whether any remains inside is the interior-padding test, and the length
+       delta caps the run at two. A payload OPENING with padding cannot reach
+       here: test 2 already required it to open with the PNG prefix;
+    5. the pad bits. With one "=" the character before it must come from
+       PAD1_TAIL_CHARS, and with two from PAD2_TAIL_CHARS, which is what makes
+       the accepted spelling of a given byte string unique.
+
+    Tests 1-4 establish "this is standard base64 of something beginning with
+    PNG's signature"; test 5 establishes "and this is its only spelling". The
+    backend authority reaches the same verdict by decoding and re-encoding,
+    and app/reporting/screenshots.py's contract tests hold the two to the same
+    answer on every case rather than trusting them to agree.
+
+    Returns a non-empty string for a usable payload and the empty string
+    otherwise, which is how a Jinja macro returns a predicate. -#}
+{%- macro is_png_payload(payload) -%}
+    {%- if payload is string and payload|length >= 4 and payload|length % 4 == 0
+           and payload|length <= MAX_BASE64_CHARS -%}
+        {%- if payload.startswith(PNG_BASE64_SIGNATURE) and payload|trim(BASE64_CHARS) == '' -%}
+            {%- set unpadded = payload|trim('=') -%}
+            {%- set pad = payload|length - unpadded|length -%}
+            {%- if '=' not in unpadded and pad <= 2 -%}
+                {#- The last data character, whose unused low bits the padding
+                    run makes unused. With no padding there are none. -#}
+                {%- set tail = unpadded[-1] -%}
+                {%- if pad == 0
+                       or (pad == 1 and tail in PAD1_TAIL_CHARS)
+                       or (pad == 2 and tail in PAD2_TAIL_CHARS) -%}
+                    {{- 'yes' -}}
+                {%- endif -%}
+            {%- endif -%}
+        {%- endif -%}
+    {%- endif -%}
+{%- endmacro -%}
 
 {#- Macro 1: one embedding. Every guard below is an isinstance-style test,
     never a truth test, because a strict undefined policy raises on the
     latter - which is exactly how an omitted argument reaches this macro. -#}
-{% macro screenshot(embedding, caption=none, extra_classes='', thumb_classes='') -%}
+{% macro screenshot(embedding, caption=none, fallback_caption=none, extra_classes='', thumb_classes='') -%}
 {%- if embedding is mapping -%}
     {%- set media_type = embedding.get('mime_type') -%}
     {%- set payload = embedding.get('data') -%}
-    {#- A caption argument wins over the embedding's own name; a non-string
-        value of either counts as absent, so no value can ever surface as the
-        text "None" in the rendered page. -#}
+    {#- Caption precedence, in three steps: an explicit caption argument wins,
+        then the embedding's own name, then the caller's fallback. A
+        non-string value at any step counts as absent, so no value can ever
+        surface as the text "None" in the rendered page, and a blank string
+        counts as absent too - an embedding whose name arrived empty is
+        exactly the case the fallback exists for. -#}
     {%- set offered = caption if (caption is not none and caption is not undefined) else embedding.get('name') -%}
-    {%- set label = offered if offered is string else '' -%}
-    {%- set titled = label|trim != '' -%}
+    {%- set named = (offered if offered is string else '')|trim -%}
+    {%- set spare = (fallback_caption if fallback_caption is string else '')|trim -%}
+    {%- set label = named if named != '' else spare -%}
+    {%- set titled = label != '' -%}
     {%- set figure_class = ['tqa-shot', extra_classes if extra_classes is string else '']|map('trim')|select|join(' ') -%}
     {%- set thumb_class = ['tqa-shot-thumb', thumb_classes if thumb_classes is string else '']|map('trim')|select|join(' ') -%}
-    {#- The media type is compared case-insensitively, mirroring the report
-        script's own prefix check, and is emitted exactly as it arrived. -#}
-    {%- if media_type is string and media_type.lower().startswith('image/') and payload is string and payload|trim != '' -%}
+    {#- The media type must BE image/png, not merely begin with image/, and
+        the emitted prefix below is a literal rather than this value. -#}
+    {%- set is_png = media_type is string and media_type|trim|lower == 'image/png' -%}
+    {%- if is_png and is_png_payload(payload)|trim != '' -%}
 <figure class="{{ figure_class }}">
-    <img class="{{ thumb_class }}"
-         src="data:{{ media_type }};base64,{{ payload }}"
-         alt="{{ label if titled else '' }}"
-         loading="lazy"
-         decoding="async"
-         data-report-screenshot
-         {%- if titled %} data-report-screenshot-name="{{ label }}"{% endif %}>
+    <button type="button"
+            class="tqa-shot-trigger"
+            data-report-screenshot
+            {%- if titled %} data-report-screenshot-name="{{ label }}"{% endif %}
+            aria-label="{{ 'Enlarge screenshot: ' ~ label if titled else 'Enlarge screenshot' }}">
+        {#- No loading="lazy". Deferred loading exists to postpone a network
+            fetch, and this image has none to postpone: the bytes are already
+            in the document as a data URI, so lazy loading saves nothing and
+            costs the explicit-dimensions warning a browser raises for a
+            deferred image whose box it cannot predict. The dimensions
+            themselves are not available to supply - the result model records
+            no pixel size for an attachment - so the box is bounded in CSS
+            instead, by the minimum on .tqa-shot-thumb. decoding="async" is
+            kept: it schedules the decode off the critical path, which an
+            inline image still benefits from. -#}
+        <img class="{{ thumb_class }}"
+             src="data:image/png;base64,{{ payload }}"
+             alt="{{ label if titled else '' }}"
+             decoding="async">
+    </button>
     {%- if titled %}
     <figcaption>{{ label }}</figcaption>
     {%- endif %}
@@ -186,7 +377,7 @@
 {#- Macro 2: zero or more embeddings, silent on everything it cannot use. A
     mapping is rejected rather than iterated, so passing a single hook entry
     yields nothing instead of walking its keys. -#}
-{% macro screenshots(embeddings, caption=none, extra_classes='', thumb_classes='') -%}
+{% macro screenshots(embeddings, caption=none, fallback_caption=none, extra_classes='', thumb_classes='') -%}
 {#- Order matters, and it is load-bearing: the iterable test tries to iterate
     its subject and only forgives a plain type error, so a strict undefined -
     an omitted argument - raises there. Ruling it out first, while the tests
@@ -200,19 +391,29 @@
         {%- set nested = item.get('embeddings') if item is mapping else none -%}
         {%- if nested is not none and nested is not undefined and nested is iterable and nested is not string and nested is not mapping -%}
             {%- for inner in nested -%}
-                {{- screenshot(inner, caption, extra_classes, thumb_classes) -}}
+                {{- screenshot(inner,
+                               caption=caption,
+                               fallback_caption=fallback_caption,
+                               extra_classes=extra_classes,
+                               thumb_classes=thumb_classes) -}}
             {%- endfor -%}
         {%- else -%}
-            {{- screenshot(item, caption, extra_classes, thumb_classes) -}}
+            {{- screenshot(item,
+                           caption=caption,
+                           fallback_caption=fallback_caption,
+                           extra_classes=extra_classes,
+                           thumb_classes=thumb_classes) -}}
         {%- endif -%}
     {%- endfor -%}
 {%- endif -%}
 {%- endmacro %}
 
-{#- Macro 3: the one overlay per page. The container itself is the backdrop
-    in the stylesheet, and the explicit backdrop element below gives the
-    report script a precise dismissal target; neither carries a class,
-    because main.css declares none for them. -#}
+{#- Macro 3: the one overlay per page. The container itself is the backdrop -
+    in the stylesheet, which dims it, and in the report script, which treats a
+    click on the container as the dismissal - so there is no backdrop child
+    and no hook for one. The caption carries an id as well as its hook,
+    because the script associates it with the dialog as the description of
+    the image being shown. -#}
 {% macro lightbox_overlay(label=none) -%}
 {%- set close_label = label if (label is string and label|trim != '') else 'Close screenshot' -%}
 <div class="tqa-lightbox"
@@ -221,9 +422,8 @@
      aria-modal="true"
      tabindex="-1"
      aria-label="Screenshot viewer">
-    <div data-report-lightbox-backdrop></div>
     <img class="tqa-lightbox-img" data-report-lightbox-image alt="">
-    <p data-report-lightbox-caption></p>
+    <p id="{{ LIGHTBOX_CAPTION_ID }}" data-report-lightbox-caption></p>
     <button type="button"
             class="tqa-lightbox-close"
             data-report-lightbox-close

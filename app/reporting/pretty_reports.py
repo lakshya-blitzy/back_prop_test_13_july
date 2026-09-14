@@ -22,40 +22,128 @@ What this module owns
    and constructs none of them.
 2. **Which features and which tags appear at all.**  A scenario the tag
    expression did not select never ran, so it never reached the reference
-   generator; a feature with nothing selected is therefore omitted altogether
-   (:func:`emitted_features`), and a tag carried only by unselected scenarios
-   gets no page (:func:`collect_tags`).
-3. **The tags-overview rows.**  ``pretty/overview_tags.html`` is the one page
-   with no primary derivation of its own, so :func:`build_tag_rows` and
-   :func:`build_tag_totals` aggregate them here, mirroring
-   ``pretty/tag.html``'s tally rule for rule so the overview row and the tag
-   page's own row cannot disagree.
-4. **Rendering and writing.**  :func:`render_pretty_pages` maps output
-   filename to HTML and touches no file; :func:`copy_pretty_assets` performs
-   the byte copy of the vendored asset set; :func:`write_pretty_reports`
-   composes the two.
+   generator; :func:`emitted_features` therefore drops it -- and its feature
+   with it once no test case is left -- and a tag carried only by unselected
+   scenarios gets no page (:func:`collect_tags`).
+3. **The tag set and the tag pages.**  Tag collection, tag ordering and each
+   tag's detail-page name are this module's, and the rows those pages and
+   ``pretty/overview_tags.html`` render come from the aggregation authority
+   (:func:`build_tag_rows`, :func:`build_tag_totals`), so an overview row and
+   the tag page it links are two readings of one calculation.
+4. **Rendering and writing.**  :func:`iter_pretty_pages` renders and yields
+   one page at a time; :func:`render_pretty_pages` is
+   ``dict(iter_pretty_pages(...))`` and touches no file;
+   :func:`copy_pretty_assets` copies the vendored asset set and validates the
+   required manifest; :func:`write_pretty_reports` publishes the tree.
+5. **This artifact's publication.**  The tree is built in a staging directory
+   and swapped into place, so the published tree is a complete generation or
+   the previous complete one -- never a mixture.  See *Publication* below.
 
 What this module deliberately does *not* own
 --------------------------------------------
 * **Markup.**  All six page templates and their four helpers already exist
-  under ``app/templates/pretty/``.  The three overview pages that can derive
-  their own rows do so -- their arithmetic was taken from the generator's
-  bytecode and is documented in the templates themselves -- so this module
-  passes the normalized result model straight through rather than aggregating
-  a second time and risking two answers to one question.
+  under ``app/templates/pretty/``.
+* **Aggregation.**  :mod:`app.reporting.aggregation` is the single normalised
+  result model: every status, fold, count, duration, timestamp and selection
+  rule is computed there and **read** here.  This module used to reimplement
+  all of them and the copies had already drifted apart from the ones in
+  ``app/reporting/html_report.py``, the Pretty templates and
+  ``app/web/routes.py`` (``ambiguous`` folded onto Undefined on the features
+  overview and nowhere else; hook statuses counted on some surfaces only;
+  failed scenarios derived as *total minus passed* on one page and as *a
+  literal failed token* on the next).  The names this module still exports for
+  those calculations -- :func:`status_token`, :func:`worst_status`,
+  :func:`element_status`, :func:`element_duration_ns`,
+  :func:`emitted_features`, :func:`build_tag_rows`, :func:`build_tag_totals`
+  and the status vocabulary -- are the authority's, re-exported or delegated to
+  so that a consumer written against this module's surface keeps working while
+  there is exactly one implementation underneath.
 * **The tablesorter initialisation.**  ``pretty/_layout.html`` emits it
   exactly once per page.  A second copy must never be added here.
-* **Deleting anything.**  :mod:`app.utils.paths` creates directories and never
-  removes them, and emptying the build-output directory is ``app/cli.py``'s
-  ``--clean`` step.  This module overwrites its files in place.
+* **Emptying the build-output directory.**  That is ``app/cli.py``'s
+  ``--clean`` step.  This writer replaces **its own** output directory and
+  nothing else: no sibling artifact -- the JSON report, the rerun manifest,
+  the self-contained page -- is read, moved or removed here, and the
+  build-output directory itself is never emptied.
 * **Status or duration presentation.**  ``pretty/_macros.html`` owns duration,
   count, percentage and timestamp formatting and
   ``partials/status_badge.html`` owns status normalisation, so raw nanosecond
   integers and raw status strings are passed through untouched.
 
+The render contract this writer feeds
+-------------------------------------
+Every page receives ``project_name`` and ``build_date_display``;
+``title_suffix`` is set by each page template and ``active_page`` by the four
+overview templates only.  Beyond that chrome, one
+:func:`app.reporting.aggregation.normalize_run` call produces everything the
+pages show, and each page is handed the products it needs rather than a model
+to re-derive:
+
+============================ ===============================================
+Page                         Context it receives
+============================ ===============================================
+the features overview       ``features`` (decorated), ``feature_hrefs``,
+                             ``feature_rows`` and ``totals`` -- the
+                             authority's per-feature statistics rows and
+                             their footer sums -- and the same two values
+                             under ``feature_stats`` and ``feature_totals``,
+                             which are the names this template's own
+                             override contract already declares and reads.
+``overview-tags.html``       ``tags`` (the authority's tag rows) and
+                             ``totals`` (their footer sums).
+``overview-steps.html``      ``features`` (decorated).  Per-step-location
+                             aggregation is this page's own and has no
+                             authority equivalent.
+``overview-failures.html``   ``features`` (decorated), ``feature_hrefs``,
+                             ``tag_hrefs``.
+``report-feature_*.html``    ``feature`` (decorated), ``feature_stats`` (that
+                             feature's authority row), ``tag_hrefs``.
+``report-tag_*.html``        ``tag`` (that tag's authority row),
+                             ``elements`` (its decorated scenario elements,
+                             each carrying ``feature_href`` and
+                             ``feature_name``), ``tag_hrefs``.
+============================ ===============================================
+
+*Decorated* is :func:`app.reporting.aggregation.decorate_feature`: every
+feature and every element carries ``status`` (the severity fold), ``verdict``
+(the binary PrettyReports one), ``duration_ns``, ``duration_samples`` and
+``stats``.  The templates are free to switch from deriving those values to
+reading them; until they do, the rows and totals above are what stops the
+overview and the detail pages from stating different numbers, because both
+read one calculation.
+
+Publication
+-----------
+The report tree :func:`app.utils.paths.pretty_reports_html_dir` names is a
+**directory** artifact, so
+"complete or untouched" cannot be had from one atomic file write.  It is had
+from a staged swap instead:
+
+1. a dot-prefixed sibling of the final directory is the staging tree -- a
+   sibling so that the swap is a rename on one filesystem, dot-prefixed so
+   that :func:`app.utils.paths.resolve_artifact` rejects it and no partial
+   generation is ever reachable over HTTP;
+2. the assets are copied into staging and validated, then the pages are
+   written into it one at a time from :func:`iter_pretty_pages`, then the
+   whole inventory -- every page-linked asset, all eleven fonts and every page
+   the iterator produced -- is verified **before** anything is published;
+3. the existing tree is renamed aside, staging is renamed into place, and the
+   renamed-aside copy is deleted.  Two renames rather than one replace,
+   because renaming a directory onto an existing directory fails on Windows
+   and on POSIX alike, and AAP 0.8 requires Windows support;
+4. on any failure the staging tree is removed and a tree already renamed
+   aside is renamed back, so the previous complete generation survives; and no
+   staging or renamed-aside directory outlives the call either way.
+
+The published tree therefore holds exactly one detail page per current feature
+and per current tag, with no page from an earlier run left behind -- which is
+what the artifact contract means by "one detail page per feature and per tag"
+and what ``--no-clean`` used to break.
+
 Boundaries
 ----------
 * Imports are limited to the standard library, :mod:`jinja2`,
+  :mod:`app.reporting.aggregation` (every derived number),
   :mod:`app.reporting.events` (the result schema) and :mod:`app.utils.paths`
   (every path).  Nothing in ``app/reporting`` imports a service: the plan's
   dependency edge runs ``services -> reporting`` and never the reverse.
@@ -70,6 +158,12 @@ Boundaries
   :func:`~app.utils.paths.templates_dir`.  The emitted *page* and *asset*
   names below are the artifact contract itself -- the same four navigation
   targets ``pretty/_layout.html`` hard-codes -- and are declared once each.
+  The **one** name derived here is the staging directory's, and it is derived
+  here on purpose: it is a sibling of a path :mod:`app.utils.paths` owns, its
+  leading dot is exactly what that module's own ``resolve_artifact`` rejects,
+  and it exists only for the duration of a single :func:`write_pretty_reports`
+  call, so it is this writer's private publication detail rather than an
+  artifact location.
 
 Determinism
 -----------
@@ -79,34 +173,67 @@ in the model's own source order, scenarios in line order, Background
 occurrences left where they are, tag pages in first-appearance order, and the
 same page set for the same input.  Nothing here sorts: the publisher's
 ``sortingMethod: 'ALPHABETICAL'`` (``Jenkins:15``) is a display option of its
-own and imposes nothing on the artifacts.  The one value that legitimately
-differs between two renders of the same document is the build date, and only
-when the document carries neither ``generated_at`` nor ``started_at``.
+own and imposes nothing on the artifacts.  **Two renders of one document are
+identical, including the chrome**: the build date comes from the document's own
+``generated_at`` or ``started_at`` and is empty when it carries neither, so no
+clock reaches a page, and the project name likewise comes from the document or
+from the caller and is never a literal this module supplies.
 
 Failure behaviour
 -----------------
 A **test outcome never raises**: failures, undefined steps, skipped steps, an
 empty selection and an absent tag set are all data that render.  Malformed
 model input is tolerated defensively rather than raised on, because a report is
-what a reader turns to when a run has gone wrong.  Only genuine render or I/O
-faults propagate (:class:`jinja2.TemplateError`, :class:`OSError`), becoming
-the command line's writer-failure exit class -- under which the pages written
-before the fault deliberately remain on disk, which matters here because this
-writer emits many files rather than one.
+what a reader turns to when a run has gone wrong.  Only genuine render, asset
+or I/O faults propagate (:class:`jinja2.TemplateError`,
+:class:`FileNotFoundError`, :class:`OSError`), becoming the command line's
+writer-failure exit class, which names this writer on stderr.  Nothing
+half-written is left behind when they do: the fault happens inside the staging
+tree, that tree is removed, and the published tree is the previous complete
+generation -- or, on a first run, absent.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import re
 import shutil
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final
 
 from jinja2 import Environment, FileSystemLoader
 
-from app.reporting.events import ELEMENT_TYPE_SCENARIO, JsonDict, ResultSet
+# The aggregation authority.  Names imported here are re-exported deliberately:
+# this module's published surface predates the authority, so a consumer that
+# imports ``status_token`` or ``element_status`` from here keeps working while
+# there is exactly one implementation of each underneath (see the module
+# docstring's "Aggregation" bullet).
+from app.reporting.aggregation import (
+    KNOWN_STATUSES,
+    STATUS_PRECEDENCE,
+    UNKNOWN_STATUS,
+    as_mapping,
+    as_text,
+    build_row_totals,
+    element_duration_ns,
+    element_status,
+    is_scenario_element,
+    is_selected,
+    mappings,
+    normalize_run,
+    parse_timestamp,
+    selected_features,
+    status_token,
+    tag_row,
+    worst_status,
+)
+from app.reporting.aggregation import (
+    build_tag_rows as _aggregate_tag_rows,
+)
+from app.reporting.events import JsonDict, ResultSet
 from app.utils.paths import (
     PRETTY_OVERVIEW_INDEX,
     ensure_dir,
@@ -132,6 +259,7 @@ __all__ = [
     "PAGE_LINKED_ASSETS",
     "PAGE_SUFFIX",
     "PORT_ASSETS",
+    "REQUIRED_ASSETS",
     "STATUS_PRECEDENCE",
     "TAG_PAGE_PREFIX",
     "TAG_TEMPLATE",
@@ -148,7 +276,9 @@ __all__ = [
     "feature_href_map",
     "feature_page_name",
     "format_build_date",
+    "iter_pretty_pages",
     "java_hash_code",
+    "local_page_href",
     "render_pretty_pages",
     "status_token",
     "tag_href_map",
@@ -274,9 +404,12 @@ PAGE_LINKED_ASSETS: Final[tuple[str, ...]] = (
 )
 
 #: The eleven font files the two vendored stylesheets request as
-#: ``url(../fonts/<name>)``.  They are referenced from CSS rather than from a
-#: page, so an absent one is reported as a warning instead of failing the
-#: write: the pages still render, with the icon fonts falling back.
+#: ``url(../fonts/<name>)``.  All eleven are **mandatory**, exactly as the
+#: page-linked assets above are: the stylesheets this writer copies request
+#: them by name, so a tree missing one links a file that is not there, and a
+#: published artifact that links absent files is broken rather than merely
+#: unstyled.  :func:`copy_pretty_assets` therefore raises for a missing font,
+#: and it raises before publication, so the previous complete tree stands.
 VENDORED_FONT_ASSETS: Final[tuple[str, ...]] = (
     "fonts/FontAwesome.otf",
     "fonts/fontawesome-webfont.eot",
@@ -291,64 +424,39 @@ VENDORED_FONT_ASSETS: Final[tuple[str, ...]] = (
     "fonts/glyphicons-halflings-regular.woff2",
 )
 
+#: The asset manifest a published tree must satisfy in full: everything a page
+#: links by name and every font the copied stylesheets request.  One name for
+#: the whole requirement, checked by :func:`copy_pretty_assets` after the copy
+#: and again over the staging tree before the swap, so "the tree references a
+#: file that is not there" cannot become a published artifact.
+REQUIRED_ASSETS: Final[tuple[str, ...]] = PAGE_LINKED_ASSETS + VENDORED_FONT_ASSETS
+
 # --------------------------------------------------------------------------- #
-# Status vocabulary.  Mirrors ``partials/status_badge.html``'s ``status_token``
-# and ``pretty/_element_tree.html``'s ``STATUS_PRECEDENCE`` exactly, because
-# the tags-overview rows this module builds must agree cell for cell with the
-# tag page's own tally, which those macros compute.
+# Status vocabulary.  :data:`KNOWN_STATUSES`, :data:`UNKNOWN_STATUS` and
+# :data:`STATUS_PRECEDENCE` are imported from
+# :mod:`app.reporting.aggregation` and re-exported unchanged: they were
+# declared here as well until the two copies became two chances to disagree,
+# and the authority is where ``partials/status_badge.html``'s vocabulary and
+# ``pretty/_element_tree.html``'s precedence are now stated once.  The nine
+# statistics-table count keys live there too, as ``COUNT_KEYS``, and are read
+# by :func:`build_tag_totals` through the authority's own footer sum.
 # --------------------------------------------------------------------------- #
-
-#: Every status token the templates recognise.
-KNOWN_STATUSES: Final[tuple[str, ...]] = (
-    "passed",
-    "failed",
-    "skipped",
-    "pending",
-    "undefined",
-    "untested",
-    "ambiguous",
-)
-
-#: What an unrecognised, blank or absent status normalises to.  A status the
-#: model never produced must not be reported as a pass.
-UNKNOWN_STATUS: Final[str] = "unknown"
-
-#: Severity order, highest first: the first member that occurs among a set of
-#: step statuses is the status of the scenario or feature they belong to.
-STATUS_PRECEDENCE: Final[tuple[str, ...]] = (
-    "failed",
-    "undefined",
-    "ambiguous",
-    "pending",
-    "skipped",
-    "untested",
-    "passed",
-)
-
-#: The nine count keys ``pretty/_stats_table.html`` reads on a row and sums in
-#: its footer.
-_COUNT_KEYS: Final[tuple[str, ...]] = (
-    "steps_passed",
-    "steps_failed",
-    "steps_skipped",
-    "steps_pending",
-    "steps_undefined",
-    "steps_total",
-    "scenarios_passed",
-    "scenarios_failed",
-    "scenarios_total",
-)
 
 # --------------------------------------------------------------------------- #
 # Page identity
 # --------------------------------------------------------------------------- #
 
-#: The Project cell of every page's build-info table.  The reference carries
-#: the Java generator's own placeholder ("No Name (add projectName to
-#: cucumber-reporting.properties)"); this port states its own name instead,
-#: which is ``pyproject.toml``'s ``[project] name`` and the name the layout's
-#: footer already credits.
-DEFAULT_PROJECT_NAME: Final[str] = "testinium-qa"
+#: The default Project cell of every page's build-info table, and it is
+#: **deliberately empty**.  A report states what the run recorded; a project
+#: name this module supplied from a literal would be metadata the result
+#: document does not carry, presented in a metadata table as though it did --
+#: and the reference's own value for the same absence is the generator's
+#: placeholder text, not a name.  So the default is the empty string, the
+#: document's ``project_name`` key is read when it has one
+#: (:func:`render_pretty_pages`), and an explicit argument from a caller that
+#: genuinely knows the name still wins over both.  ``pretty/_layout.html``
+#: renders an absent value as an empty cell, which is the honest answer.
+DEFAULT_PROJECT_NAME: Final[str] = ""
 
 #: English month abbreviations, used instead of ``strftime('%b')`` on purpose.
 #: The reference build date reads "07 Sep 2022, 15:39", and ``%b`` follows
@@ -567,209 +675,161 @@ def tag_page_name(tag_name: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Defensive model readers.
+# The link allowlist.
 #
-# The result document is plain JSON-serialisable data, and a report is exactly
-# what a reader turns to when a run has gone wrong, so a malformed node is
-# skipped rather than raised on.  The page templates apply the same discipline
-# to the same values; these helpers keep the Python side in step.
+# Every page of this tree links only to another page of this tree, and every
+# one of those names is computed above.  A destination that reaches a template
+# from the result document is therefore never a destination: the document is
+# produced by a run, and a run's JSON is data this writer reads rather than
+# code it trusts.  Autoescaping does not help here -- it escapes HTML, and
+# ``javascript:alert(9)`` contains not one character HTML escaping touches --
+# so the check is an allowlist of the names the writer actually emits and
+# nothing else.
 # --------------------------------------------------------------------------- #
 
+#: The four fixed navigation targets, as a set, built from the same constants
+#: the writer names its files with so the allowlist cannot drift from them.
+_FIXED_PAGE_NAMES: Final[frozenset[str]] = frozenset(
+    {
+        OVERVIEW_FEATURES_PAGE,
+        OVERVIEW_TAGS_PAGE,
+        OVERVIEW_STEPS_PAGE,
+        OVERVIEW_FAILURES_PAGE,
+    }
+)
 
-def _as_mapping(value: Any) -> JsonDict:
-    """Return ``value`` when it is a mapping, otherwise an empty one."""
-    return value if isinstance(value, dict) else {}
-
-
-def _mappings(value: Any) -> list[JsonDict]:
-    """Return the mapping members of ``value``, or an empty list.
-
-    A string is a sequence of characters and a mapping a sequence of keys;
-    neither is a list of model nodes, so both are rejected outright rather
-    than iterated one character or one key at a time.
-    """
-    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        return [item for item in value if isinstance(item, dict)]
-    return []
-
-
-def _as_text(value: Any) -> str:
-    """Return ``value`` stripped when it is a string, otherwise ``""``."""
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _is_selected(element: JsonDict) -> bool:
-    """Answer whether the tag expression selected ``element``.
-
-    Absent means selected: a document without the key predates the flag.  Only
-    an explicit ``False`` excludes an element, matching ``pretty/tag.html``'s
-    ``false if (selected is boolean and not selected) else true``.
-
-    Args:
-        element: A Background or scenario element.
-
-    Returns:
-        ``False`` only when the element carries ``"selected": False``.
-    """
-    return element.get("selected", True) is not False
+#: The two detail-page shapes: a fixed prefix, an unsigned decimal hash and the
+#: suffix.  Assembled from :data:`FEATURE_PAGE_PREFIX`,
+#: :data:`TAG_PAGE_PREFIX` and :data:`PAGE_SUFFIX` for the same reason, and
+#: anchored at both ends.  ``[0-9]`` rather than ``\d``, which in Python also
+#: matches the decimal digits of other scripts -- a filename this writer cannot
+#: produce.
+_DETAIL_PAGE_PATTERN: Final[re.Pattern[str]] = re.compile(
+    "(?:{feature}|{tag})[0-9]+{suffix}".format(
+        feature=re.escape(FEATURE_PAGE_PREFIX),
+        tag=re.escape(TAG_PAGE_PREFIX),
+        suffix=re.escape(PAGE_SUFFIX),
+    )
+)
 
 
-def _is_scenario(element: JsonDict) -> bool:
-    """Answer whether ``element`` is a scenario rather than a Background.
+def local_page_href(candidate: Any) -> str:
+    """Return ``candidate`` when it names a page of this tree, else ``""``.
 
-    A Background occurrence is not a test case however many times it appears,
-    so it is never counted as a scenario -- the generator's own
-    ``isScenario()`` is ``"scenario".equalsIgnoreCase(type)``, which this
-    reproduces case-insensitively.
+    The single validation point for every dynamic ``href`` the six page
+    templates emit.  It is registered as a Jinja global by
+    :func:`build_environment`, which is the only environment that renders
+    ``pretty/*``, so every link sink in the folder reaches this one
+    implementation rather than repeating a check four ways.
 
-    Args:
-        element: A Background or scenario element.
+    **What is accepted** is exactly what this module writes: the four fixed
+    overview filenames, and a detail page named by
+    :func:`feature_page_name` or :func:`tag_page_name`.  Everything else is
+    rejected, and the caller renders its label as plain text -- never as a link
+    to nowhere and never as an empty anchor.  Rejected outright, therefore:
 
-    Returns:
-        ``True`` when the element's ``type`` is ``"scenario"``.
-    """
-    return _as_text(element.get("type")).lower() == ELEMENT_TYPE_SCENARIO
+    * any scheme at all, ``javascript:`` and ``data:`` included, which
+      autoescaping does not neutralise;
+    * any absolute, protocol-relative, parent-relative or nested path, so no
+      destination can leave the emitted tree;
+    * any query or fragment, which no page of this tree takes;
+    * whitespace, control characters, a non-string and an empty value.
 
-
-def status_token(status: Any) -> str:
-    """Normalise a raw status exactly as ``partials/status_badge.html`` does.
-
-    The single normalisation point on the Python side.  It exists so that the
-    tags-overview rows built here and the tag page's own tally -- computed in
-    the templates from the same rule -- cannot answer differently.
+    A non-empty value that is rejected is logged at warning level: the only
+    way one can arrive is a result document carrying a destination the writer
+    did not compute, and that is worth a line in the build log.  An empty or
+    absent value is silent -- a feature with no URI has no page, which is a
+    normal state this writer reports separately.
 
     Args:
-        status: A raw ``result.status`` value, or anything at all.
+        candidate: The value a template holds, of any type.  A
+            :class:`jinja2.Undefined` from an absent model key is a non-string
+            and is answered with ``""`` rather than raising, which is what lets
+            the templates render under a strict undefined policy.
 
     Returns:
-        The status in lower case when it is one of :data:`KNOWN_STATUSES`,
-        otherwise :data:`UNKNOWN_STATUS`.  A blank, absent or unrecognised
-        status is deliberately not treated as a pass.
+        The candidate unchanged when it is one of this tree's page names,
+        otherwise the empty string.
 
     Examples:
-        >>> status_token("Passed")
-        'passed'
-        >>> status_token(None)
-        'unknown'
-        >>> status_token("executing")
-        'unknown'
+        >>> local_page_href(OVERVIEW_FEATURES_PAGE) == OVERVIEW_FEATURES_PAGE
+        True
+        >>> local_page_href("report-feature_1364259633.html")
+        'report-feature_1364259633.html'
+        >>> local_page_href("report-tag_4059758862.html")
+        'report-tag_4059758862.html'
+        >>> local_page_href("javascript:alert(9)")
+        ''
+        >>> local_page_href("http://evil.example/x.html")
+        ''
+        >>> local_page_href("/etc/passwd")
+        ''
+        >>> local_page_href("../../etc/passwd")
+        ''
+        >>> local_page_href("report-feature_1364259633.html/../../x")
+        ''
+        >>> local_page_href(OVERVIEW_FEATURES_PAGE + "?a=b#z")
+        ''
+        >>> local_page_href("report-feature_.html")
+        ''
+        >>> local_page_href(None)
+        ''
+        >>> local_page_href("")
+        ''
     """
-    candidate = _as_text(status).lower()
-    return candidate if candidate in KNOWN_STATUSES else UNKNOWN_STATUS
-
-
-def worst_status(tokens: Iterable[str], empty: str = "passed") -> str:
-    """Fold already-normalised status tokens by :data:`STATUS_PRECEDENCE`.
-
-    Args:
-        tokens: Normalised tokens, in any order.
-        empty: What to answer for an empty collection, or for one holding
-            nothing the precedence names.  The default is ``"passed"``, which
-            is measured rather than chosen: ``EmployeeFc.feature`` declares a
-            Background with an empty body, and the reference generator renders
-            each of its step-less occurrences as passed.  A caller asking a
-            run-level question can pass :data:`UNKNOWN_STATUS` instead.
-
-    Returns:
-        The most severe token present, or ``empty``.
-
-    Examples:
-        >>> worst_status(["passed", "skipped", "failed"])
-        'failed'
-        >>> worst_status([])
-        'passed'
-        >>> worst_status(["unknown"], empty="unknown")
-        'unknown'
-    """
-    present = set(tokens)
-    for candidate in STATUS_PRECEDENCE:
-        if candidate in present:
-            return candidate
-    return empty
-
-
-def _step_tokens(element: JsonDict) -> list[str]:
-    """Return the normalised status of every step of ``element``, in order."""
-    return [
-        status_token(_as_mapping(step.get("result")).get("status"))
-        for step in _mappings(element.get("steps"))
-    ]
-
-
-def element_status(element: JsonDict, empty: str = "passed") -> str:
-    """Return the status of one element, decided by its own steps alone.
-
-    A scenario is not coloured by its neighbours and a Background occurrence is
-    not coloured by the scenario that follows it, which is what
-    ``pretty/_element_tree.html``'s ``element_status`` macro implements.
-
-    Args:
-        element: A Background or scenario element.
-        empty: Answer for an element with no steps; see :func:`worst_status`.
-
-    Returns:
-        The most severe status among the element's steps.
-    """
-    return worst_status(_step_tokens(element), empty=empty)
-
-
-def element_duration_ns(element: JsonDict) -> int:
-    """Return the element's duration as a nanosecond integer.
-
-    The sum of its **step** durations and nothing else: hook durations are
-    never added, so the after-hook that carries a failure screenshot does not
-    lengthen its scenario.  A duration that is absent, a boolean, a float or
-    negative counts as *no sample* rather than as zero, so one malformed step
-    cannot poison the sum, and an element with no samples answers ``0`` --
-    which the generator's own arithmetic also produces and which the macros
-    render as ``0.000``.  A skipped step legitimately carries no ``duration``
-    key at all, so this path is ordinary rather than exceptional.
-
-    Args:
-        element: A Background or scenario element.
-
-    Returns:
-        The total in nanoseconds, never negative.
-
-    Examples:
-        >>> element_duration_ns({"steps": [{"result": {"duration": 5}},
-        ...                                {"result": {"status": "skipped"}}]})
-        5
-        >>> element_duration_ns({})
-        0
-    """
-    total = 0
-    for step in _mappings(element.get("steps")):
-        duration = _as_mapping(step.get("result")).get("duration")
-        # ``bool`` is a subclass of ``int``; True would otherwise add one
-        # nanosecond and hide a malformed document.
-        if (
-            isinstance(duration, int)
-            and not isinstance(duration, bool)
-            and duration >= 0
-        ):
-            total += duration
-    return total
+    if not isinstance(candidate, str) or not candidate:
+        return ""
+    if candidate in _FIXED_PAGE_NAMES:
+        return candidate
+    # fullmatch, so nothing may precede or follow the name -- a path, a query
+    # and a fragment are all "something following".
+    if _DETAIL_PAGE_PATTERN.fullmatch(candidate):
+        return candidate
+    logger.warning(
+        "Rejected %r as a page destination: it is not a page this writer emits",
+        candidate,
+    )
+    return ""
 
 
 # --------------------------------------------------------------------------- #
-# What the tree contains: features, links and tags
+# What the tree contains: features, links and tags.
+#
+# Reading the model is not this module's work any more.  The coercions
+# (``as_mapping``, ``mappings``, ``as_text``), the predicates (``is_selected``,
+# ``is_scenario_element``) and every derived number (:func:`status_token`,
+# :func:`worst_status`, :func:`element_status`, :func:`element_duration_ns`)
+# come from :mod:`app.reporting.aggregation`.  They were duplicated here, and
+# the copies had already drifted: the element status computed here ignored
+# hooks while the features overview's own derivation folded them in, so one
+# surface called a scenario with a failed after-hook passed and the next called
+# it failed.  The authority's ``element_status`` folds steps *and* both hook
+# groups, which is ``Element.calculateElementStatus``, and that is now the only
+# answer this module can give.
 # --------------------------------------------------------------------------- #
 
 
 def emitted_features(result_set: ResultSet | None) -> list[JsonDict]:
     """Return the features that get a row and a detail page, in source order.
 
-    A feature whose every element was excluded by the tag expression never ran,
-    so the JVM never started it and it is absent from the JSON report
-    -- the default ``@Smoke`` run holds exactly one feature where the suite has
-    ten.  Emitting nine rows of zeros beside it would contradict the artifact
-    this tree is generated alongside, so such a feature is omitted altogether,
-    which is also what ``pretty/overview_features.html`` does with its own
-    derivation.  A feature with no elements at all is omitted on the same
-    ground.
+    Delegates to :func:`app.reporting.aggregation.selected_features`, which is
+    the one place the selection rule lives.
 
-    Nothing is sorted: the model's order is source order and it is preserved.
+    **This is a deliberate behaviour change from the rule this function used to
+    apply**, and the change is the point: the old rule kept a feature when
+    *any* of its elements was selected and then kept the *unselected* elements
+    inside it, so a page could show a scenario that never ran, and a feature's
+    row could count steps that the merged JSON report does not carry.  The
+    authority applies ``app/reporting/cucumber_json.py``'s rule instead -- drop
+    a Background-occurrence-plus-scenario unit whose members carry
+    ``"selected": False``, then drop a feature left with no test case at all --
+    so the JSON artifact, both HTML artifacts and the viewer describe the same
+    run.  Under the default ``@Smoke`` filter that is what reduces the suite's
+    ten features to the one the reference artifact carries.
+
+    Nothing is sorted and nothing is mutated: the model's order is source order
+    and it is preserved, and a feature that loses a unit is copied rather than
+    edited.
 
     Args:
         result_set: The merged result document, or ``None`` for a run that
@@ -779,13 +839,7 @@ def emitted_features(result_set: ResultSet | None) -> list[JsonDict]:
     Returns:
         The feature mappings to render, in document order.
     """
-    document = _as_mapping(result_set)
-    kept: list[JsonDict] = []
-    for feature in _mappings(document.get("features")):
-        elements = _mappings(feature.get("elements"))
-        if any(_is_selected(element) for element in elements):
-            kept.append(feature)
-    return kept
+    return selected_features(result_set)
 
 
 def feature_href_map(features: Sequence[JsonDict]) -> dict[str, str]:
@@ -814,21 +868,21 @@ def feature_href_map(features: Sequence[JsonDict]) -> dict[str, str]:
     """
     candidates: dict[str, set[str]] = {}
     for feature in features:
-        uri = _as_text(feature.get("uri"))
+        uri = as_text(feature.get("uri"))
         if not uri:
             # No URI, no hash input, and therefore no page: the feature still
             # renders as a row, without a link.
             logger.warning(
                 "Feature %r carries no uri, so it gets no detail page link",
-                _as_text(feature.get("name")),
+                as_text(feature.get("name")),
             )
             continue
         href = feature_page_name(uri)
         for key in (
             uri,
-            _as_text(feature.get("path")),
-            _as_text(feature.get("id")),
-            _as_text(feature.get("name")),
+            as_text(feature.get("path")),
+            as_text(feature.get("id")),
+            as_text(feature.get("name")),
         ):
             if key:
                 candidates.setdefault(key, set()).add(href)
@@ -852,7 +906,7 @@ def _tag_names(tags: Any) -> list[str]:
     if not isinstance(tags, Sequence) or isinstance(tags, (str, bytes)):
         return names
     for item in tags:
-        name = _as_text(item.get("name")) if isinstance(item, dict) else _as_text(item)
+        name = as_text(item.get("name")) if isinstance(item, dict) else as_text(item)
         if name:
             names.append(name)
     return names
@@ -891,17 +945,28 @@ def collect_tags(features: Sequence[JsonDict]) -> dict[str, list[JsonDict]]:
         the same input cannot reshuffle the emitted page set.
     """
     grouped: dict[str, list[JsonDict]] = {}
+    # Identity of the subjects already recorded for each tag, so the dedup
+    # below is a hash lookup rather than a scan of a list that grows with every
+    # scenario the tag carries -- which was quadratic in the size of the
+    # largest tag.  ``id()`` is safe as the key because ``features`` is alive
+    # for as long as the returned mapping is: every subject is an element of a
+    # feature the caller still holds, so no identity can be recycled while this
+    # set is in use.  The ordered list is what the caller reads, and it is
+    # appended to in exactly the order it was before.
+    seen: dict[str, set[int]] = {}
     for feature in features:
         feature_tags = _tag_names(feature.get("tags"))
-        for element in _mappings(feature.get("elements")):
-            if not _is_scenario(element) or not _is_selected(element):
+        for element in mappings(feature.get("elements")):
+            if not is_scenario_element(element) or not is_selected(element):
                 continue
             for name in feature_tags + _tag_names(element.get("tags")):
                 subjects = grouped.setdefault(name, [])
+                recorded = seen.setdefault(name, set())
                 # A scenario carrying the same tag at both feature and
                 # scenario level - the common case in this suite - is one
                 # subject, not two.
-                if not any(subject is element for subject in subjects):
+                if id(element) not in recorded:
+                    recorded.add(id(element))
                     subjects.append(element)
     return grouped
 
@@ -927,15 +992,45 @@ def tag_href_map(tag_names: Iterable[str]) -> dict[str, str]:
 # The tags-overview rows.
 #
 # ``pretty/overview_tags.html`` is the one page with no derivation of its own,
-# so its rows are built here.  Every rule below mirrors ``pretty/tag.html``'s
-# tally, which computes the same numbers for the same tag from the same model:
-# the overview row and the tag page's single row are two readings of one rule,
-# and they were verified to agree cell for cell.
+# so its rows are built here -- by the aggregation authority, which is also
+# what ``pretty/tag.html`` renders for the same tag, so the overview row and
+# the tag page's single row are two readings of one calculation rather than two
+# calculations that used to be checked against each other by hand.
+#
+# The tally rules are ``net.masterthought:cucumber-reporting:5.6.1``'s, and
+# every one of them is a rule the arithmetic that used to live here got wrong:
+#
+#   * ``ambiguous`` counts in the **Undefined** column.  ``StatusDeserializer``
+#     holds ``UNKNOWN_STATUSES = ["ambiguous"]`` and rewrites it to
+#     ``UNDEFINED`` before any counting happens.  It keeps its own severity
+#     rank for grading; only the counters fold it.
+#   * **Hooks take part in a scenario's verdict.**
+#     ``Element.calculateElementStatus`` folds ``stepsStatus`` with
+#     ``beforeStatus`` and ``afterStatus``, so a scenario whose steps all
+#     passed but whose after-hook failed is not a passed scenario.  Hooks are
+#     still never counted as steps and their durations are never added --
+#     ``TagObject.addElement`` sums ``Step.getDuration()`` alone.
+#   * **A scenario counts as passed only when its whole verdict is passed**,
+#     and ``scenarios_failed`` is ``scenarios_total - scenarios_passed``:
+#     ``TagObject.getFailedScenarios()`` counts the elements the counter did
+#     not record as ``PASSED``, so an undefined, pending, skipped or
+#     unrecognised outcome is a failed scenario there and not a scenario in
+#     neither column.
+#   * A step status with no column of its own -- ``untested`` and an
+#     unrecognised token -- counts towards Total, where it honestly belongs,
+#     and towards none of the five columns.
 # --------------------------------------------------------------------------- #
 
 
 def _tag_row(name: str, subjects: Sequence[JsonDict], href: str) -> JsonDict:
     """Build one tags-overview row.
+
+    A delegation to :func:`app.reporting.aggregation.tag_row`, kept because
+    this module's own callers and its documentation are written in terms of a
+    tag's *subjects*.  The arithmetic is the authority's, which is what
+    reproduces the four 5.6.1 rules stated above -- the same rules the
+    features overview applies to a feature row, so a tag row and a feature row
+    can no longer grade one scenario differently.
 
     Args:
         name: The tag, leading ``@`` included, which is also the row's label.
@@ -945,57 +1040,15 @@ def _tag_row(name: str, subjects: Sequence[JsonDict], href: str) -> JsonDict:
     Returns:
         A mapping carrying exactly the keys ``pretty/_stats_table.html``
         reads: ``name``, ``href``, the six step counts, the three scenario
-        counts, ``duration_ns`` and ``status``.  Counts and durations are raw
-        integers and the status is a raw token, because formatting belongs to
+        counts, ``duration_ns`` and ``status`` -- plus ``duration_samples``,
+        which the authority adds so that a genuinely zero duration and a
+        duration built from no sample at all stay distinguishable, and which
+        the template ignores.  Counts and durations are raw integers and the
+        status is a raw token, because formatting belongs to
         ``pretty/_macros.html`` and normalisation to
         ``partials/status_badge.html``.
     """
-    counts = {
-        "steps_passed": 0,
-        "steps_failed": 0,
-        "steps_skipped": 0,
-        "steps_pending": 0,
-        "steps_undefined": 0,
-    }
-    steps_total = 0
-    scenarios_passed = 0
-    scenarios_failed = 0
-    duration_ns = 0
-    observed: list[str] = []
-
-    for element in subjects:
-        tokens = _step_tokens(element)
-        observed.extend(tokens)
-        for token in tokens:
-            steps_total += 1
-            # A token with no column of its own - 'untested' and 'unknown' -
-            # still counts towards Total, where it honestly belongs, and in
-            # none of the five status columns: assigning it one would
-            # fabricate a number the source cannot produce.
-            key = f"steps_{token}"
-            if key in counts:
-                counts[key] += 1
-        verdict = worst_status(tokens)
-        # A scenario whose worst status is neither passed nor failed - an
-        # undefined step, say - counts in neither column, which is what the
-        # tag page's own tally does.
-        if verdict == "passed":
-            scenarios_passed += 1
-        elif verdict == "failed":
-            scenarios_failed += 1
-        duration_ns += element_duration_ns(element)
-
-    return {
-        "name": name,
-        "href": href,
-        **counts,
-        "steps_total": steps_total,
-        "scenarios_passed": scenarios_passed,
-        "scenarios_failed": scenarios_failed,
-        "scenarios_total": len(subjects),
-        "duration_ns": duration_ns,
-        "status": worst_status(observed),
-    }
+    return tag_row(name, subjects, href)
 
 
 def build_tag_rows(
@@ -1003,6 +1056,11 @@ def build_tag_rows(
     hrefs: Mapping[str, str] | None = None,
 ) -> list[JsonDict]:
     """Build every tags-overview row, in the order the tags were collected.
+
+    The rows themselves are :func:`app.reporting.aggregation.build_tag_rows`'s;
+    what this function adds, and the only reason it is not that function, is
+    the link default below, because the detail-page name is this module's to
+    compute and the authority resolves no destination.
 
     Args:
         tags: Tag name to its selected scenario elements, from
@@ -1020,9 +1078,7 @@ def build_tag_rows(
         features that declare no feature-level tag.
     """
     links = dict(hrefs) if hrefs is not None else tag_href_map(tags)
-    return [
-        _tag_row(name, subjects, links.get(name, "")) for name, subjects in tags.items()
-    ]
+    return _aggregate_tag_rows(tags, links)
 
 
 def build_tag_totals(rows: Sequence[JsonDict]) -> JsonDict:
@@ -1035,6 +1091,11 @@ def build_tag_totals(rows: Sequence[JsonDict]) -> JsonDict:
     number of rows whose status is ``passed``, which is the same reading
     ``pretty/overview_features.html`` applies to its own rows.
 
+    A delegation to :func:`app.reporting.aggregation.build_row_totals`, which
+    is the one footer sum: the features overview's footer and this one are the
+    same arithmetic over different rows, and computing them separately is how
+    one page came to report a total the other could not reproduce.
+
     Args:
         rows: The rows from :func:`build_tag_rows`.
 
@@ -1043,43 +1104,12 @@ def build_tag_totals(rows: Sequence[JsonDict]) -> JsonDict:
         ``features_passed``.  Every value is ``0`` for an empty row set, so the
         footer still renders.
     """
-    totals: JsonDict = {
-        key: sum(int(row.get(key, 0)) for row in rows) for key in _COUNT_KEYS
-    }
-    totals["duration_ns"] = sum(int(row.get("duration_ns", 0)) for row in rows)
-    totals["features"] = len(rows)
-    totals["features_passed"] = sum(1 for row in rows if row.get("status") == "passed")
-    return totals
+    return build_row_totals(rows)
 
 
 # --------------------------------------------------------------------------- #
 # The build date
 # --------------------------------------------------------------------------- #
-
-
-def _parse_timestamp(value: Any) -> datetime | None:
-    """Parse one of the document's ISO-8601 timestamps, or answer ``None``.
-
-    The collector emits exactly ``YYYY-MM-DDTHH:MM:SS.mmmZ``.  The trailing
-    ``Z`` is accepted natively by :meth:`datetime.datetime.fromisoformat` on
-    the interpreters this project supports, and is also substituted explicitly
-    so that a document written by an older or hand-edited producer still
-    parses.
-    """
-    text = _as_text(value)
-    if not text:
-        return None
-    for candidate in (text, text.replace("Z", "+00:00")):
-        try:
-            parsed = datetime.fromisoformat(candidate)
-        except ValueError:
-            continue
-        if parsed.tzinfo is not None:
-            return parsed
-        # A naive timestamp is read as UTC, which is what the collector writes.
-        return parsed.replace(tzinfo=timezone.utc)
-    logger.warning("Cannot parse %r as a timestamp; using it verbatim", text)
-    return None
 
 
 def format_build_date(
@@ -1098,44 +1128,73 @@ def format_build_date(
 
     The moment is taken from the document, in this order, so that two renders
     of one document agree: ``generated_at``, which is when the document was
-    written and is the closest analogue of the generator's report date; then
-    ``started_at``, the earliest scenario start; then the current time, which
-    is the only case in which two renders of one input can differ.  Values are
-    rendered in UTC, which is what the collector records and what keeps the
-    output independent of the agent's timezone.
+    written and is the closest analogue of the generator's report date, then
+    ``started_at``, the earliest scenario start.  Values are rendered in UTC,
+    which is what the collector records and what keeps the output independent
+    of the agent's timezone.
+
+    **A document carrying neither answers the empty string.**  There is no
+    clock fallback: the render-time clock is when somebody rendered the
+    report, not when the run happened, and printing it in a metadata table
+    states a fact the document does not carry -- the same reason
+    :data:`DEFAULT_PROJECT_NAME` is empty.  ``pretty/_layout.html`` renders the
+    empty value as an empty cell, with no invented placeholder in it.  In
+    normal operation the case does not arise: the collector always writes
+    ``generated_at`` before the writers run, so a real run's date is
+    result-backed.  A caller that legitimately has a moment of its own -- a
+    test pinning the output, a tool re-rendering an old document against a
+    known time -- passes ``now`` and gets it formatted.
 
     Args:
         result_set: The merged result document, or ``None``.
-        now: The moment to fall back to, for a caller -- a test -- that wants a
-            fixed one.  Defaults to the current UTC time.
+        now: An explicit moment to use when the document carries no usable
+            timestamp.  Defaults to ``None``, which yields ``""``.
 
     Returns:
-        The formatted date, e.g. ``"07 Sep 2022, 13:39"``.  A timestamp present
-        in the document but unparseable is returned verbatim rather than
-        discarded, because a reader is better served by an odd date than by
-        none.
+        The formatted date, e.g. ``"07 Sep 2022, 13:39"``; ``""`` when the
+        document carries no timestamp and no ``now`` was supplied.  A timestamp
+        present in the document but unparseable is returned verbatim rather
+        than discarded, because a reader is better served by an odd date than
+        by none.
 
     Examples:
         >>> format_build_date({"generated_at": "2022-09-07T13:39:04.123Z"})
         '07 Sep 2022, 13:39'
         >>> format_build_date({"started_at": "2022-09-07T13:37:26.297Z"})
         '07 Sep 2022, 13:37'
+        >>> format_build_date({"generated_at": "not a timestamp"})
+        'not a timestamp'
         >>> format_build_date(None, now=datetime(2026, 1, 2, 3, 4,
         ...                                      tzinfo=timezone.utc))
         '02 Jan 2026, 03:04'
+        >>> format_build_date(None)
+        ''
+        >>> format_build_date({"features": []})
+        ''
     """
-    document = _as_mapping(result_set)
+    document = as_mapping(result_set)
     raw: Any = None
     for key in ("generated_at", "started_at"):
         raw = document.get(key)
-        parsed = _parse_timestamp(raw)
+        # The authority's parser, so the instant behind this page's Date cell
+        # and the instant behind the run's start_timestamp are read by one
+        # rule.  It answers None for anything it cannot parse, which is what
+        # the branch below turns into the verbatim fallback.
+        parsed = parse_timestamp(raw)
         if parsed is not None:
             return _format_moment(parsed)
-        if _as_text(raw):
-            # Present but unparseable: keep what the document says.
-            return _as_text(raw)
-    moment = now if now is not None else datetime.now(timezone.utc)
-    return _format_moment(moment)
+        if as_text(raw):
+            # Present but unparseable: keep what the document says, because a
+            # reader is better served by an odd date than by none.
+            logger.warning(
+                "Cannot parse %s %r as a timestamp; using it verbatim",
+                key,
+                as_text(raw),
+            )
+            return as_text(raw)
+    # No usable timestamp.  An explicit moment is formatted; otherwise the cell
+    # stays empty rather than reporting the render-time clock as the run's.
+    return _format_moment(now) if now is not None else ""
 
 
 def _format_moment(moment: datetime) -> str:
@@ -1171,156 +1230,59 @@ def build_environment() -> Environment:
     quotation marks, periods and apostrophes, one of them opens with ``....``,
     and the reference generator escapes its own output too.
 
+    :func:`local_page_href` is installed as a **global**, not a filter, and
+    installing it here is what puts one link allowlist behind every sink in
+    the folder.  A global is reachable from a macro imported with the plain
+    ``{% import %}`` form, which passes no context -- and every helper in
+    ``app/templates/pretty/`` is imported that way on purpose -- whereas a
+    context-dependent lookup would not be.  Autoescaping protects HTML and not
+    URL schemes, so this is the only thing standing between a crafted
+    destination in the result document and an active ``href``; see that
+    function for what it accepts.
+
     Returns:
         A fresh environment.  Callers that render repeatedly may build one and
         pass it to :func:`render_pretty_pages`, which avoids re-reading the
         templates per page.
     """
-    return Environment(
+    environment = Environment(
         loader=FileSystemLoader(str(templates_dir())),
         autoescape=True,
     )
+    environment.globals["local_page_href"] = local_page_href
+    return environment
 
 
-def render_pretty_pages(
-    result_set: ResultSet | None,
-    project_name: str = DEFAULT_PROJECT_NAME,
-    build_date: str | None = None,
-    environment: Environment | None = None,
-) -> dict[str, str]:
-    """Render every page of the tree, keyed by its output filename.
+def _element_owner_map(features: Sequence[JsonDict]) -> dict[int, JsonDict]:
+    """Map each element's identity to the feature it belongs to.
 
-    The pure half: it reads the model, renders the templates and **touches no
-    file**, so a template fault surfaces before anything is written and a test
-    can assert on the markup without a filesystem.
-
-    The page set is the four overview pages, always -- the run's exit contract
-    requires all four artifacts even when the tag expression selects nothing,
-    so an empty document yields four complete pages rather than none -- plus
-    one ``report-feature_<hash>.html`` per emitted feature and one
-    ``report-tag_<hash>.html`` per tag of the run.
-
-    Each template is given only what it needs, and every filename and link is
-    computed here:
-
-    * the features, steps and failures overviews receive the normalized
-      feature list and the link maps, and derive their own rows by the rules
-      their own docstrings take from the generator's bytecode -- deriving them
-      a second time in Python would be a second source of truth for one
-      number;
-    * the tags overview receives the rows and totals built here, because it has
-      no derivation of its own;
-    * a feature page receives its feature and the tag links; a tag page
-      receives its tag, the whole feature list -- it applies feature-tag
-      propagation and the selected flag itself -- and the tag links;
-    * every page receives ``project_name`` and ``build_date_display``.
-      ``title_suffix`` is set by each page template, and ``active_page`` by the
-      four overview templates only: the two detail pages deliberately mark no
-      navigation item, as measured on the reference's marker-free detail pages.
+    Built **once** for a whole render and handed to every tag page, because
+    rebuilding it per tag walked every element of every feature again for each
+    tag of the run.  Identity rather than a key, because two features in this
+    suite may share an id and a name -- Contact with Inventory and Login with
+    Notes -- so a name lookup would attribute a scenario to the wrong feature's
+    page.
 
     Args:
-        result_set: The merged result document, or ``None`` for a run that
-            produced nothing.
-        project_name: The Project cell of the build-info table.
-        build_date: The already-formatted Date cell.  Defaults to
-            :func:`format_build_date` over ``result_set``, computed once so
-            that every page of one render carries the same date.
-        environment: An environment to render through; defaults to
-            :func:`build_environment`.
+        features: The decorated features the pages are rendered from.  It must
+            be that very list: the map keys are ``id()`` values, so a map built
+            over the undecorated model would miss every decorated element, and
+            the list must stay alive for as long as the map is used, which it
+            does -- the caller holds it for the whole render.
 
     Returns:
-        Output filename to HTML, in the order the pages are written: the four
-        overviews in contract order, then the feature pages in source order,
-        then the tag pages in first-appearance order.
-
-    Raises:
-        jinja2.TemplateError: If a template is missing, malformed or fails to
-            render.  Deliberately not swallowed -- it is a genuine render
-            fault, not a test outcome -- and because it is raised before any
-            file is opened, a fault here leaves the previous tree untouched.
+        A mapping from ``id(element)`` to the element's feature.
     """
-    env = environment if environment is not None else build_environment()
-    features = emitted_features(result_set)
-    feature_links = feature_href_map(features)
-    tags = collect_tags(features)
-    tag_links = tag_href_map(tags)
-    tag_rows = build_tag_rows(tags, tag_links)
-    tag_totals = build_tag_totals(tag_rows)
-    chrome = {
-        "project_name": project_name,
-        "build_date_display": (
-            build_date if build_date is not None else format_build_date(result_set)
-        ),
-    }
-
-    # Per-page context.  The keys are exactly what each template documents as
-    # its render contract; nothing is passed that a template does not read.
-    overview_context: dict[str, JsonDict] = {
-        OVERVIEW_FEATURES_PAGE: {
-            "features": features,
-            "feature_hrefs": feature_links,
-        },
-        OVERVIEW_TAGS_PAGE: {
-            "tags": tag_rows,
-            "totals": tag_totals,
-        },
-        OVERVIEW_STEPS_PAGE: {
-            "features": features,
-        },
-        OVERVIEW_FAILURES_PAGE: {
-            "features": features,
-            "feature_hrefs": feature_links,
-            "tag_hrefs": tag_links,
-        },
-    }
-
-    pages: dict[str, str] = {}
-    for filename, template_name in OVERVIEW_TEMPLATES:
-        template = env.get_template(template_name)
-        pages[filename] = template.render(**chrome, **overview_context[filename])
-
-    feature_template = env.get_template(FEATURE_TEMPLATE)
+    owner: dict[int, JsonDict] = {}
     for feature in features:
-        uri = _as_text(feature.get("uri"))
-        if not uri:
-            # Already reported by feature_href_map: with no URI there is no
-            # hash input and therefore no page name.  The feature still
-            # appears as a row on the overviews.
-            continue
-        filename = feature_page_name(uri)
-        if filename in pages:
-            # Two features sharing one URI cannot come out of a correct merge,
-            # which keys one feature object per path, so this is reported
-            # rather than papered over with an invented disambiguator: the
-            # generator has none either, since its jsonFileNo mechanism
-            # applies only across separate input files.
-            logger.warning(
-                "Two features resolve to %s (uri %r); the later one is not written",
-                filename,
-                uri,
-            )
-            continue
-        pages[filename] = feature_template.render(
-            **chrome,
-            feature=feature,
-            tag_hrefs=tag_links,
-        )
-
-    tag_template = env.get_template(TAG_TEMPLATE)
-    rows_by_tag = {row["name"]: row for row in tag_rows}
-    for name, subjects in tags.items():
-        pages[tag_links[name]] = tag_template.render(
-            **chrome,
-            tag=rows_by_tag[name],
-            elements=_tag_page_elements(subjects, features, feature_links),
-            tag_hrefs=tag_links,
-        )
-    return pages
+        for element in mappings(feature.get("elements")):
+            owner[id(element)] = feature
+    return owner
 
 
 def _tag_page_elements(
     subjects: Sequence[JsonDict],
-    features: Sequence[JsonDict],
+    owner: Mapping[int, JsonDict],
     feature_links: Mapping[str, str],
 ) -> list[JsonDict]:
     """Prepare one tag page's element list, in the shape the reference emits.
@@ -1344,10 +1306,9 @@ def _tag_page_elements(
 
     Args:
         subjects: The tag's selected scenario elements, from
-            :func:`collect_tags`.
-        features: The emitted features, used to find the feature each subject
-            came from -- by identity, because two features may share an id and
-            a name.
+            :func:`collect_tags` over the decorated features.
+        owner: The element-to-feature map from :func:`_element_owner_map`,
+            built once per render over those same features.
         feature_links: The map from :func:`feature_href_map`.
 
     Returns:
@@ -1356,20 +1317,274 @@ def _tag_page_elements(
         page link keeps the feature's name, which the template renders as plain
         text rather than as a link that goes nowhere.
     """
-    owner: dict[int, JsonDict] = {}
-    for feature in features:
-        for element in _mappings(feature.get("elements")):
-            owner[id(element)] = feature
-
     prepared: list[JsonDict] = []
     for subject in subjects:
         feature = owner.get(id(subject), {})
-        uri = _as_text(feature.get("uri"))
+        uri = as_text(feature.get("uri"))
         item = dict(subject)
         item["feature_href"] = feature_links.get(uri, "")
-        item["feature_name"] = _as_text(feature.get("name"))
+        item["feature_name"] = as_text(feature.get("name"))
         prepared.append(item)
     return prepared
+
+
+def iter_pretty_pages(
+    result_set: ResultSet | None,
+    project_name: str = DEFAULT_PROJECT_NAME,
+    build_date: str | None = None,
+    environment: Environment | None = None,
+) -> Iterator[tuple[str, str]]:
+    """Render the tree one page at a time, in the order the pages are written.
+
+    The streaming form of :func:`render_pretty_pages`, and the form
+    :func:`write_pretty_reports` uses.  One page string exists at a time: the
+    shared maps, rows and statistics are built once up front and kept, each
+    page is rendered, yielded and then dropped by the consumer before the next
+    is rendered.  That matters on a run with failures, because a failed
+    scenario carries its base64 screenshot and its traceback and appears on its
+    feature page, on the failures overview and on every tag page its tag
+    reaches -- holding all of those page strings at once duplicated those bytes
+    as many times over.
+
+    The page order is the artifact contract's own and is what makes the
+    collision behaviour below deterministic: the four overviews, then the
+    feature pages in source order, then the tag pages in first-appearance
+    order.  The four overviews are always yielded, even for an empty document,
+    because the run's exit contract requires all four artifacts even when the
+    tag expression selects nothing.
+
+    **A duplicate filename is yielded twice, deliberately.**  Two distinct
+    feature URIs can hash to one detail-page name, and the reference generator
+    writes its pages sequentially, so the later page overwrites the earlier and
+    the later one is what the tree ends up holding.  This iterator reproduces
+    that: it warns, naming the filename and both subjects, and yields the later
+    page anyway.  A consumer that builds a mapping gets last-write-wins for
+    free, and a consumer that writes as it goes gets the same bytes on disk.
+
+    **The build-info metadata is the document's or the caller's, never this
+    module's.**  Both cells are rendered only from what is present in, or
+    derivable from, the result document unless a caller states otherwise: an
+    empty ``project_name`` is answered from the document's own
+    ``project_name`` key and left empty when it has none, and ``build_date``
+    defaults to :func:`format_build_date`, which is empty for a document with
+    no timestamp.  ``pretty/_layout.html`` renders either absence as an empty
+    cell, so the table shows fewer facts rather than invented ones.
+
+    Args:
+        result_set: The merged result document, or ``None`` for a run that
+            produced nothing.
+        project_name: The Project cell of the build-info table.  Defaults to
+            :data:`DEFAULT_PROJECT_NAME`, which is empty and makes the
+            document's own ``project_name`` key the source.
+        build_date: The already-formatted Date cell.  Defaults to
+            :func:`format_build_date` over ``result_set``, computed once so
+            that every page of one render carries the same date.
+        environment: An environment to render through; defaults to
+            :func:`build_environment`.
+
+    Yields:
+        ``(output filename, HTML)`` pairs, in the order above.  Nothing is
+        written and no directory is touched.
+
+    Raises:
+        jinja2.TemplateError: If a template is missing, malformed or fails to
+            render.  Deliberately not swallowed -- it is a genuine render
+            fault, not a test outcome.
+    """
+    env = environment if environment is not None else build_environment()
+
+    # One aggregation for the whole render.  ``feature_href_map`` runs over the
+    # selection-filtered model first because the authority needs the link map
+    # to put an href on each feature row; the rows and the decorated features
+    # it returns are then what every page below reads, so no page derives a
+    # number of its own.
+    feature_links = feature_href_map(emitted_features(result_set))
+    run = normalize_run(result_set, feature_links)
+    # Every page context below derives from this one list -- the four
+    # overviews, each feature page and each tag page -- and the aggregate it
+    # comes from has already put every attachment through the embedding
+    # contract in :func:`app.reporting.aggregation.decorate_element`, so no
+    # template of this tree can be reached by an attachment that was not
+    # validated.  Copies, never mutation: this writer is one of four fed from
+    # a single merged result set, and the aggregate behind it is immutable.
+    features = list(run.features)
+    feature_rows = list(run.feature_rows)
+
+    tags = collect_tags(features)
+    tag_links = tag_href_map(tags)
+    tag_rows = build_tag_rows(tags, tag_links)
+    tag_totals = build_tag_totals(tag_rows)
+
+    chrome = {
+        # The build-info metadata, and every value in it is either the
+        # caller's or the document's.  An empty project_name argument -- which
+        # is the default -- is answered from the document's own project_name
+        # key, and stays empty when it has none: the alternative is a name
+        # printed in a metadata table that no part of the run recorded.
+        "project_name": (
+            project_name
+            or as_text(as_mapping(result_set).get("project_name"))
+        ),
+        "build_date_display": (
+            build_date if build_date is not None else format_build_date(result_set)
+        ),
+    }
+
+    # Per-page context.  Each template gets the aggregate products it reads:
+    # ``feature_rows``/``totals`` are the authority's names and
+    # ``feature_stats``/``feature_totals`` the override names
+    # ``pretty/overview_features.html`` already documents and reads, so the
+    # page renders the authority's numbers today and can switch to the
+    # canonical names without this writer changing again.  Nothing that was
+    # passed before has been removed or renamed.
+    overview_context: dict[str, JsonDict] = {
+        OVERVIEW_FEATURES_PAGE: {
+            "features": features,
+            "feature_hrefs": feature_links,
+            "feature_rows": feature_rows,
+            "totals": run.totals,
+            "feature_stats": feature_rows,
+            "feature_totals": run.totals,
+        },
+        OVERVIEW_TAGS_PAGE: {
+            "tags": tag_rows,
+            "totals": tag_totals,
+        },
+        OVERVIEW_STEPS_PAGE: {
+            "features": features,
+        },
+        OVERVIEW_FAILURES_PAGE: {
+            "features": features,
+            "feature_hrefs": feature_links,
+            "tag_hrefs": tag_links,
+        },
+    }
+
+    for filename, template_name in OVERVIEW_TEMPLATES:
+        template = env.get_template(template_name)
+        yield filename, template.render(**chrome, **overview_context[filename])
+
+    # What produced each detail name so far, so a collision can be reported
+    # with both subjects.  Names only: this is the one thing retained across
+    # the detail pages, and it costs a few dozen bytes per page rather than a
+    # page string.
+    produced: dict[str, str] = {}
+
+    feature_template = env.get_template(FEATURE_TEMPLATE)
+    for feature, row in zip(features, feature_rows, strict=True):
+        uri = as_text(feature.get("uri"))
+        if not uri:
+            # Already reported by feature_href_map: with no URI there is no
+            # hash input and therefore no page name.  The feature still
+            # appears as a row on the overviews.
+            continue
+        filename = feature_page_name(uri)
+        previous = produced.get(filename)
+        if previous is not None:
+            # Two distinct URIs hashing to one name.  The generator writes its
+            # pages sequentially and has no disambiguator either -- its
+            # jsonFileNo mechanism applies only across separate input files --
+            # so the later page wins, here as there, and the collision is
+            # reported rather than silently resolved.
+            logger.warning(
+                "%s is the detail page of both %r and %r; the later page wins",
+                filename,
+                previous,
+                uri,
+            )
+        produced[filename] = uri
+        yield (
+            filename,
+            feature_template.render(
+                **chrome,
+                feature=feature,
+                feature_stats=row,
+                tag_hrefs=tag_links,
+            ),
+        )
+
+    tag_template = env.get_template(TAG_TEMPLATE)
+    owner = _element_owner_map(features)
+    rows_by_tag = {row["name"]: row for row in tag_rows}
+    for name, subjects in tags.items():
+        filename = tag_links[name]
+        previous = produced.get(filename)
+        if previous is not None:
+            logger.warning(
+                "%s is the detail page of both %r and %r; the later page wins",
+                filename,
+                previous,
+                name,
+            )
+        produced[filename] = name
+        yield (
+            filename,
+            tag_template.render(
+                **chrome,
+                tag=rows_by_tag[name],
+                elements=_tag_page_elements(subjects, owner, feature_links),
+                tag_hrefs=tag_links,
+            ),
+        )
+
+
+def render_pretty_pages(
+    result_set: ResultSet | None,
+    project_name: str = DEFAULT_PROJECT_NAME,
+    build_date: str | None = None,
+    environment: Environment | None = None,
+) -> dict[str, str]:
+    """Render every page of the tree, keyed by its output filename.
+
+    The pure half: it reads the model, renders the templates and **touches no
+    file**, so a template fault surfaces before anything is written and a test
+    can assert on the markup without a filesystem.  It is exactly
+    ``dict(iter_pretty_pages(...))``, which is also where the detail-name
+    collision rule comes from: building a mapping keeps the last value for a
+    repeated key, so the later of two colliding pages is the one returned,
+    matching both the reference generator and what
+    :func:`write_pretty_reports` leaves on disk.
+
+    The page set is the four overview pages, always -- the run's exit contract
+    requires all four artifacts even when the tag expression selects nothing,
+    so an empty document yields four complete pages rather than none -- plus
+    one ``report-feature_<hash>.html`` per emitted feature and one
+    ``report-tag_<hash>.html`` per tag of the run.
+
+    Each template is given only what it needs, every filename and link is
+    computed here, and every number comes from one
+    :func:`app.reporting.aggregation.normalize_run` call; the module docstring
+    tabulates the resulting context page by page.
+
+    Args:
+        result_set: The merged result document, or ``None`` for a run that
+            produced nothing.
+        project_name: The Project cell of the build-info table.
+        build_date: The already-formatted Date cell.  Defaults to
+            :func:`format_build_date` over ``result_set``, computed once so
+            that every page of one render carries the same date.
+        environment: An environment to render through; defaults to
+            :func:`build_environment`.
+
+    Returns:
+        Output filename to HTML, in the order the pages are written: the four
+        overviews in contract order, then the feature pages in source order,
+        then the tag pages in first-appearance order.
+
+    Raises:
+        jinja2.TemplateError: If a template is missing, malformed or fails to
+            render.  Deliberately not swallowed -- it is a genuine render
+            fault, not a test outcome -- and because it is raised before any
+            file is opened, a fault here leaves the previous tree untouched.
+    """
+    return dict(
+        iter_pretty_pages(
+            result_set,
+            project_name=project_name,
+            build_date=build_date,
+            environment=environment,
+        )
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1409,21 +1624,33 @@ def copy_pretty_assets(destination: Path | str) -> tuple[Path, ...]:
       broken references, so they are copied here and their presence is
       verified below.
 
+    The copy is then held to :data:`REQUIRED_ASSETS` in full, **fonts
+    included**.  A font is requested from a stylesheet rather than from a page,
+    which used to be the argument for warning about a missing one and
+    reporting success anyway; it is the wrong conclusion, because the
+    stylesheet doing the requesting is a file this function itself copied into
+    the tree, so a missing font is this writer publishing a reference to
+    something it knows is not there.  All eleven are mandatory and their
+    absence fails the write.
+
     Args:
         destination: The emitted tree's root -- the directory the pages
             themselves are written into, since every reference in a page is
-            relative to the page.
+            relative to the page.  During a publication this is the staging
+            tree, so a missing asset is discovered before anything is swapped
+            into place.
 
     Returns:
         Every path written, sorted, so a caller can log or assert on the set.
 
     Raises:
-        FileNotFoundError: If an asset an emitted page links by name is
-            missing afterwards.  That is a broken installation rather than a
-            test outcome: every page would ship a dead reference, so it is
-            reported as the writer failure it is.  A missing *font* is warned
-            about instead, because fonts are requested from the vendored CSS
-            rather than from a page and the pages still render without them.
+        FileNotFoundError: If any member of :data:`REQUIRED_ASSETS` is missing
+            afterwards -- every asset a page links by name **and** all eleven
+            fonts the copied stylesheets request.  That is a broken
+            installation rather than a test outcome: the published tree would
+            reference files that are not there, so it is reported as the writer
+            failure it is, and the message names every missing file so the
+            cause is in the log rather than in a reader's browser console.
         OSError: If a directory cannot be created or a file cannot be copied.
     """
     root = ensure_dir(destination)
@@ -1442,29 +1669,248 @@ def copy_pretty_assets(destination: Path | str) -> tuple[Path, ...]:
             _copy_file(source, root.joinpath(*relative_destination.split("/")))
         )
 
-    missing_links = [
-        name
-        for name in PAGE_LINKED_ASSETS
-        if not root.joinpath(*name.split("/")).is_file()
-    ]
-    if missing_links:
-        raise FileNotFoundError(
-            "the generated report tree would link assets that were not copied: "
-            + ", ".join(missing_links)
-        )
-    missing_fonts = [
-        name
-        for name in VENDORED_FONT_ASSETS
-        if not root.joinpath(*name.split("/")).is_file()
-    ]
-    if missing_fonts:
-        logger.warning(
-            "Report tree %s is missing %d vendored font file(s): %s",
-            root,
-            len(missing_fonts),
-            ", ".join(missing_fonts),
-        )
+    _require_assets(root)
     return tuple(sorted(written))
+
+
+def _require_assets(root: Path) -> None:
+    """Verify that every required asset is present under ``root``.
+
+    Called after the copy and again over the staging tree before publication,
+    because the two questions are different: the first says the copy did its
+    job, the second says nothing has gone missing between the copy and the
+    swap.
+
+    Args:
+        root: The tree to check -- the staging tree during a publication.
+
+    Raises:
+        FileNotFoundError: If any member of :data:`REQUIRED_ASSETS` is absent
+            or is not a file, naming every one of them.
+    """
+    missing = [
+        name
+        for name in REQUIRED_ASSETS
+        if not root.joinpath(*name.split("/")).is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            f"the generated report tree {root} would reference "
+            f"{len(missing)} asset(s) that are not there: " + ", ".join(missing)
+        )
+
+
+#: Infixes of the two directories a publication creates beside the final tree.
+#: Both names are dot-prefixed by :func:`_staging_paths`, which is what makes
+#: them unreachable over HTTP: ``app/utils/paths.resolve_artifact`` rejects any
+#: request whose path carries a component beginning with a dot, so a partial
+#: generation cannot be served even while it exists.  The process id keeps two
+#: publications in two processes from building in one directory, and is what
+#: :func:`_recover_interrupted_publication` reads to tell its own leavings from
+#: another process's.  It is **not** a lock: two publications writing one
+#: workspace at once would already be contending for the artifact itself -- and
+#: for the three sibling artifacts, none of which is locked either -- so
+#: serialising this one writer would buy a guarantee the artifact set as a
+#: whole does not have.  AAP 0.4.1 has one producer per run, driven once from
+#: ``app/services/report_service.py``.
+_STAGING_INFIX: Final[str] = ".staging-"
+_SUPERSEDED_INFIX: Final[str] = ".superseded-"
+
+
+def _staging_paths(final: Path) -> tuple[Path, Path]:
+    """Return the staging and renamed-aside siblings of ``final``.
+
+    Siblings rather than children of a temporary directory, and that is a
+    correctness requirement rather than a convenience: publication is a
+    :func:`os.rename`, and a rename is only atomic -- indeed on most platforms
+    only possible -- within one filesystem.  A sibling of the final directory
+    is on the filesystem the final directory is on, whatever ``base`` a caller
+    passed and wherever the build output happens to be mounted.
+
+    This is the one path name this module derives rather than asking
+    :mod:`app.utils.paths` for.  It is derived here because it is not an
+    artifact location: it is a private staging area that exists only inside a
+    single :func:`write_pretty_reports` call, its leading dot is exactly what
+    that module's ``resolve_artifact`` refuses to serve, and the final
+    directory it is a sibling of is still that module's to name.
+
+    Args:
+        final: The published tree's directory.
+
+    Returns:
+        ``(staging, superseded)``: the tree being built, and where the tree
+        being replaced is moved while the swap happens.
+    """
+    pid = os.getpid()
+    return (
+        final.with_name(f".{final.name}{_STAGING_INFIX}{pid}"),
+        final.with_name(f".{final.name}{_SUPERSEDED_INFIX}{pid}"),
+    )
+
+
+def _discard(directory: Path) -> None:
+    """Remove ``directory`` and everything under it, if it is there.
+
+    Used for the two publication scratch directories and for nothing else: no
+    published artifact, no sibling artifact and never the build-output
+    directory itself are
+    passed here, which is what keeps "this writer replaces its own output
+    directory" true and keeps ``--clean``'s job ``--clean``'s.
+
+    Args:
+        directory: A staging or renamed-aside directory.
+
+    Raises:
+        OSError: If the removal fails for a reason other than the directory
+            not being there.  A failure here is real -- it would leave a
+            dot-directory in the build output -- so it is not swallowed on
+            the
+            success path.  The failure path uses :func:`_discard_quietly`
+            instead, because a fault is already being reported there and must
+            not be replaced by a cleanup error.
+    """
+    if not directory.exists():
+        return
+    if directory.is_dir():
+        shutil.rmtree(directory)
+    else:
+        # Pathological, but a file where the staging directory belongs would
+        # otherwise fail every subsequent run with an unexplained mkdir error.
+        directory.unlink()
+
+
+def _discard_quietly(directory: Path) -> None:
+    """Remove ``directory``, logging rather than raising if that fails.
+
+    The failure path's form of :func:`_discard`.  A publication that is already
+    failing has one job left -- leave the previous complete tree in place and
+    report the fault that caused it -- and an exception raised while tidying up
+    would replace that fault with a less useful one and skip the tidying that
+    follows.  What remains behind is a dot-prefixed directory that no request
+    can reach and that the next publication sweeps, so logging it is the
+    proportionate response.
+
+    Args:
+        directory: A staging or renamed-aside directory.
+    """
+    try:
+        _discard(directory)
+    except OSError:
+        logger.exception(
+            "Could not remove the report publication directory %s; it is "
+            "unreachable over HTTP and the next run removes it",
+            directory,
+        )
+
+
+def _leftover_scratch(final: Path) -> list[Path]:
+    """Return every publication scratch directory left beside ``final``.
+
+    A run killed between the two renames of a publication leaves one behind.
+    This function only *finds* them; what happens to each one is decided by
+    :func:`_recover_interrupted_publication`, and the distinction is
+    load-bearing: a renamed-aside tree may be the only complete generation
+    there is, and a directory carrying another process's identifier may belong
+    to a publication that is still running.  Neither is swept.
+
+    Args:
+        final: The published tree's directory, whose parent is scanned.
+
+    Returns:
+        The matching sibling paths, sorted, or an empty list when the parent
+        directory does not exist yet or cannot be listed.
+    """
+    parent = final.parent
+    prefixes = (
+        f".{final.name}{_STAGING_INFIX}",
+        f".{final.name}{_SUPERSEDED_INFIX}",
+    )
+    try:
+        entries = sorted(parent.iterdir())
+    except OSError:
+        # No parent yet - a first run - or an unreadable one, which the
+        # publication below will fail on with a far clearer error.
+        return []
+    return [entry for entry in entries if entry.name.startswith(prefixes)]
+
+
+def _recover_interrupted_publication(final: Path, own: Sequence[Path]) -> None:
+    """Put the tree back together after a publication that was killed part-way.
+
+    The swap below is two renames, so there is one instant in which the
+    published tree has been moved aside and its replacement has not yet taken
+    its place.  A process killed in that instant leaves no published tree and
+    one renamed-aside copy that **is the only complete generation in
+    existence**.  This function is what makes that recoverable:
+
+    * **an orphaned renamed-aside tree is restored, never removed.**  If
+      ``final`` is absent and a superseded copy is there, it is renamed back
+      first, before anything else in this call touches the filesystem -- so a
+      publication that then fails on a render or a missing asset leaves that
+      restored tree published, rather than leaving a reader with nothing.  The
+      most recently modified copy wins, with the name breaking a tie, so the
+      choice is deterministic;
+    * **this call's own two scratch names are cleared**, because a previous
+      run of *this* process cannot still be using them and
+      :func:`ensure_dir` would otherwise build on top of a partial tree;
+    * **scratch carrying another process's identifier is reported and left
+      alone.**  Deleting it would be the one way this writer could destroy a
+      concurrent publication's work, and no publisher can tell a dead
+      process's leavings from a live one's portably -- a liveness probe is
+      either unavailable or, on Windows, a request to terminate the process.
+      What is left is dot-prefixed, so no request can reach it, and
+      ``app/cli.py``'s ``--clean`` empties the build output directory on the
+      next ordinary run.
+
+    Args:
+        final: The published tree's directory.
+        own: The scratch paths this call will use, from :func:`_staging_paths`.
+    """
+    leftovers = _leftover_scratch(final)
+    if not final.exists():
+        superseded = [
+            path
+            for path in leftovers
+            if f".{final.name}{_SUPERSEDED_INFIX}" in f".{path.name}" and path.is_dir()
+        ]
+        if superseded:
+            candidate = max(
+                superseded, key=lambda path: (path.stat().st_mtime, path.name)
+            )
+            try:
+                os.rename(candidate, final)
+            except OSError:
+                logger.exception(
+                    "Could not restore the report tree from %s to %s; the "
+                    "previous generation is intact there and can be renamed "
+                    "back by hand",
+                    candidate,
+                    final,
+                )
+            else:
+                logger.warning(
+                    "Restored %s from %s, left behind by an interrupted "
+                    "report publication",
+                    final,
+                    candidate,
+                )
+                leftovers = _leftover_scratch(final)
+
+    for leftover in leftovers:
+        if leftover in own:
+            logger.warning(
+                "Removing %s, left behind by an interrupted report "
+                "publication of this process",
+                leftover,
+            )
+            _discard(leftover)
+        else:
+            logger.warning(
+                "Leaving %s where it is: it carries another process's "
+                "identifier, so a publication may still own it. It is "
+                "unreachable over HTTP, and --clean removes it",
+                leftover,
+            )
 
 
 def write_pretty_reports(
@@ -1477,20 +1923,57 @@ def write_pretty_reports(
 ) -> Path:
     """Write the whole report tree, pages and assets, and return its directory.
 
-    The composition: render everything first, so a template fault cannot leave
-    a half-written tree; then create the directory and copy the assets, so a
-    packaging fault surfaces before a page that would reference them is
-    written; then write the pages in the order
-    :func:`render_pretty_pages` produced them.
+    **The tree is published as a whole or not at all.**  It is a directory
+    artifact, so that guarantee cannot come from an atomic file write; it comes
+    from building the whole tree in a staging sibling and swapping it into
+    place:
 
-    The tree is overwritten **in place**.  Nothing is deleted -- not the
-    directory, not a page from an earlier run:
-    :mod:`app.utils.paths` creates directories and never removes them, and
-    emptying the build-output directory belongs to ``app/cli.py``'s
-    ``--clean`` step, which runs before the suite does.  A page from a previous
-    run whose feature or tag has since disappeared is therefore left where it
-    is, exactly as a generator writing into an uncleaned directory would leave
-    it.
+    1. an earlier publication that was killed part-way is put back together
+       (:func:`_recover_interrupted_publication`) and the staging tree is
+       created;
+    2. the assets are copied into staging and validated
+       (:func:`copy_pretty_assets`);
+    3. the pages are rendered and written one at a time, straight from
+       :func:`iter_pretty_pages`, so one page string is alive at a time rather
+       than the whole tree's worth of markup -- which matters on a failing run,
+       where a scenario's base64 screenshot and traceback appear on its feature
+       page, on the failures overview and on every tag page its tag reaches;
+    4. the complete inventory in staging is verified: every required asset
+       again, and every page the iterator produced;
+    5. the published tree is renamed aside, staging is renamed into place, and
+       the renamed-aside copy is deleted.  Two renames rather than one
+       replace, because renaming a directory onto an existing directory fails
+       on Windows and on POSIX alike and AAP 0.8 requires Windows support.
+
+    **The bound on that last step, stated plainly.**  A directory cannot be
+    exchanged for another in one indivisible operation with portable
+    filesystem primitives: ``os.replace`` refuses a non-empty destination
+    directory, a symbolic-link indirection would put a link where the
+    reference tree has a directory and needs privileges on Windows, and
+    deleting the published tree first would leave it absent for as long as the
+    new one takes to write.  Two metadata renames are the narrowest window
+    available, and what is visible inside it is the published tree *absent*,
+    never partial -- a request for a page in that instant is the viewer's
+    ordinary 404, and the next ordinary run of this writer restores the tree
+    from the renamed-aside copy if a process died there
+    (:func:`_recover_interrupted_publication`).  A reader therefore sees one
+    complete generation or none, which is the guarantee the artifact contract
+    needs; it never sees two mixed.
+
+    Two consequences are the point of the exercise.  **Exactly one detail page
+    per current feature and per current tag**: a page whose feature or tag has
+    since disappeared was not written into the staging tree, so it is not in
+    the published one either -- the old behaviour left it exposed, and a rerun
+    that selected nothing at all kept every page of the run before it.  And
+    **no mixed generation ever exists**: a fault at any point above leaves the
+    previous complete tree exactly as it was, because nothing outside staging
+    has been touched yet.
+
+    What this does *not* do is delete anything that is not its own: no sibling
+    artifact is read, moved or removed, and the build-output directory is
+    never emptied.
+    Replacing this writer's own directory is not the ``--clean`` step, which
+    remains ``app/cli.py``'s and runs before the suite.
 
     Args:
         result_set: The merged result document, or ``None`` for a run that
@@ -1502,9 +1985,13 @@ def write_pretty_reports(
             directory.
         directory: An explicit output directory, which overrides ``base``
             entirely, for a caller that already holds a path.
-        project_name: The Project cell of the build-info table.
+        project_name: The Project cell of the build-info table.  Empty by
+            default, in which case the document's own ``project_name`` key
+            supplies it; see :func:`render_pretty_pages`, which this function
+            hands it to unchanged.
         build_date: The already-formatted Date cell; see
-            :func:`format_build_date`.
+            :func:`format_build_date`, which is empty for a document carrying
+            no timestamp.
         environment: An environment to render through; see
             :func:`build_environment`.
 
@@ -1515,37 +2002,108 @@ def write_pretty_reports(
         -- the file served when a request names the artifact directory itself.
 
     Raises:
-        jinja2.TemplateError: If a page cannot be rendered.  Raised before any
-            file is touched, so the tree on disk is left as it was.
-        FileNotFoundError: If a page-linked asset is missing; see
+        jinja2.TemplateError: If a page cannot be rendered.
+        FileNotFoundError: If a required asset is missing; see
             :func:`copy_pretty_assets`.
-        OSError: If the directory cannot be created or a file cannot be
-            written.  Deliberately not swallowed: producing this artifact is
-            the writer's contract with the run's exit table, whose
-            writer-failure class names the failing writer on stderr and leaves
-            the artifacts already written in place.  Because this writer emits
-            many files, that is exactly what a fault part-way through the page
-            loop produces, and it is intended.
-    """
-    pages = render_pretty_pages(
-        result_set,
-        project_name=project_name,
-        build_date=build_date,
-        environment=environment,
-    )
-    root = ensure_dir(pretty_reports_html_dir(base) if directory is None else directory)
-    assets = copy_pretty_assets(root)
+        OSError: If a directory cannot be created, a page cannot be written or
+            the swap cannot be made.
 
-    for filename, html in pages.items():
-        target = root / filename
-        # newline="\n" so a page written on Windows is byte-identical to one
-        # written on Linux: the structure of this artifact must not depend on
-        # which side of the pipeline's isUnix() branch produced it.
-        with open(target, "w", encoding="utf-8", newline="\n") as stream:
-            stream.write(html)
-        logger.debug("Wrote %s", target)
+        Every one of them propagates, because producing this artifact is the
+        writer's contract with the run's exit table, whose writer-failure class
+        names the failing writer on stderr.  None of them leaves a partial
+        tree: the staging tree is removed, a tree already renamed aside is
+        renamed back, and neither scratch directory survives the call.
+    """
+    final = Path(pretty_reports_html_dir(base) if directory is None else directory)
+    staging, superseded = _staging_paths(final)
+
+    _recover_interrupted_publication(final, (staging, superseded))
+
+    moved_aside = False
+    try:
+        ensure_dir(staging)
+        assets = copy_pretty_assets(staging)
+
+        # Keyed by filename rather than appended to, so a detail-name collision
+        # is one staged page here as it is one file on disk.
+        staged: dict[str, None] = {}
+        for filename, html in iter_pretty_pages(
+            result_set,
+            project_name=project_name,
+            build_date=build_date,
+            environment=environment,
+        ):
+            target = staging / filename
+            # newline="\n" so a page written on Windows is byte-identical to
+            # one written on Linux: the structure of this artifact must not
+            # depend on which side of the pipeline's isUnix() branch produced
+            # it.  A repeated filename overwrites, which is the detail-page
+            # collision rule iter_pretty_pages documents.
+            with open(target, "w", encoding="utf-8", newline="\n") as stream:
+                stream.write(html)
+            staged[filename] = None
+            logger.debug("Staged %s", target)
+
+        # The inventory check, over staging and before the swap: the assets
+        # once more, in case a page write disturbed one, and every page the
+        # iterator produced.  Anything missing here means the tree would be
+        # published incomplete, which is the one outcome this writer must not
+        # produce.
+        _require_assets(staging)
+        missing_pages = [name for name in staged if not (staging / name).is_file()]
+        if missing_pages:
+            raise OSError(
+                f"the staged report tree {staging} is missing "
+                f"{len(missing_pages)} page(s) that were written into it: "
+                + ", ".join(missing_pages)
+            )
+
+        # The swap.  Between the two renames the published tree is absent
+        # rather than partial, which is the one instant this design cannot
+        # remove; it is bounded by a rename of a directory that has already
+        # been created on the same filesystem.
+        if final.exists():
+            os.rename(final, superseded)
+            moved_aside = True
+        os.rename(staging, final)
+    except BaseException:
+        # Restoration comes first and everything else is best-effort: the one
+        # thing that must survive a failed publication is the tree that was
+        # published before it.
+        if moved_aside and not final.exists():
+            try:
+                os.rename(superseded, final)
+            except OSError:
+                logger.exception(
+                    "Could not restore the previous report tree to %s; it is "
+                    "intact at %s and can be renamed back by hand",
+                    final,
+                    superseded,
+                )
+        _discard_quietly(staging)
+        if superseded.exists() and final.exists():
+            # The published tree is in place - restored, or newly swapped in
+            # before a later step failed - so the copy aside is scratch.  When
+            # the restore could not be made, the copy aside is the only
+            # surviving generation and is deliberately left where the log says
+            # it is.
+            _discard_quietly(superseded)
+        raise
+    else:
+        # The swap has already happened, so the tree on disk is complete and
+        # this writer has met its contract.  A cleanup fault from here is
+        # therefore logged -- ``app/logging_config.py`` routes it to stderr and
+        # the next publication sweeps what it left -- and deliberately not
+        # raised: raising would have
+        # ``app/services/report_service.py`` name this writer under the exit
+        # contract's writer-failure class for an artifact that is in fact
+        # published, which is a false diagnosis of a complete run.
+        _discard_quietly(superseded)
 
     logger.info(
-        "Wrote %d page(s) and %d asset(s) to %s", len(pages), len(assets), root
+        "Published %d page(s) and %d asset(s) to %s",
+        len(staged),
+        len(assets),
+        final,
     )
-    return root
+    return final

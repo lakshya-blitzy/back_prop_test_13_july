@@ -4,15 +4,56 @@
   of the three surfaces this project writes.
   ===========================================================================
 
-  Two macros, both about the single concern "status". Callers import them and
-  never include this file, because the signatures below are the contract:
+  Two macros and three exported names, all about the single concern "status".
+  Callers import them and never include this file, because the signatures
+  below are the contract:
 
       {% from 'partials/status_badge.html' import status_badge, status_token %}
+      {% import 'partials/status_badge.html' as badge %}
+
+  Either form is correct. The second is what a caller that also needs the
+  exported vocabulary uses, since a name reached as badge.STATUS_TOKENS needs
+  the module rather than two of its members.
 
   The import is deliberately the plain form, without the calling context. No
   partial may read an ambient template variable, and that restraint is exactly
   what makes the output identical wherever it is rendered: every value a macro
   needs arrives as an argument.
+
+  ---------------------------------------------------------------------------
+  THE EXPORTED VOCABULARY - STATUS_TOKENS, STATUS_UNKNOWN,
+  STATUS_READING_ORDER
+  ---------------------------------------------------------------------------
+  This file is the single authority for WHICH statuses exist and IN WHAT
+  ORDER they are presented, not merely for folding one value. The three names
+  are declared at the top level, immediately above the macros, so they are
+  exported and any importing template reads them through the module:
+
+      STATUS_TOKENS         The seven tokens the result model produces, IN
+                            READING ORDER - passed, failed, skipped, pending,
+                            undefined, untested, ambiguous. This is the set
+                            status_token folds onto, so it is also the whole
+                            of what a status may normalise to besides the
+                            fallback.
+
+      STATUS_UNKNOWN        "unknown", the fallback status_token answers with
+                            for anything outside those seven.
+
+      STATUS_READING_ORDER  (STATUS_TOKENS|list) + [STATUS_UNKNOWN] - the
+                            eight-token PRESENTATION READING ORDER, with the
+                            fallback LAST, as a list of plain strings. A
+                            template that renders statuses in a fixed order -
+                            a filter button row, a per-status tally, a
+                            summary table - iterates this rather than quoting
+                            a literal of its own, which is what keeps two
+                            surfaces from drifting apart and either one from
+                            drifting away from the fold.
+
+  A TOKEN ADDED TO THE RESULT MODEL IS ADDED HERE FIRST, in the position it
+  should read in, and then to the data-report-status enumeration in
+  app/static/css/main.css so the new hook has a colour. Nothing downstream
+  needs editing: the macros fold onto the new token and every consumer of
+  STATUS_READING_ORDER presents it, in order, on the next render.
 
   ---------------------------------------------------------------------------
   MACRO 1 - status_token(status)
@@ -29,19 +70,19 @@
 
   The rule: coerce to text, strip the surrounding whitespace, fold to
   lowercase, and answer with that token when it is one of the seven the result
-  model produces -
+  model produces - STATUS_TOKENS above -
 
       passed   failed   skipped   pending   undefined   untested   ambiguous
 
-  - and with "unknown" for anything else. So "Passed" answers "passed" and
-  " failed " answers "failed", while none, an empty string, a number, a
-  container and an undefined name all answer "unknown". The macro cannot
-  raise, and that is the point: a report is what a reader turns to when a run
-  has gone wrong, so a malformed status has to render rather than take the
-  whole page down with it.
+  - and with STATUS_UNKNOWN, "unknown", for anything else. So "Passed"
+  answers "passed" and " failed " answers "failed", while none, an empty
+  string, a number, a container and an undefined name all answer "unknown".
+  The macro cannot raise, and that is the point: a report is what a reader
+  turns to when a run has gone wrong, so a malformed status has to render
+  rather than take the whole page down with it.
 
-  Those seven are the enumeration app/static/css/main.css matches on, quoted
-  from it rather than chosen here. The stylesheet carries no rule for
+  Those seven are also the enumeration app/static/css/main.css matches on, so
+  the two are kept in step deliberately. The stylesheet carries no rule for
   "unknown", so a badge in that state resolves the neutral grey written as the
   literal fallback of every one of its status custom properties - visibly a
   status, and visibly not one of the seven.
@@ -145,25 +186,58 @@
   way out; main.css handles the wrapping of what remains.
 
   CLASS VOCABULARY - app/static/css/main.css, and nothing else. tqa-badge is
-  the only class this file names, and status travels as the data-tqa-status
+  the only class this file names, and status travels as the data-report-status
   attribute because the stylesheet declares no per-status badge class of its
   own. No tqa- name is invented here.
+
+  THE STATUS HOOK IS data-report-status, AND IT IS THE ONLY ONE. One
+  normalised attribute serves the stylesheet's colouring, its print rules and
+  the behaviour script's status filter, on badges and on plain
+  status-bearing elements alike. No second status attribute exists anywhere
+  in this project, and an element never carries two: two hooks for one fact
+  are two things for a caller to keep in step, and the one no rule reads is
+  the one that goes stale unnoticed.
+
+  status_token IS THE SINGLE STATUS AUTHORITY for every surface. Any template
+  that needs a status in normalised form - to colour a cell, to tally a pass,
+  to fill a hook - imports it from here rather than trimming and lowercasing
+  its own copy, so one reading of a status can never disagree with another.
 -#}
 
-{#- The presentation status vocabulary. Seven tokens plus the fallback, and
-    the fold that maps anything at all onto one of them. -#}
+{#- ---- the presentation status vocabulary, written down exactly once -------
+    A top-level assignment is EXPORTED from a template, so these three names
+    are reachable as badge.STATUS_TOKENS, badge.STATUS_UNKNOWN and
+    badge.STATUS_READING_ORDER wherever this file is imported under a name,
+    and the macros below resolve them from this module's own namespace even
+    when the import deliberately carries no calling context.
+
+    STATUS_TOKENS is quoted from the data-report-status enumeration in
+    app/static/css/main.css: a token added to the result model has to be
+    added there too, or a badge would carry a hook the stylesheet cannot
+    colour - but it is added HERE FIRST, because this is the sequence every
+    surface orders its own output by.
+
+    STATUS_READING_ORDER is built from the other two rather than restated, so
+    the fallback cannot go missing from the presentation sequence and the
+    sequence cannot disagree with the fold. It is a plain list of plain
+    strings, which is what a caller's sequence tests, concatenations and
+    mapping lookups expect. -#}
+{%- set STATUS_TOKENS = ('passed', 'failed', 'skipped', 'pending', 'undefined', 'untested', 'ambiguous') -%}
+{%- set STATUS_UNKNOWN = 'unknown' -%}
+{%- set STATUS_READING_ORDER = (STATUS_TOKENS|list) + [STATUS_UNKNOWN] -%}
+
+{#- The fold that maps anything at all onto one of those tokens. -#}
 {%- macro status_token(status) -%}
-    {#- Quoted from the data-tqa-status enumeration in app/static/css/main.css.
-        A token added to the result model has to be added there first, or the
-        badge would carry a hook the stylesheet cannot colour. -#}
-    {%- set known_tokens = ('passed', 'failed', 'skipped', 'pending', 'undefined', 'untested', 'ambiguous') -%}
+    {#- The seven tokens and the fallback are read from the names above, so
+        this macro carries no vocabulary of its own and cannot drift from the
+        reading order its callers present results in. -#}
     {#- default(..., true) is what makes this total. It answers for an
         undefined name without ever reading it - so a strict undefined policy
         raises nothing - and folds none, the empty string and every other
         falsy value onto the same empty candidate. |string then accepts a
         number or a container without complaint. -#}
     {%- set candidate = status|default('', true)|string|trim|lower -%}
-    {{- candidate if candidate in known_tokens else 'unknown' -}}
+    {{- candidate if candidate in STATUS_TOKENS else STATUS_UNKNOWN -}}
 {%- endmacro -%}
 
 {#- One status token as a badge: a single inline element, its status on the
@@ -176,5 +250,5 @@
     {%- set extra = (extra_classes|default('', true)|string).split()|join(' ') -%}
     {%- set caption = label|default('', true)|string|trim -%}
     {%- set tip = title|default('', true)|string|trim -%}
-    <span class="tqa-badge{% if extra %} {{ extra }}{% endif %}" data-tqa-status="{{ token }}"{% if tip %} title="{{ tip }}"{% endif %}>{{ caption if caption else token|capitalize }}</span>
+    <span class="tqa-badge{% if extra %} {{ extra }}{% endif %}" data-report-status="{{ token }}"{% if tip %} title="{{ tip }}"{% endif %}>{{ caption if caption else token|capitalize }}</span>
 {%- endmacro -%}

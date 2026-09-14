@@ -208,8 +208,8 @@
       tqa-scenario, tqa-background, tqa-scenario-name, tqa-steps, tqa-tags,
       tqa-tag, tqa-timestamp, tqa-feature-desc, tqa-meta, tqa-meta-item,
       tqa-meta-label, tqa-meta-value, tqa-toggle
-      data-tqa-status, data-report-filterable, data-report-status,
-      data-report-toggle, data-report-detail
+      data-report-status, data-report-filterable, data-report-toggle,
+      data-report-detail
 
   A background has no name, steps or description class of its own in that
   stylesheet, so it shares the scenario's; its own class carries the dashed
@@ -237,15 +237,18 @@
   expanded state and naming the region it controls in words, because its
   glyph is generated content and has no text of its own.
 
-  One accepted cost in that last point, recorded so it is not read as an
-  oversight: naming the toggle after this element means the heading's own
-  computed name repeats the element name, since a heading is named from its
-  contents and a nested control contributes its label. The alternative - a
-  bare "Toggle steps" on every control - would leave several dozen
-  identically named buttons in one document, which is worse for a reader
-  moving through controls than a little redundancy is for one moving through
-  headings. The step partial names its own toggle after its step for the same
-  reason, and consistency with it is deliberate.
+  THE CONTROL SITS BESIDE THE HEADING, NOT INSIDE IT, and that arrangement is
+  what lets both names be right at once. A heading is named from its contents,
+  so a control nested in one contributes its label to the heading's computed
+  name; with the control outside it, the heading's accessible name is the
+  element's name and its status and nothing else, which is what a reader
+  moving through headings wants to hear. The control keeps its own specific
+  per-element label, because a document carrying several dozen toggles has to
+  keep them distinguishable for a reader moving through controls, where a bare
+  "Toggle steps" on every one of them would not. The step partial names its
+  own toggle after its step for the same reason, and consistency with it is
+  deliberate. The row that holds the heading and the control is described at
+  the markup itself, including why one class names both.
 -#}
 {% import "partials/step_row.html" as steps %}
 {% import "partials/lightbox.html" as shots %}
@@ -350,20 +353,37 @@
             {%- set _ = shot_sources.append(item) -%}
         {%- endfor -%}
     {%- endif -%}
-    {%- set shot_markup = shots.screenshots(shot_sources) -%}
+    {#- The element's own heading is passed as the FALLBACK caption, which the
+        partial uses only where the embedding's own name carries no text. A
+        screenshot is failure evidence, so an unlabelled one is the one thing
+        it must not be; the recorded name still wins wherever there is one. -#}
+    {%- set shot_markup = shots.screenshots(shot_sources, fallback_caption=heading_text) -%}
 
     {#- The toggle's glyph is generated content and so has no text of its own
         to be named by; these words are its accessible name. -#}
     {%- set toggle_label = 'Toggle steps for ' ~ heading_text -%}
 
-<div id="{{ element_id }}" class="{{ root_class }}{% if extra %} {{ extra }}{% endif %}" data-tqa-status="{{ token }}" data-report-filterable data-report-status="{{ token }}">
-    <h3 class="tqa-scenario-name">{{ heading_text }}
-        {{ badge.status_badge(token) }}
-        {%- if step_list %}
+<div id="{{ element_id }}" class="{{ root_class }}{% if extra %} {{ extra }}{% endif %}" data-report-status="{{ token }}" data-report-filterable>
+    {#- The title row and the heading it holds carry the SAME class, and that
+        repetition is deliberate rather than a copied line. In
+        app/static/css/main.css .tqa-scenario-name is at once the only declared
+        flex row with centred items and an 8px gap - which is exactly the
+        spacing the name, the badge and the control need between them - and the
+        only rule that gives this heading its margin, its type scale and its
+        one step up at the 992px breakpoint. Declared on the row it seats the
+        control beside the heading; kept on the h3 it keeps the heading typed,
+        since that stylesheet has no bare heading rule to fall back on. The row
+        is NOT given tqa-filter, whose print rule sets display:none and would
+        delete every scenario heading on paper, and no class outside the
+        stylesheet's own namespace is invented for it. #}
+    <div class="tqa-scenario-name">
+        <h3 class="tqa-scenario-name">{{ heading_text }}
+            {{ badge.status_badge(token) }}</h3>
         {#- BLITZY [A11Y]: the control's 28px minimum box is
             app/static/css/main.css's own, matched to the step partial's
             toggle; it is implemented as the stylesheet specifies rather than
             enlarged here, and is flagged for design review. -#}
+        {%- if step_list %}
         <button type="button"
                 class="tqa-toggle"
                 data-report-toggle="{{ steps_id }}"
@@ -371,7 +391,7 @@
                 aria-expanded="true"
                 aria-label="{{ toggle_label }}"></button>
         {%- endif %}
-    </h3>
+    </div>
     {#- The description renders only when it has content - the model records
         "no description" as an empty string, so an empty paragraph would add
         furniture and no information - and its value is interpolated flush

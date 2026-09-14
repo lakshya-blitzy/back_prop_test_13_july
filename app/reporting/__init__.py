@@ -22,15 +22,16 @@ aware of the others."*
     driver is quit, and a capture that fails is logged and suppressed so that
     it cannot change a test outcome (deviation 19).
 ``cucumber_json``
-    ``cucumber.json`` in the Cucumber-JVM schema.  The only artifact with a
+    The machine-read JSON report, in the Cucumber-JVM schema.  The only artifact with a
     machine consumer in the pipeline: the Jenkins publisher reads it and
     nothing else (``Jenkins:15``).
 ``rerun_report``
-    ``rerun.txt``, grouped one line per feature, and the parser for reading it
+    The rerun manifest, grouped one line per feature, and the parser for
+    reading it
     back - the port of the second Java runner, whose ``features`` declaration
     names that manifest as its input (``FailedTestRunner.java:11``).
 ``html_report``
-    ``cucumber-reports.html``: one self-contained page, no sibling asset, the
+    The self-contained HTML report: one page, no sibling asset, the
     contract ``io.cucumber:html-formatter`` 17.0.0 produced.
 ``pretty_reports``
     The PrettyReports tree: four overview pages, a detail page per feature and
@@ -76,12 +77,12 @@ Name                           Defined in          Role
 ``DEFAULT_MIME_TYPE``          ``screenshots``     ``image/png``, verbatim from
                                                    ``Hooks.java:15``
 ``build_cucumber_json``        ``cucumber_json``   the pure half: document -> JSON structure
-``write_cucumber_json``        ``cucumber_json``   **writer 1** - ``cucumber.json``
+``write_cucumber_json``        ``cucumber_json``   **writer 1** - the JSON report
 ``build_rerun_lines``          ``rerun_report``    the pure half: the manifest's lines
-``write_rerun_txt``            ``rerun_report``    **writer 2** - ``rerun.txt``
+``write_rerun_txt``            ``rerun_report``    **writer 2** - the manifest
 ``parse_rerun_file``           ``rerun_report``    read a manifest back, for ``--rerun``
 ``render_html_report``         ``html_report``     the pure half: the page as one string
-``write_html_report``          ``html_report``     **writer 3** - ``cucumber-reports.html``
+``write_html_report``          ``html_report``     **writer 3** - the page
 ``render_pretty_pages``        ``pretty_reports``  the pure half: every page by filename
 ``copy_pretty_assets``         ``pretty_reports``  the vendored asset set into the emitted tree
 ``write_pretty_reports``       ``pretty_reports``  **writer 4** - the PrettyReports tree

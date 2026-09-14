@@ -15,13 +15,15 @@ AAP 0.4.1 pairs this module with ``features/Contact.feature`` and
 :mod:`app.pages.contacts_page`.  The Gherkin phrases below are byte-exact
 copies of the annotation strings in the Java class, and the Python function
 names are the Java method names verbatim - which is also what a step's
-``match.location`` reports in ``target/cucumber.json`` as a dotted Python path
-(AAP 0.1.3, deviation 8).
+``match.location`` reports in the merged Cucumber JSON report as a dotted
+Python path (AAP 0.1.3, deviation 8).
 
 The fourteen definitions, in Java declaration order
 ---------------------------------------------------
 Every ``wait.until(ExpectedConditions.visibilityOf(x))`` in the source becomes
-one ``wait_visible_element(<element>, 20)`` call:
+one ``wait_visible_element(<locator>, 20)`` call - the locator constant, since
+the Java argument was a re-locating proxy and the wait must do that lookup
+itself:
 
 ``:17``  #1 ``User is at Contact dashboard``
     3-second delay, **then** ``contact_module.click()``.
@@ -188,7 +190,10 @@ it for exactly that.  The five ``sendKeys`` calls here are plain sends on a
 located element and need no helper - reaching for a keyboard helper here means
 a ``sendKeys`` has been misread.  From the wait family only
 ``wait_visible_element`` is taken, because every wait in this class applies
-``ExpectedConditions.visibilityOf`` to an element rather than to a locator.
+``ExpectedConditions.visibilityOf`` to an element rather than to a locator -
+and that element was a proxy re-locating on every touch, which is why the
+helper porting it is handed this page's locator constants and resolves them
+within the wait.
 
 Nothing comes from the configuration module, since ``Contacts.java`` reads no
 configuration property; and nothing from the session lifecycle, since
@@ -343,7 +348,7 @@ def user_enters_name(context, name: str) -> None:
     pattern field.
     """
     page = _page(context)
-    wait_visible_element(page.name_input, 20)
+    wait_visible_element(page.NAME_INPUT, 20)
     page.name_input.clear()
     page.name_input.send_keys(name)
 
@@ -383,7 +388,7 @@ def user_sees_the_created_new_contact_details_at_dashboard(context) -> None:
     """
     page = _page(context)
     page.contact_module.click()
-    wait_visible_element(page.contact_module, 20)
+    wait_visible_element(page.CONTACT_MODULE, 20)
     page.ok_btn.click()
 
 
@@ -454,7 +459,7 @@ def user_selects_the_profile(context) -> None:
     """
     page = _page(context)
     page.first_user.click()
-    wait_visible_element(page.edit_title, 20)
+    wait_visible_element(page.EDIT_TITLE, 20)
 
 
 @step("User sees the updated contact details at dashboard")
@@ -491,4 +496,3 @@ def user_can_see_the_downloaded_file(context) -> None:
     phrase, the source verifies no download.
     """
     _page(context).due_payment.click()
-

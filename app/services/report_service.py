@@ -7,8 +7,8 @@ paired with the destination it wrote.  That declaration is reproduced verbatim
 inside this repository at ``README.md:78-83``, which quotes the original
 ``CukesRunner.java:9-14``, and its four destinations are the four artifact
 constants :mod:`app.utils.paths` declares.  It is not re-quoted here: this
-module names no destination at all, so the plugin list is cited rather than
-copied.
+module spells no destination of its own, referring to each of the four by the
+key that module publishes, so the plugin list is cited rather than copied.
 
 Cucumber-JVM attached those four as event listeners, and each wrote its own
 artifact as the run progressed.  The port keeps the shape and moves the moment:
@@ -21,10 +21,28 @@ independent writers, none aware of the others."*
 This module is the fan-out and nothing besides.  It writes no file itself: each
 writer owns its own I/O and resolves its own destination through
 :mod:`app.utils.paths`, the port's sole owner of every path (specification
-section 0.4.2).  That is why not one path, literal or otherwise, appears
-anywhere below - not even in a docstring, where it would be the first step of
-exactly the drift that module exists to prevent - and why ``base`` is handed to
-each writer untouched rather than resolved on its behalf.
+section 0.4.2).  That is why ``base`` is handed to each writer untouched rather
+than resolved on its behalf, and why **no path is spelled anywhere below - no
+literal, no fragment, not even inside a docstring**, where it would be the
+first step of exactly the drift that module exists to prevent.
+
+One thing this module does do with a path, and the line it draws
+----------------------------------------------------------------
+It *resolves* one.  :attr:`WriterSpec.artifact_key` carries each writer's
+artifact **identity** - the key :mod:`app.utils.paths` publishes for it, taken
+from that module's own constant - and :meth:`WriterSpec.destination` asks that
+module to turn the identity into a path, for exactly one purpose: so that a
+writer failure can say *where* the writer was writing.  The section 0.4.1 exit
+contract requires the failing writer to be named, and a diagnostic that names a
+writer without its destination cannot be acted on, because a template fault or
+a model error need not mention a path of its own.
+
+The invariant is therefore unchanged, and stated precisely: this module
+contains no path and constructs none - it holds four keys and calls one
+resolver, so every destination it names is by construction the destination that
+writer's own accessor produced.  Nothing resolved here is ever passed to a
+writer, so the writers keep sole responsibility for where they write; the
+resolution happens only in the failure path, and only to describe it.
 
 Writer order is a decision, and must not be re-sorted
 -----------------------------------------------------
@@ -61,17 +79,47 @@ of calls.
 Failure
 -------
 :func:`generate_reports` stops at the first writer that raises, records what
-happened, and returns.  Each of the three properties that follow maps to a row
-of the exit contract:
+happened, and returns.  Three of the properties that follow map to a row of the
+exit contract, and the fourth is why this service needs no recovery step of its
+own:
 
 * **Nothing is rolled back.**  Artifacts written before the failure stay on
   disk.  The run does not delete a completed artifact - there is no ``unlink``,
   ``rmtree`` or "clean" step here, and emptying the build-output directory
   belongs to ``app/cli.py``'s ``--clean``, which runs before the suite does.
-* **The failing writer is named on stderr.**  The logger comes from the
-  standard library, and ``app/logging_config.py`` routes ``WARNING`` and above
-  to stderr, so an ``ERROR`` record lands there without this module importing
-  that configuration or writing to a stream itself.
+* **Repairing a half-written artifact is no part of this service's job**, and
+  that is a property of the writers rather than a gap here.  The two HTML
+  writers publish atomically and say so in their own documentation: the
+  self-contained page is renamed onto its destination from a temporary in that
+  destination's own directory, and the report *tree* is built in a staging
+  sibling, validated whole, and swapped into place by rename - so a fault in
+  either leaves that artifact at its previous complete generation or absent,
+  never truncated and never a mixture of two runs.  Whether the same holds of
+  each other writer is that writer's contract to state; this module inspects,
+  repairs and removes nothing on disk either way.  What it does own is the
+  order below: the two machine-read contracts are produced first, so a fault in
+  the third or fourth writer cannot cost the publisher and the rerun runner the
+  inputs they read.
+* **The failing writer and its destination are named on stderr.**  The logger
+  comes from the standard library, and ``app/logging_config.py`` routes
+  ``WARNING`` and above to stderr, so an ``ERROR`` record lands there without
+  this module importing that configuration or writing to a stream itself.  One
+  record carries all three facts - writer, destination and exception, with the
+  traceback attached - and :attr:`ReportOutcome.failed_path` carries the
+  destination onward so ``app/cli.py`` can name it in its exit-class record
+  without deriving a path of its own.
+
+  That single record is the whole of what this module says about a failure,
+  and the boundary is a rule rather than an accident: **the cause and its
+  traceback are reported where the exception was caught, and every fact the
+  outcome carries is reported once by the command that reads the outcome.**
+  So the writers left unattempted are named by ``app/cli.py`` from
+  :attr:`ReportOutcome.skipped` and not here, and the artifacts that survived
+  are named there from :attr:`ReportOutcome.written`.  Naming them in both
+  places - which this module did until the duplication was reviewed - turns
+  one incident into several ERROR records with no canonical owner, which
+  inflates the error count a CI console shows and obscures how many things
+  actually went wrong.
 * **It returns rather than raises.**  ``app/cli.py`` owns every exit status and
   maps a failed outcome to its writer-failure class.  Only :exc:`Exception` is
   caught, so :exc:`KeyboardInterrupt` and :exc:`SystemExit` still propagate.
@@ -110,18 +158,21 @@ Deliberately absent
 
 Import boundary
 ---------------
-The standard library, and the four writer entry points from the
-:mod:`app.reporting` barrel.  Nothing else: no Flask, no Selenium, nothing from
-``app/config.py`` or ``app/utils/properties.py`` - the dependency graph has no
+The standard library, the four writer entry points from the
+:mod:`app.reporting` barrel, and from :mod:`app.utils.paths` the four artifact
+keys and the resolver a failure diagnostic names its destination with - the
+``SV --> RP`` and ``SV --> UT`` edges of the section 0.4.2 graph, and no
+others.  Nothing else: no Flask, no Selenium, nothing from ``app/config.py`` or
+``app/utils/properties.py`` - the dependency graph has no
 services-to-configuration edge, and the properties file is reached only through
 the configuration module, whose consumers are the step modules and the driver -
 nothing from ``app/web/`` or ``app/automation/``, not the logging configuration
 in ``app/logging_config.py`` (the logger comes from the standard library
 instead, which is what keeps this boundary intact), and not the sibling
 ``app/services/test_run_service.py`` - the two services never import each other,
-and ``app/cli.py`` connects them.  The dependency runs one way, ``SV --> RP`` in
-the section 0.4.2 graph, so nothing in ``app/reporting/``, ``app/pages/`` or
-``app/automation/`` may import this module.
+and ``app/cli.py`` connects them.  The dependencies run one way, so nothing in
+``app/reporting/``, ``app/pages/``, ``app/automation/`` or ``app/utils/`` may
+import this module.
 
 Together with the absence of import-time side effects, of module-level mutable
 state and of any environment read, that keeps :func:`generate_reports` callable
@@ -149,6 +200,22 @@ from app.reporting import (
     write_rerun_txt,
 )
 
+# The artifact *identities*, and the one resolver that turns an identity into a
+# destination.  Imported for a diagnostic and for nothing else: this module
+# still passes no path to a writer, and it spells none - the four constants
+# below are the keys ``app/utils/paths.py`` publishes, so the destination a
+# failure names is by construction the destination the writer resolved for
+# itself (specification section 0.4.2, "Artifact paths are owned by
+# ``app/utils/paths.py``"; section 0.4.2's graph carries the ``SV --> UT`` edge
+# this import travels).
+from app.utils.paths import (
+    CUCUMBER_JSON_NAME,
+    CUCUMBER_REPORTS_HTML_NAME,
+    PRETTY_REPORTS_DIR_NAME,
+    RERUN_TXT_NAME,
+    artifact_path,
+)
+
 if TYPE_CHECKING:  # pragma: no cover - resolved by a type checker, never at run time
     # Annotation only.  ``ResultSet`` is a plain ``dict[str, Any]`` alias that
     # ``app/reporting/__init__.py`` deliberately withholds from the barrel as
@@ -168,6 +235,13 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
+#: Substituted for a destination that could not be resolved, so that a
+#: writer-failure record always reads as a sentence instead of printing a bare
+#: ``None`` beside the writer's name.  It is deliberately not path-shaped:
+#: nothing downstream should be able to mistake it for a destination it could
+#: look for.
+_UNRESOLVED_DESTINATION: Final[str] = "an unresolved destination"
+
 
 # --------------------------------------------------------------------------- #
 # The fan-out sequence
@@ -175,7 +249,7 @@ logger = logging.getLogger(__name__)
 
 
 class WriterSpec(NamedTuple):
-    """One writer in the fan-out: a stable name, and the callable that writes.
+    """One writer in the fan-out: a stable name, the callable, the artifact.
 
     Attributes:
         name: Stable identifier for the writer.  It is not a display string:
@@ -184,6 +258,30 @@ class WriterSpec(NamedTuple):
             :attr:`ReportOutcome.skipped` report it, and the test module
             asserts the fan-out order by it - so it is part of this module's
             contract and is not to be reworded.
+        artifact_key: The :attr:`app.utils.paths.ArtifactSpec.key` of the
+            artifact this writer produces, taken from the constant
+            :mod:`app.utils.paths` publishes for it and never spelled out
+            here.  It exists so that a failure can name **where** the writer
+            was writing, which the section 0.4.1 exit contract requires of the
+            writer-failure row and which no template or model exception is
+            obliged to mention: :meth:`destination` turns it into a path and
+            :attr:`ReportOutcome.failed_path` carries that path to
+            ``app/cli.py``.
+
+            It is an *identity*, not a destination, and that distinction is
+            what keeps this module path-free: the key is resolved only in a
+            diagnostic, never passed to a writer, so each writer still
+            resolves its own destination from the same owner.
+
+            The identity is the artifact the plugin list declared, which is not
+            always what the writer hands back: ``pretty_reports`` resolves to
+            the report tree's root, while
+            :func:`app.reporting.write_pretty_reports` returns the
+            page sub-directory :data:`app.utils.paths.PRETTY_HTML_SUBDIR`
+            names, filled inside it.  The
+            asymmetry is deliberate - :meth:`destination` is the intended
+            artifact, :attr:`WriterResult.path` is the writer's own return
+            value - and the other three writers' two values coincide.
         write: The writer entry point.  Called uniformly as
             ``write(result_set, base=base)`` and returns the
             :class:`~pathlib.Path` it wrote - a file for the first three
@@ -204,17 +302,86 @@ class WriterSpec(NamedTuple):
 
     name: str
     write: Callable[..., Path]
+    artifact_key: str
+
+    def destination(self, base: Path | str | None = None) -> Path | None:
+        """Resolve the artifact this writer is meant to produce.
+
+        The *intended* destination, resolved through
+        :func:`app.utils.paths.artifact_path` from :attr:`artifact_key`, for a
+        diagnostic that has to say where a writer was writing.  It is not what
+        the writer returned: :attr:`WriterResult.path` is that, and for
+        :func:`app.reporting.write_pretty_reports` the two deliberately differ
+        - the writer returns the :data:`app.utils.paths.PRETTY_HTML_SUBDIR`
+        sub-directory it
+        filled, while this key resolves to the report tree's root, which is the
+        artifact the plugin list declared and the artifact route serves.  For
+        the other three writers the two coincide.
+
+        **This method never raises.**  It is called from the one path where an
+        exception is already being reported, so a problem resolving a path must
+        not displace the writer failure the path was describing - an unknown
+        key or a ``base`` that cannot be combined into a path yields ``None``
+        and a ``DEBUG`` record, and the caller substitutes readable text.
+
+        Args:
+            base: Directory to resolve against, exactly as handed to
+                :func:`generate_reports` and to the writer itself, so the
+                destination named in a diagnostic is the one that writer was
+                actually working on.  ``None`` resolves against the working
+                directory, which is what every accessor in
+                :mod:`app.utils.paths` does by default.
+
+        Returns:
+            The intended artifact path - a file for the first three writers, a
+            directory for the report tree - or ``None`` if it could not be
+            resolved.
+        """
+        try:
+            return artifact_path(self.artifact_key, base=base)
+        except Exception:  # noqa: BLE001 - a diagnostic may not raise
+            # DEBUG, not ERROR: the incident being reported is the writer's
+            # failure, and this is a note about the *description* of it.  The
+            # traceback is kept because an unresolvable artifact key is a
+            # programming error in this module's own table.
+            logger.debug(
+                "Could not resolve the destination of report writer %s from "
+                "artifact key %r",
+                self.name,
+                self.artifact_key,
+                exc_info=True,
+            )
+            return None
 
 
 #: The four writers, in the order :func:`generate_reports` drives them: the two
 #: machine-read contracts first.  This constant is the single home of that
 #: order - the module docstring explains why it is what it is, and why it must
 #: not be re-sorted into the plugin-declaration order of ``README.md:78-83``.
+#: Each entry's ``artifact_key`` is the constant :mod:`app.utils.paths`
+#: publishes for that artifact, so adding a writer here without an identity is
+#: not expressible and a destination can always be named in a diagnostic.
 WRITER_SEQUENCE: Final[tuple[WriterSpec, ...]] = (
-    WriterSpec(name="cucumber_json", write=write_cucumber_json),
-    WriterSpec(name="rerun_txt", write=write_rerun_txt),
-    WriterSpec(name="html_report", write=write_html_report),
-    WriterSpec(name="pretty_reports", write=write_pretty_reports),
+    WriterSpec(
+        name="cucumber_json",
+        write=write_cucumber_json,
+        artifact_key=CUCUMBER_JSON_NAME,
+    ),
+    WriterSpec(
+        name="rerun_txt",
+        write=write_rerun_txt,
+        artifact_key=RERUN_TXT_NAME,
+    ),
+    WriterSpec(
+        name="html_report",
+        write=write_html_report,
+        artifact_key=CUCUMBER_REPORTS_HTML_NAME,
+    ),
+    WriterSpec(
+        name="pretty_reports",
+        write=write_pretty_reports,
+        artifact_key=PRETTY_REPORTS_DIR_NAME,
+    ),
 )
 
 
@@ -237,8 +404,9 @@ class WriterResult:
             writer's own return value, never a path this module built: the
             three file writers return their file and
             :func:`app.reporting.write_pretty_reports` returns the directory it
-            wrote, which is the report tree's ``cucumber-html-reports``
-            sub-directory rather than the artifact root.  That asymmetry is the
+            wrote, which is the report tree's
+            :data:`app.utils.paths.PRETTY_HTML_SUBDIR` sub-directory rather
+            than the artifact root.  That asymmetry is the
             writers' business and is simply recorded here.
         error: The exception the writer raised, or ``None`` on success.  Typed
             :exc:`BaseException` for the widest contract with a consumer, though
@@ -268,6 +436,20 @@ class ReportOutcome:
         skipped: Names of the writers never attempted because of the failure, in
             :data:`WRITER_SEQUENCE` order.  Empty when the fan-out completed, and
             also when the writer that failed was the last one.
+        failed_path: The destination the writer named by :attr:`failed_writer`
+            was meant to produce, from :meth:`WriterSpec.destination` - the
+            *intended* artifact, which for the report tree is its root rather
+            than the sub-directory that writer returns.  ``None`` when nothing
+            failed, and also when the destination could not be resolved, so a
+            consumer must handle the absence rather than assume a path.
+
+            It is carried on the outcome so that ``app/cli.py`` can name the
+            destination in its exit-class record without resolving an artifact
+            path of its own: the command line owns no path but the build output
+            root, and re-deriving this one there is exactly the drift
+            :mod:`app.utils.paths` exists to prevent.  Declared last so every
+            existing construction of this class, positional or by keyword,
+            stays valid.
     """
 
     results: tuple[WriterResult, ...]
@@ -275,6 +457,7 @@ class ReportOutcome:
     failed_writer: str | None = None
     error: BaseException | None = None
     skipped: tuple[str, ...] = ()
+    failed_path: Path | None = None
 
     @property
     def ok(self) -> bool:
@@ -325,9 +508,11 @@ def generate_reports(
         A :class:`ReportOutcome`.  On success its :attr:`~ReportOutcome.results`
         holds four entries, :attr:`~ReportOutcome.written` the four paths and
         :attr:`~ReportOutcome.ok` is ``True``.  On failure the results end with
-        the writer that raised, :attr:`~ReportOutcome.failed_writer` and
-        :attr:`~ReportOutcome.error` describe it, and
-        :attr:`~ReportOutcome.skipped` names the writers left unattempted.
+        the writer that raised, :attr:`~ReportOutcome.failed_writer`,
+        :attr:`~ReportOutcome.error` and :attr:`~ReportOutcome.failed_path`
+        describe it - the writer, its exception and the destination it was
+        producing - and :attr:`~ReportOutcome.skipped` names the writers left
+        unattempted.
 
     Raises:
         KeyboardInterrupt: Propagated untouched - an interrupt is the operator
@@ -362,19 +547,41 @@ def generate_reports(
             skipped = tuple(later.name for later in WRITER_SEQUENCE[index + 1 :])
             results.append(WriterResult(name=spec.name, error=exc))
 
-            # ERROR, so ``app/logging_config.py`` routes it to stderr, naming
-            # the writer that failed as the exit contract requires.  ``exc_info``
-            # carries the traceback with it, because the cause of a failed write
-            # is diagnosed from nothing else.
-            logger.error(
-                "Report writer %s failed: %r", spec.name, exc, exc_info=exc
+            # The destination is resolved *here*, from the same ``base`` the
+            # writer was given, and carried on the outcome - so the record
+            # below and ``app/cli.py``'s exit-class record name one path that
+            # was derived once.  The call cannot raise.
+            destination = spec.destination(base)
+            named_destination: Path | str = (
+                _UNRESOLVED_DESTINATION if destination is None else destination
             )
-            if skipped:
-                logger.error(
-                    "Report writers not attempted after %s failed: %s",
-                    spec.name,
-                    ", ".join(skipped),
-                )
+
+            # ERROR, so ``app/logging_config.py`` routes it to stderr, naming
+            # the writer that failed **and the artifact it was producing**, as
+            # the section 0.4.1 exit contract's writer-failure row requires: a
+            # template or model exception need not mention a path itself, so
+            # without this the destination could not be recovered from the log.
+            # ``exc_info`` carries the traceback with it, because the cause
+            # of a failed write is diagnosed from nothing else.
+            #
+            # This is the **one** record this module emits for the failure, and
+            # it is the canonical one: the cause and its traceback are reported
+            # where the exception was caught, because a traceback is the one
+            # thing :class:`ReportOutcome` cannot usefully carry to a later
+            # reader.  Everything the outcome *does* carry - which writers were
+            # skipped, which artifacts survive, and the exit class the failure
+            # produces - is reported exactly once by ``app/cli.py`` from those
+            # fields.  Naming the skipped writers here as well, which this
+            # module did until the duplication was reviewed, made one incident
+            # two ERROR records under two logger names and left neither layer
+            # the account of it.
+            logger.error(
+                "Report writer %s failed writing %s: %r",
+                spec.name,
+                named_destination,
+                exc,
+                exc_info=exc,
+            )
 
             # Return, rather than raise or roll back.  The paths already in
             # ``written`` stay exactly where their writers put them.
@@ -384,6 +591,7 @@ def generate_reports(
                 failed_writer=spec.name,
                 error=exc,
                 skipped=skipped,
+                failed_path=destination,
             )
 
         results.append(WriterResult(name=spec.name, path=path))

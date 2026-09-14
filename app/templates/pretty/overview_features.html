@@ -92,17 +92,26 @@
                       has to render. When it is present and non-empty it is
                       used and features is not read.
 
-  THE DETAIL-PAGE LINKS. A row's href is ALWAYS a passed-in value. Three
-  places are consulted, in order, and the first non-blank one wins:
+  THE DETAIL-PAGE LINKS. A row's href is ALWAYS a passed-in value, and it
+  always comes from the WRITER'S OWN MAP. Two places are consulted, in order,
+  and the first non-blank one wins:
 
-      feature.feature_href     the key _element_tree.html already established
-                               for exactly this value
       feature_hrefs[uri]       an optional mapping keyed by the feature's uri
       feature_hrefs[path]      or by its path, whichever the writer holds
 
-  With none of them the name renders as plain text and no anchor at all, which
-  is what _stats_table.html does with an absent href. NO FILENAME IS EVER
-  COMPUTED HERE. Detail-page names are numeric hashes - report-feature_<hash>.
+  THE FEATURE'S OWN feature_href KEY IS NOT CONSULTED, and its absence is
+  load-bearing. It used to be tried first, which put a destination carried by
+  the result document ahead of the writer's computed one; a crafted
+  feature_href of javascript:alert(9) was measured surviving into the rendered
+  href, because autoescaping escapes HTML and a javascript: URL carries
+  nothing HTML escaping touches. Both map answers additionally pass through
+  local_page_href, the allowlist pretty_reports.py registers on the one
+  environment that renders this folder, so only a page name this writer emits
+  can reach an attribute.
+
+  With neither of them the name renders as plain text and no anchor at all,
+  which is what _stats_table.html does with an absent href. NO FILENAME IS
+  EVER COMPUTED HERE. Detail-page names are numeric hashes - report-feature_<hash>.
   html, a fixed prefix, an unsigned decimal hash and .html, hashing the
   feature URI - and that algorithm belongs to pretty_reports.py, which derives
   it from cucumber-reporting 5.6.1 and confirms it against a regenerated
@@ -206,12 +215,25 @@
       denominator in a spliced report, and why this page must not "fix" that
       by dividing by something tidier.
 
-  THE PALETTES ARE EXACT AND ARE NOT THE TABLE'S. Steps carries five segments
-  - #00B000, #FF3030, #88AAFF, #F5F28F, #F5B975 - and scenarios and features
-  two, #00B000 and #FF3030. These are the chart configuration's own brighter
-  set, deliberately not cucumber.css's table palette (.passed is #92DD96) and
-  not main.css's custom properties. Labels are the capitalised status names in
-  segment order.
+  THE PALETTES ARE THE CHART CONFIGURATION'S, WITH ONE DELIBERATE DEPARTURE.
+  Steps carries five segments and scenarios and features two, #00B000 and
+  #FF3030 - the generator's own brighter set, deliberately not cucumber.css's
+  table palette (.passed is #92DD96) and not main.css's custom properties.
+  Labels are the capitalised status names in segment order.
+
+  SKIPPED IS ORANGE HERE AND WAS BLUE THERE. The reference generator draws the
+  skipped segment in #88AAFF, a light blue, and AAP 0.3.4 requires skipped and
+  pending to be yellow or orange - the one status colour the plan fixes
+  explicitly, and blue reads as neither. The segment is #FF8C00 instead: an
+  orange that stays clearly apart from the pending yellow #F5F28F and from the
+  paler, less saturated undefined orange #F5B975, so the five segments are
+  still told apart by hue rather than by the legend alone. Nothing else in
+  either palette moves. A CSS rule cannot reach this: the colour is a literal
+  inside the chart configuration, painted onto a canvas by the vendored
+  Chart.js, so the required palette has to be stated here. main.css carries
+  the same correction for the class-driven surfaces - the statistics tables
+  and the tree's briefs - by restating the bare status classes inside this
+  project's own containers.
 
   ONLY INTEGERS CROSS INTO THE SCRIPT. Every value interpolated into the chart
   configuration is a count or a denominator, coerced to an integer before it
@@ -272,8 +294,8 @@
   which _stats_table.html owns. The port's own vocabulary is added in the two
   places where it cannot mask a measured value:
 
-      data-tqa-status   on the charts container, carrying the run's own binary
-                        status. Every rule main.css declares for this
+      data-report-status on the charts container, carrying the run's own
+                        binary status. Every rule main.css declares for this
                         attribute sets custom properties only, so the hook
                         paints nothing by itself, and nothing inside the
                         container consumes those properties - the canvases and
@@ -283,13 +305,13 @@
       tqa-empty         on the empty-run note, as pretty/overview_steps.html
                         does with the same input.
 
-  TWO tqa- CLASSES ARE DELIBERATELY WITHHELD, both on a measurement rather
-  than on taste. tqa-table is not applied to the statistics table:
-  _stats_table.html records that main.css's .tqa-table th wins over the five
-  status backgrounds, collapsing the twelve header colours into one grey.
-  tqa-summary is not applied to the charts container: it is display:flex,
-  which would take the carousel's slides out of the layout the grid offsets
-  produce.
+  ONE tqa- CLASS IS DELIBERATELY WITHHELD, on a measurement rather than on
+  taste: tqa-summary is not applied to the charts container, because it is
+  display:flex and would take the carousel's slides out of the layout the grid
+  offsets produce. tqa-table IS on the statistics table, applied by
+  _stats_table.html, which is what makes the required status palette reach its
+  cells; that file records the specificity and the earlier measurement it
+  supersedes.
 
   ACCESSIBILITY. The invisible part is applied because it costs nothing
   visually: the chevrons are decorative and carry aria-hidden, each control
@@ -473,15 +495,25 @@
             the run's JSON and it is absent here too. See the note above for
             why that is the measured shape rather than a tidy-up. -#}
         {%- if acc.selected > 0 -%}
-            {#- The detail-page link, resolved from the three passed-in places
-                in order. Nothing is computed: a hash this template invented
-                would name a file the writer never wrote. -#}
-            {%- set own_href = feature.feature_href|default('', true)|string|trim -%}
+            {#- The detail-page link. Nothing is computed: a hash this
+                template invented would name a file the writer never wrote.
+
+                IT COMES FROM THE WRITER'S MAP AND FROM NOWHERE ELSE. The
+                feature's own feature_href key used to take precedence over
+                that map, which put a destination carried by the RESULT
+                DOCUMENT ahead of the one the writer computed - and a crafted
+                feature_href of javascript:alert(9) was measured surviving
+                into the rendered href. The fallback is gone: href_map is
+                keyed by uri and by path, both of which the writer fills, and
+                a feature it cannot answer for has no detail page, so its
+                name renders as plain text. What the map answers still goes
+                through local_page_href, so one allowlist covers this sink
+                too. -#}
             {%- set uri_key = feature.uri|default('', true)|string|trim -%}
             {%- set path_key = feature.path|default('', true)|string|trim -%}
-            {%- set uri_href = (href_map.get(uri_key)|default('', true)|string|trim) if uri_key else '' -%}
-            {%- set path_href = (href_map.get(path_key)|default('', true)|string|trim) if path_key else '' -%}
-            {%- set link = own_href if own_href else (uri_href if uri_href else path_href) -%}
+            {%- set uri_href = local_page_href(href_map.get(uri_key)|default('', true)|string|trim) if uri_key else '' -%}
+            {%- set path_href = local_page_href(href_map.get(path_key)|default('', true)|string|trim) if path_key else '' -%}
+            {%- set link = uri_href if uri_href else path_href -%}
             {%- set _ = rows.append({
                     'name': feature.name|default('', true)|string|trim,
                     'href': link,
@@ -558,11 +590,17 @@
 
 {#- The three segment sets, in the generator's own segment order. Every label
     and every colour is a literal held here; only the counts come from the
-    model, and they are the integers floored above. -#}
+    model, and they are the integers floored above.
+
+    THE SKIPPED SEGMENT IS #FF8C00, AN ORANGE, where the reference generator
+    draws a light blue #88AAFF: the plan fixes that one status colour as
+    yellow or orange, and no stylesheet can reach a literal painted onto a
+    canvas. The palette note above records the full reasoning. Every other
+    colour here is the generator's own. -#}
 {%- set steps_segments = [
       {'label': 'Passed', 'color': '#00B000', 'count': steps_passed},
       {'label': 'Failed', 'color': '#FF3030', 'count': steps_failed},
-      {'label': 'Skipped', 'color': '#88AAFF', 'count': steps_skipped},
+      {'label': 'Skipped', 'color': '#FF8C00', 'count': steps_skipped},
       {'label': 'Pending', 'color': '#F5F28F', 'count': steps_pending},
       {'label': 'Undefined', 'color': '#F5B975', 'count': steps_undefined}
     ] -%}
@@ -681,8 +719,20 @@ $(document).ready(function() {
 
     The heading opens on the block tag's own line so the layout's surrounding
     indentation is reproduced exactly; a newline there would insert a blank
-    line the reference does not have. -#}
-{% block lead %}    <h2>Features Statistics</h2>
+    line the reference does not have.
+
+    THE HEADING IS AN h1 AT THE MEASURED 24px, THROUGH THE .h3 UTILITY. The
+    reference emits an h2, which leaves the page with no level-one heading for
+    a reader to jump to. The utility class reads wrong until the cascade is
+    followed: cucumber.css:8-10 pins `h2 { font-size: 24px }`, a bare type
+    selector that beats bootstrap.min.css's own `.h2,h2{font-size:30px}` on
+    load order and cannot match an h1 - so `<h1 class="h2">` would render 30px,
+    measured in Chrome against the reference's 24px. `.h3,h3{font-size:24px}`
+    is the vendored utility whose size equals the measurement, and cucumber.css
+    declares no h3 rule to disturb it. Every page in this folder does the same,
+    id included, so the lead is one shape across the emitted tree.
+    -#}
+{% block lead %}    <h1 class="h3" id="report-heading">Features Statistics</h1>
       <p>The following graphs show passing and failing statistics for features</p>
 {%- endblock %}
 
@@ -713,10 +763,18 @@ $(document).ready(function() {
     of the grid layout. The HTML comments are the reference's own.
     --------------------------------------------------------------------- -#}
 {%- if rows %}
-  <div class="container-fluid" id="charts" data-tqa-status="{{ run_status }}">
+  <div class="container-fluid" id="charts" data-report-status="{{ run_status }}">
     <div class="row">
       <div class="col-md-6 col-md-offset-3">
-        <div id="featureChartCarousel" class="carousel slide" data-ride="carousel">
+        {#- data-interval="false" is what stops the automatic cycle. The
+            vendored widget's default is a five-second timer that pauses only
+            on pointer hover, so the three charts moved under a reader who was
+            still reading one and under a keyboard user who could not pause
+            them at all. With the interval false Bootstrap 3 sets no timer, so
+            the slides move only when the reader asks - through the indicators
+            or the prev/next controls below, all of which are kept. data-ride
+            stays: it is what initialises the widget so those controls work. #}
+        <div id="featureChartCarousel" class="carousel slide" data-ride="carousel" data-interval="false">
           <!-- Indicators -->
           <ol class="carousel-indicators">
             <li data-target="#featureChartCarousel" data-slide-to="0" class="active"></li>
@@ -725,17 +783,33 @@ $(document).ready(function() {
           </ol>
 
           <!-- Wrapper for slides -->
+          {#- EACH CANVAS IS A NAMED IMAGE WITH A TEXT ALTERNATIVE, the same
+              pattern overview_tags.html applies to its single canvas. Three
+              things travel with every one of them:
+                role="img"    a canvas with no role is an unlabelled graphics
+                              node, which a reader is offered and cannot read.
+                aria-label    what the doughnut actually plots, taken from the
+                              segment sets declared above - features and
+                              scenarios carry Passed and Failed only, steps
+                              carry all five statuses - so the label cannot
+                              promise a breakdown the chart does not draw.
+                child content the canvas's own fallback, which is what a
+                              reader without canvas support gets. It names the
+                              statistics table on this page, because that
+                              table is the complete text form of all three
+                              charts - the same counts, per feature and as
+                              run totals. #}
           <div class="carousel-inner" role="listbox">
             <div class="item active">
-              <canvas id="features-chart" height="120"></canvas>
+              <canvas id="features-chart" height="120" role="img" aria-label="Passed and failed feature counts for this run">Passed and failed feature counts for this run. The Feature statistics table on this page carries the same numbers as text.</canvas>
             </div>
 
             <div class="item">
-              <canvas id="scenarios-chart" height="120"></canvas>
+              <canvas id="scenarios-chart" height="120" role="img" aria-label="Passed and failed scenario counts for this run">Passed and failed scenario counts for this run. The Feature statistics table on this page carries the same numbers as text.</canvas>
             </div>
 
             <div class="item">
-              <canvas id="steps-chart" height="120"></canvas>
+              <canvas id="steps-chart" height="120" role="img" aria-label="Step counts by status - passed, failed, skipped, pending and undefined - for this run">Step counts by status - passed, failed, skipped, pending and undefined - for this run. The Feature statistics table on this page carries the same numbers as text.</canvas>
             </div>
           </div>
 
@@ -781,4 +855,3 @@ $(document).ready(function() {
     the separation between the page body and the footer, and the reference
     page carries exactly that much. -#}
 {%- endblock %}
-

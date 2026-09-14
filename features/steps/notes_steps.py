@@ -225,16 +225,16 @@ def user_clicks_create_button_in_notes_module(context) -> None:
     field, then ``:30`` clicks the same element.  The locator is
     ``NotesPage.CREATING_NOTES`` from ``NotesP.java:20-21``.
 
-    The element is resolved twice, once for the wait and once for the click,
-    because the page accessor re-runs its lookup on every access - which is
-    what the ``PageFactory`` proxy did for the Java field it replaces
-    (AAP goal G5).
+    The element is resolved twice over, once by the wait - which looks the
+    locator up itself, on every poll - and once by the accessor for the click,
+    which re-runs its lookup on every access.  Both reproduce what the
+    ``PageFactory`` proxy did for the Java field they replace (AAP goal G5).
 
     :param context: behave's ``Context``, carrying this scenario's session.
     :returns: ``None``, matching the void Java method.
     """
     notes = _notes(context)
-    wait_visible_element(notes.creating_notes, 20)
+    wait_visible_element(notes.CREATING_NOTES, 20)
     notes.creating_notes.click()
 
 
@@ -308,7 +308,7 @@ def user_clicks_save_button(context) -> None:
     :returns: ``None``, matching the void Java method.
     """
     notes = _notes(context)
-    wait_visible_element(notes.save_btn, 20)
+    wait_visible_element(notes.SAVE_BTN, 20)
     notes.save_btn.click()
 
 
@@ -426,7 +426,7 @@ def user_should_see_the_notes_list(context) -> None:
     :returns: ``None``, matching the void Java method.
     """
     notes = _notes(context)
-    wait_visible_element(notes.notes_module, 20)
+    wait_visible_element(notes.NOTES_MODULE, 20)
     notes.notes_module.click()
     assert notes.notes_module.is_displayed()
 

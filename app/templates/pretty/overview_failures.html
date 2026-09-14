@@ -64,12 +64,14 @@
       feature_hrefs   OPTIONAL mapping from a feature to the plain relative
                       filename of its detail page, looked up by uri, then
                       path, then id, then name - the first of those keys the
-                      mapping actually holds wins. A feature that also carries
-                      its own href key is honoured when the mapping answers
-                      nothing, so a writer may inject the value either way. A
-                      feature with no destination at all still renders its
-                      name as plain text: feature_link_block degrades to text
-                      rather than to a link that goes nowhere.
+                      mapping actually holds wins. THIS MAPPING IS THE ONLY
+                      SOURCE OF A DESTINATION: a feature's own href key is not
+                      consulted, because the features on this page come
+                      straight out of the result document. A feature the
+                      mapping cannot answer for still renders its name as
+                      plain text: feature_link_block degrades to text rather
+                      than to a link that goes nowhere, and so does a value
+                      the writer's local_page_href allowlist rejects.
 
       tag_hrefs       OPTIONAL mapping from tag name - the leading @ included
                       - to the plain relative filename of that tag's detail
@@ -168,23 +170,20 @@
          overviews inject the reference's own chart initialisation and
          _layout.html owns the tablesorter initialisation; this page has
          neither, so it emits no script of any kind.
-       - There is no non-inline mechanism that would drive those containers.
-         report.js's data-report-toggle-all acts on its own
-         [data-report-detail] regions, of which this page emits NONE -
-         _element_tree.html withholds the error message from step_row so that
-         no step detail region is produced on this surface - and putting a
-         report.js state hook on a container the vendored widget owns is
-         forbidden there, because two state machines on one container
-         desynchronise the moment a reader touches either. The vendored data
-         API offers only toggle, which cannot express a separate show and
-         hide.
        - Emitting the controls without their handler would ship a visible
          affordance that does nothing, which is worse than their absence.
+       - The regions on this page are report.js's own now:
+         _element_tree.html emits each one as a [data-report-detail] region
+         authored expanded, so report.js's data-report-toggle-all could drive
+         them, and this page simply emits no such control pair. Whether the
+         failures overview should carry one is a question about this page's
+         CONTROL SURFACE - the same question its absent status filter poses -
+         and not about its collapse mechanism, which is settled; it is
+         recorded here so the absence stays a decision on the record rather
+         than becoming an assumption.
      What is actually lost is nothing a reader of THIS page needs: every
-     container here belongs to a failure-bearing element and therefore already
-     ships EXPANDED through the vendored widget's own in class, so there is
-     nothing to expand. Collapse-all was a convenience on a page that is
-     entirely failures.
+     region here is authored expanded, so there is nothing to expand.
+     Collapse-all was a convenience on a page that is entirely failures.
 
   2. THE <br/> BEFORE THE FOOTER IS EMITTED. _layout.html deliberately leaves
      it to the pages that carry it - measured on five of the eight reference
@@ -244,34 +243,43 @@
       carries two unresolved marker blocks; they stay in the read-only
       reference checkout, its STRUCTURE is all that was read from it, and
       every writer of this port produces clean output.
-    - NO PRESENTATION STATE OF THE PORT'S OWN: none of main.css's three
-      boolean hooks - data-tqa-collapsed, data-tqa-filtered, data-tqa-open -
-      and none of report.js's three runtime state classes. Their absence is
+    - NO PRESENTATION STATE OF THE PORT'S OWN: none of the three runtime
+      state classes - report-is-collapsed, report-is-filtered-out,
+      report-lightbox-is-open - which report.js alone writes and main.css
+      alone reads, and which are the whole of this project's state
+      vocabulary. Their absence is
       the state a page with no scripting must be in, so the emitted page is
       complete and correct with scripting disabled and on paper. The vendored
-      widget's own in class is a different thing entirely: it is generator
-      vocabulary, _element_tree.html owns the rule that applies it, and it is
-      neither added nor stripped here. Selection attributes are allowed and one
-      is used - data-report-root on the single report container, which is the
-      use _layout.html documents for it, and which scopes the report script to
-      this page's own elements rather than to the whole document.
+      widget's collapse and in classes are not emitted anywhere in this folder
+      any more: _element_tree.html authors every detail region expanded and
+      hands collapse to report.js, which is what makes that claim true of this
+      page rather than only of its unhidden parts. Selection and behaviour
+      hooks are allowed and are used - data-report-root on the single report
+      container, which is the use _layout.html documents for it and which
+      scopes the report script to this page's own elements rather than to the
+      whole document, and data-report-filter on each status filter button
+      inside it.
     - CLASS VOCABULARY: the bare generator classes the vendored stylesheet
       declares, and alongside them the port's own tqa- names. main.css is
       entirely tqa- prefixed with no bare element, class or id selector, so the
       two sets are declared over disjoint selectors and cannot collide. This
-      page adds exactly one of its own, tqa-empty on the notice, and the
-      element tree adds tqa-scenario, tqa-background, tqa-steps, tqa-step,
-      tqa-tags, tqa-tag, tqa-error, tqa-timestamp, tqa-link and the
-      data-tqa-status hook where each is structurally appropriate. Three were
-      considered and rejected, so their absence is not an oversight: tqa-page
-      and tqa-table-wrap impose their own box on markup the Bootstrap grid
-      already lays out, which is also what carries this page's responsive and
-      print behaviour, and tqa-root declares nothing but CSS custom properties
-      whose every use already repeats a literal fallback, so scoping it here
-      would change nothing rendered.
+      page adds three of its own - tqa-empty on the notice, and tqa-filter
+      with tqa-filter-btn on the status filter group - and the element tree
+      adds tqa-scenario, tqa-background, tqa-steps, tqa-step, tqa-tags,
+      tqa-tag, tqa-error, tqa-timestamp, tqa-link, tqa-collapse-control and
+      the data-report-status hook where each is structurally appropriate. Two
+      were considered and rejected, so their absence is not an oversight:
+      tqa-page imposes its own box on markup the Bootstrap grid already lays
+      out, and tqa-root declares nothing but CSS custom properties whose
+      every use already repeats a literal fallback, so scoping it here would
+      change nothing rendered. tqa-table-wrap has no subject here: this is the
+      only overview with no statistics table, and the element tree it renders
+      instead carries no table of its own.
     - NO COLOUR, dimension or presentation attribute in the markup, and no
       embedded stylesheet block. Status colour arrives from the vendored
-      stylesheet's status classes and from main.css's data-tqa-status tokens,
+      stylesheet's status classes, which main.css overrides where their
+      colour is not the one this project's palette requires, and from
+      main.css's own data-report-status tokens,
       and every status is additionally spelt out in words by the badge the
       element tree renders, so colour is never the sole indicator of meaning.
     - NO RENAMING. Feature and scenario names render exactly as the model
@@ -289,12 +297,17 @@
       embeddings all render without raising.
 
   ACCESSIBILITY - the invisible kind, which changes nothing rendered: a real
-  heading and paragraph in the lead, and the element tree's own real time
-  element, spelt-out statuses, decorative chevron hidden from assistive
-  technology and preformatted error text. The visible defaults the reference
-  fixes - its collapse control's element type and tab order, the absent lang
-  and viewport declarations - are _layout.html's and _element_tree.html's to
-  flag, and both do; nothing is half-fixed here.
+  level-one heading and paragraph in the lead, and the element tree's own
+  real time element, spelt-out statuses and preformatted error text. Of the visible kind this page owns
+  one thing, its filter group: a real group landmark with an accessible name
+  holding real buttons whose pressed state is on aria-pressed, so the filter
+  is operable and announced by keyboard alone. The element tree's own collapse
+  controls are real buttons for the same reason, recorded there.
+  The defects the measured reference carried are corrected in the two files
+  that own them and not half-fixed here: _element_tree.html's collapse
+  controls are real buttons with names, controlled-region references and
+  reported state, and _layout.html declares the document language, the
+  viewport, the navbar toggle and the main landmark.
 -#}
 {% extends "pretty/_layout.html" %}
 {#- The element vocabulary, and the formatter. Both are imported in the plain
@@ -336,8 +349,19 @@
     nothing is added: no failure count, no run summary, no advice. The heading
     opens on the block tag's own line so the layout's surrounding indentation
     survives exactly; a newline there would insert a blank line the reference
-    does not have. -#}
-{% block lead %}    <h2>Failures Overview</h2>
+    does not have.
+
+    THE HEADING IS AN h1 AT THE MEASURED 24px, THROUGH THE .h3 UTILITY. The
+    reference emits an h2, which leaves the page with no level-one heading for
+    a reader to jump to. The utility class reads wrong until the cascade is
+    followed: cucumber.css:8-10 pins `h2 { font-size: 24px }`, a bare type
+    selector that beats bootstrap.min.css's own `.h2,h2{font-size:30px}` on
+    load order and cannot match an h1 - so `<h1 class="h2">` would render 30px,
+    measured in Chrome against the reference's 24px. `.h3,h3{font-size:24px}`
+    is the vendored utility whose size equals the measurement, and cucumber.css
+    declares no h3 rule to disturb it. Every page in this folder does the same,
+    id included, so the lead is one shape across the emitted tree. -#}
+{% block lead %}    <h1 class="h3" id="report-heading">Failures Overview</h1>
       <p>The following summary displays scenarios that failed.</p>
 {%- endblock %}
 
@@ -382,26 +406,30 @@
                                              and elements is not mapping) else [] -%}
         {#- The feature's destination, resolved ONCE per feature and never
             computed: the first of uri, path, id and name that the caller's
-            mapping actually answers for wins, and a feature carrying its own
-            href key supplies the fallback. A feature with no destination
-            leaves the value empty, and feature_link_block then renders the
-            name as plain text instead of a link that goes nowhere. -#}
+            mapping actually answers for wins. A feature the map cannot answer
+            for leaves the value empty, and feature_link_block then renders
+            the name as plain text instead of a link that goes nowhere.
+
+            THE FEATURE'S OWN href KEY IS NOT A FALLBACK, and its removal
+            matters on this page above all others: the features listed here
+            come straight out of the result document, so that key was a
+            destination a RUN could choose - and a crafted one was measured
+            reaching the emitted href, because autoescaping escapes HTML and a
+            javascript: URL carries nothing HTML escaping touches. Only the
+            writer's map may answer here, and its answer passes through
+            local_page_href, the allowlist app/reporting/pretty_reports.py
+            registers on the one environment that renders this folder, which
+            accepts nothing but a page name this writer emits. -#}
         {%- set link = namespace(href='') -%}
         {%- for key in [feature.get('uri'), feature.get('path'),
                         feature.get('id'), feature.get('name')] -%}
             {%- if not link.href and key is string -%}
                 {%- set offered = href_map.get(key) -%}
                 {%- if offered is string and offered|trim != '' -%}
-                    {%- set link.href = offered|trim -%}
+                    {%- set link.href = local_page_href(offered|trim) -%}
                 {%- endif -%}
             {%- endif -%}
         {%- endfor -%}
-        {%- if not link.href -%}
-            {%- set own = feature.get('href') -%}
-            {%- if own is string and own|trim != '' -%}
-                {%- set link.href = own|trim -%}
-            {%- endif -%}
-        {%- endif -%}
         {%- set feature_label = feature.get('name') if feature.get('name') is string else '' -%}
         {#- Background pairing, as app/reporting/rerun_report.py performs it:
             an occurrence belongs to the scenario immediately following it,
@@ -453,6 +481,41 @@
 {#- The override owns its own selection and ordering and is never
     re-filtered, which is what makes it usable for a regression fixture. -#}
 {%- set listed = override if override is not none else rows -%}
+
+{#- ---------------------------------------------------------------------
+    THE STATUS FILTER'S OWN INPUT: which statuses the rows below actually
+    carry, and how many rows carry each.
+
+    THE SET IS DERIVED, NEVER HARD-CODED. Offering all seven tokens would
+    give a reader buttons that empty the page, and on a failures page most
+    of them would: it lists failures, so failed is usually the only status
+    present, plus passed where a failed Background dragged its scenario in.
+
+    THE STATUS READ HERE IS THE ONE THE ROWS EMIT. element_status is the
+    macro element_block itself uses when no status is passed to it - the
+    same fold, with the same 'passed' answer for a step-less Background - so
+    a button can never name a status no row carries, and the count beside it
+    can never disagree with the number of rows the script hides.
+
+    A Background occurrence is a filterable row in its own right, so it is
+    counted here with the scenarios; the group's accessible name says so.
+    --------------------------------------------------------------------- -#}
+{%- set filter_counts = {} -%}
+{%- for row in listed -%}
+    {%- set wrapped = row.get('element') if (row is mapping and row.get('element') is mapping) else none -%}
+    {%- set listed_element = wrapped if wrapped is not none else row -%}
+    {%- if listed_element is mapping -%}
+        {%- set token = tree.element_status(listed_element)|string|trim -%}
+        {%- set _ = filter_counts.update({token: filter_counts.get(token, 0) + 1}) -%}
+    {%- endif -%}
+{%- endfor -%}
+{%- set filter_tokens = [] -%}
+{%- for token in tree.STATUS_PRECEDENCE + ('unknown',) -%}
+    {%- if filter_counts.get(token) -%}
+        {%- set _ = filter_tokens.append(token) -%}
+    {%- endif -%}
+{%- endfor -%}
+{%- set filterable_total = filter_counts.values()|sum -%}
 {#- The single report container of the page - id="report" occurs exactly
     once, which the reference feature page gets wrong by emitting it twice
     and leaving the collapse selector's scope ambiguous. data-report-root is
@@ -463,6 +526,36 @@
 <div class="container-fluid" id="report" data-report-root>
   <div class="row">
     <div class="col-md-10 col-md-offset-1">
+{%- if filter_tokens %}
+      {#- THE STATUS FILTER CONTROLS. Every element below advertises itself
+          as filterable and carries its status; without controls those hooks
+          were one-sided and the filtering AAP 0.3.4 requires of this surface
+          was impossible. Each control is a non-navigating button, because
+          app/static/js/report.js never suppresses an authored default
+          action, and it sits INSIDE this container so that the script's
+          scope - the nearest data-report-root ancestor - is the same subtree
+          the buttons are meant to filter.
+
+          THE AUTHORED PRESSED STATE IS THE UNFILTERED PAGE'S OWN. The
+          script's filter model is a show-set per scope in which an EMPTY set
+          shows everything, so the reserved "all" control is pressed exactly
+          while no status is selected - which is the state this page is
+          authored in and the state a reader with scripting disabled stays
+          in. "all" is therefore authored pressed and each status control
+          unpressed, which is precisely what the script writes when it
+          re-synchronises on init, so nothing announced changes under the
+          reader as the script loads. #}
+      <div class="tqa-filter" role="group" aria-label="Filter the listed scenarios and Background occurrences by status">
+        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="true">
+          All ({{ filterable_total }})
+        </button>
+{%- for token in filter_tokens %}
+        <button type="button" class="tqa-filter-btn" data-report-filter="{{ token }}" aria-pressed="false">
+          {{ token|capitalize }} ({{ filter_counts.get(token) }})
+        </button>
+{%- endfor %}
+      </div>
+{%- endif %}
       {#- The elements container and every element inside it, from the
           vocabulary the feature and tag pages render too. inner_level is
           false, which is the measured failures form: div.elements with no
@@ -472,13 +565,11 @@
           <b>Feature:</b> opener a feature page never has.
 
           EVERYTHING ELSE IS THE MACRO'S, and none of it is restated here:
-          the tags row, the lead duration, the start timestamp, the collapse
-          control and its chevron, the brief and its status badge, the
-          description, the nested Steps group, the step list, the failure
-          message region with its preformatted text, the screenshots, and
-          the rule that adds the vendored widget's own in class to every
-          failure-bearing container - which, on a page that lists nothing
-          but failures, is every container it emits. #}
+          the tags row, the lead duration, the start timestamp, the brief
+          with its status badge and its collapse button, the description, the
+          nested Steps group, the step list, the failure message region with
+          its preformatted text, the screenshots, and the rule that authors
+          every collapsible region expanded and hands it to report.js. #}
       {{ tree.elements_block(listed, counter=ids, inner_level=false, tag_hrefs=tag_map) }}
 {%- if not listed %}
       {#- The empty state, which is what a healthy run produces and is

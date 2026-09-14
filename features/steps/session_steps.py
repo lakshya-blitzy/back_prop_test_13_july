@@ -68,7 +68,7 @@ corroborates the JVM's cross-type match directly - the Crm ``Background`` step
 records ``"keyword": "Given "`` while its ``"match"`` object points its
 ``"location"`` at
 ``com.testinium.step_definitions.Session.user_login_to_test_other_features()``
-in ``target/cucumber.json`` at the pinned revision.
+in the reference build's JSON report at the pinned revision.
 
 Accordingly the type-agnostic decorator is the only one this module imports or
 applies - none of the three step-type-specific decorators appears anywhere

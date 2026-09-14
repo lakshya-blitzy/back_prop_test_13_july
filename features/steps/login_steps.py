@@ -333,7 +333,7 @@ def user_should_see_the_dashboard(context) -> None:
     the reason the module docstring measures: ``Logout.feature:18`` and ``:42``
     reach this phrase as an effective ``When``.
     """
-    wait_visible_element(_page(context).dashboard, 3)
+    wait_visible_element(_page(context).DASHBOARD, 3)
     expected_dashboard = "Odoo"
     actual_dashboard = context.driver.title
     assert (

@@ -108,6 +108,13 @@ every other module in the port acquires its logger directly.  Its handler
 split sends WARNING and above to the error stream, so the traceback this
 module records lands there without this module knowing anything about streams.
 
+What either handler's record says about the request is bounded too: the
+method, the path with its query string removed, and the matched endpoint - and
+nothing else.  A query string is caller-supplied text that may carry a token, a
+credential or personal data, and a log is persisted and shipped, so the raw
+query is never written to one; no route in the viewer reads a query parameter,
+so nothing diagnostic is lost by leaving it out.
+
 The handler does not re-raise, does not retry, and attempts no recovery: every
 route is synchronous and read-only, so a 500 here is a defect in a reader or a
 template rather than a condition a caller can fix by trying again.  There is no
@@ -234,14 +241,28 @@ _TEXT_MIMETYPE: Final[str] = "text/plain"
 #: security-relevant detail of a rejection - which allowlist rule refused a
 #: name, which path escaped the artifact root - is logged by the route that
 #: detected it, since that is the only code that knows.
-_NOT_FOUND_LOG_MESSAGE: Final[str] = "Answering %s %r with status 404"
+#:
+#: Three values and no fourth: the method, the query-free path, and the matched
+#: endpoint - ``None`` on an unmatched URL, where ``%r`` renders it as ``None``
+#: rather than failing.  The query string is excluded deliberately and must
+#: stay excluded: it is caller-supplied text that can carry a token, a
+#: credential or personal data, and copying it into a record would persist that
+#: secret wherever the record goes, including a CI log (CWE-532).  Nothing in
+#: the viewer reads a query parameter, so the omission costs no diagnosis.
+#: Every value is formatted with ``%r`` - the method included, since Werkzeug
+#: does not sanitize ``REQUEST_METHOD`` - so that a control character in a
+#: crafted request cannot forge a second log line.
+_NOT_FOUND_LOG_MESSAGE: Final[str] = "Answering %r %r (endpoint %r) with status 404"
 
 #: Log line for the internal error, carrying the traceback via ``exc_info``.
-#: The message names the request so an operator can correlate the record with
-#: an access log, and both values are formatted with ``%r`` so that a control
-#: character in a crafted request cannot forge a second log line.
+#: The message names the method, the query-free path and the matched endpoint,
+#: which is enough for an operator to correlate the record with an access log,
+#: and withholds the query string for the same reason the not-found line above
+#: withholds it: a secret a caller put in a query must not be persisted in a
+#: log.  All three values are formatted with ``%r``, the method included.
 _INTERNAL_ERROR_LOG_MESSAGE: Final[str] = (
-    "Unhandled exception while serving %s %r; answering with status 500"
+    "Unhandled exception while serving %r %r (endpoint %r); answering with "
+    "status 500"
 )
 
 #: Log line for the guarded render's own failure.  Distinct from the two
@@ -390,6 +411,11 @@ def _handle_not_found(_error: Exception) -> Response:
     nothing in the exception - description, code or attached detail - that may
     reach the response.
 
+    The DEBUG record carries the method, the path without its query string,
+    and the matched endpoint, which is ``None`` for an unmatched URL.  It
+    carries nothing else about the request; see
+    :data:`_NOT_FOUND_LOG_MESSAGE` for why the query string is left out.
+
     Args:
         _error: The not-found exception, unused by requirement.
 
@@ -397,7 +423,12 @@ def _handle_not_found(_error: Exception) -> Response:
         The rendered not-found page, or its JSON equivalent, at status 404.
 
     """
-    logger.debug(_NOT_FOUND_LOG_MESSAGE, request.method, request.full_path)
+    logger.debug(
+        _NOT_FOUND_LOG_MESSAGE,
+        request.method,
+        request.path,
+        request.endpoint,
+    )
 
     if _wants_json():
         return _json_response(HTTPStatus.NOT_FOUND, NOT_FOUND_MESSAGE)
@@ -413,6 +444,11 @@ def _handle_internal_server_error(error: Exception) -> Response:
     handler does not re-raise and attempts no recovery - every route is
     synchronous and read-only, so nothing is half-written for it to undo.
 
+    The record identifies the request by method, query-free path and matched
+    endpoint only.  The query string is excluded, so a secret a caller placed
+    in one is not persisted alongside the traceback; see
+    :data:`_INTERNAL_ERROR_LOG_MESSAGE`.
+
     Args:
         error: The internal-server-error exception, whose original exception
             supplies the traceback when the framework wrapped one.
@@ -425,7 +461,8 @@ def _handle_internal_server_error(error: Exception) -> Response:
     logger.exception(
         _INTERNAL_ERROR_LOG_MESSAGE,
         request.method,
-        request.full_path,
+        request.path,
+        request.endpoint,
         exc_info=_exception_context(error),
     )
 

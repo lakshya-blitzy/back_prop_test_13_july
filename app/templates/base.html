@@ -44,17 +44,48 @@
   lives here rather than in each child because it is the only way one h1 per
   page can be guaranteed across six independently written templates.
 
-  ACTIVE NAVIGATION - an extending template may mark the current view by
-  setting active_nav at its own top level, immediately after its extends tag:
+  ACTIVE NAVIGATION, AND WHICH DESTINATIONS ARE OFFERED AT ALL - an extending
+  template declares what it is by setting active_nav at its own top level,
+  immediately after its extends tag:
 
       {% extends "base.html" %}
       {% set active_nav = "reports" %}
 
-  Recognised values are "index" and "reports"; anything else, or nothing at
-  all, simply marks no link. The reader below guards with default(''), so the
-  shell renders under a strict undefined policy and for a child - an error
-  page, typically - that sets nothing. A set inside a block is too late to be
-  seen and does nothing.
+  That one value answers two questions, because for this navigation they have
+  one answer: which link is the current page, and which links may be offered
+  here in the first place. Three values are recognised.
+
+      "index"           GET /. Marks the artifacts link as the current page.
+                        Offers no report destination: that route answers 200 on
+                        a workspace where nothing has ever run, and it is handed
+                        artifact presence alone, so it cannot know whether the
+                        results file the report views read exists, let alone
+                        parses. index.html therefore offers none either, and
+                        says why at its own head.
+      "reports"         GET /reports. Marks the report-overview link as the
+                        current page and offers both report destinations.
+      "reports-detail"  A feature or scenario page. Offers both report
+                        destinations and marks NEITHER as current, because the
+                        current page is below the overview rather than the
+                        overview itself - the page's own breadcrumb names it.
+                        aria-current="page" on an ancestor link would tell a
+                        reader they are somewhere they are not.
+
+  Anything else, and nothing at all, marks no link and offers no report
+  destination - which is what an error page wants, and what it gets by setting
+  nothing. The reader below guards with default(''), so the shell renders under
+  a strict undefined policy. A set inside a block is too late to be seen and
+  does nothing.
+
+  WHY THE REPORT DESTINATIONS ARE CONDITIONAL - the four report routes share
+  one data-availability rule: absent, unreadable or unparseable results all
+  answer 404 alike. A link this shell emitted unconditionally would therefore
+  be a certain 404 on every page rendered before a run has produced usable
+  results - the landing page and both error pages, which are precisely the
+  pages a reader reaches when nothing has run or something has gone wrong. So
+  the destinations that can 404 are offered only by a page that has already
+  cleared that precondition by rendering at all, and the one destination that
+  cannot fail is offered everywhere.
 
   ENDPOINT CONTRACT - every URL here is built with url_for, never by hand.
   The blueprint is named "web" and carries six endpoints: web.index,
@@ -62,7 +93,8 @@
   web.reports_summary and web.artifact. app/web/__init__.py fixes the same
   names, calling the blueprint name a contract rather than a preference; this
   file is one of the callers that makes it so. The navigation needs only the
-  three endpoints that a reader can reach directly.
+  three endpoints a reader can reach directly, and emits web.index on every
+  page and the other two only under the rule above.
 
   CLASS VOCABULARY - app/static/css/main.css, the tqa- namespace. This shell
   owns the page furniture only: tqa-root (the custom-property host, on the
@@ -70,7 +102,8 @@
   result-rendering classes - tqa-feature*, tqa-scenario*, tqa-step*,
   tqa-badge, tqa-error, tqa-shot*, tqa-meta*, tqa-summary, tqa-artifact*,
   tqa-empty and the rest - belong to the partials and the view templates.
-  Status is expressed as data-tqa-status with a lowercase value taken straight
+  Status is expressed as data-report-status - the one status hook in this
+  project - with a lowercase value taken straight
   from the result model: passed, failed, skipped, pending, undefined, untested
   or ambiguous.
 
@@ -91,9 +124,11 @@
   hook it reads is optional, so loading it on a page with no report markup -
   the index and both error pages - is a silent no-op rather than an error.
 
-  NO STATE HOOK IS EVER SERVER-RENDERED. main.css reads the absence of
-  data-tqa-collapsed, data-tqa-filtered and data-tqa-open as expanded, visible
-  and closed, and report.js sets its own three state classes at run time.
+  NO STATE IS EVER SERVER-RENDERED. State is three runtime classes -
+  report-is-collapsed, report-is-filtered-out and report-lightbox-is-open -
+  which report.js alone writes and main.css alone reads, and main.css reads
+  their absence as expanded, visible and closed. There is no state attribute
+  of any kind and no second state vocabulary.
   Server output therefore always describes the fully expanded, fully visible,
   lightbox-closed page, which is what keeps these views usable with scripting
   disabled and correct on paper.
@@ -118,8 +153,10 @@
   visible outline carried by tqa-link. No skip-navigation link is emitted:
   main.css ships no visually-hidden utility and an inline style rule is
   prohibited, so such a link could only be permanent visible furniture the
-  styling contract does not describe. With navigation of three links, the
-  landmark regions are what let a reader bypass it.
+  styling contract does not describe. With navigation of at most three links,
+  the landmark regions are what let a reader bypass it. aria-current="page"
+  marks the current page and only ever the current page, per the three values
+  above.
 -#}
 <!DOCTYPE html>
 <html lang="en">
@@ -133,21 +170,31 @@
 {# Read once, here, so a child that sets nothing renders correctly and no
    lookup can fail under a strict undefined policy. #}
 {% set nav_current = active_nav|default('') %}
+{# Derived once from that one value, so availability and current-page marking
+   cannot be decided differently further down. A page that renders under either
+   report value has already proved the results file usable by rendering at all;
+   every other page - the landing page, both error pages - has not, and is
+   offered no destination that could answer 404. #}
+{% set report_nav = nav_current in ('reports', 'reports-detail') %}
 <body class="tqa-root">
     <div class="tqa-page">
         <header class="tqa-header">
             <h1>{{ self.title() }}</h1>
             <nav aria-label="Report views">
                 <ul class="tqa-nav">
+                    {#- The one destination that answers on an empty
+                        workspace, so the one that is always offered. -#}
                     <li>
                         <a class="tqa-link" href="{{ url_for('web.index') }}"{% if nav_current == 'index' %} aria-current="page"{% endif %}>Artifacts</a>
                     </li>
+                    {%- if report_nav %}
                     <li>
                         <a class="tqa-link" href="{{ url_for('web.reports_overview') }}"{% if nav_current == 'reports' %} aria-current="page"{% endif %}>Report overview</a>
                     </li>
                     <li>
                         <a class="tqa-link" href="{{ url_for('web.reports_summary') }}">Summary (JSON)</a>
                     </li>
+                    {%- endif %}
                 </ul>
             </nav>
         </header>

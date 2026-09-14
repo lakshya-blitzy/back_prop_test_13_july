@@ -375,11 +375,11 @@ def user_clicks_challenges_stage(context) -> None:
     """
     page = _page(context)
     page.badges_btn.click()  # :37
-    wait_visible_element(page.badges_btn, 3)  # :38
+    wait_visible_element(page.BADGES_BTN, 3)  # :38
     page.challenges_btn.click()  # :39
-    wait_visible_element(page.challenges_btn, 3)  # :40
+    wait_visible_element(page.CHALLENGES_BTN, 3)  # :40
     page.goals_history_btn.click()  # :41
-    wait_visible_element(page.goals_history_btn, 3)  # :42
+    wait_visible_element(page.GOALS_HISTORY_BTN, 3)  # :42
 
 
 # ---------------------------------------------------------------------------

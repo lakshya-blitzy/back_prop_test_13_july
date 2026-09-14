@@ -1,7 +1,8 @@
-"""The single self-contained HTML report -- ``target/cucumber-reports.html``.
+"""The single self-contained HTML report -- one page, every asset inlined.
 
-Source anchor: the reference ``target/cucumber-reports.html``, whose AAP 0.4.1
-row reads *"Single self-contained page, per 0.3.4"*.  This is the **first of the
+Its destination is :func:`app.utils.paths.cucumber_reports_html_path`; source
+anchor: the reference build's copy of the same report, whose AAP 0.4.1 row
+reads *"Single self-contained page, per 0.3.4"*.  This is the **first of the
 project's two HTML contracts** and it is never collapsed into the second.
 Resolving the retained historical build file settled which generator produces
 which: ``io.cucumber:cucumber-java:7.2.3`` pulls
@@ -62,13 +63,17 @@ names and this module supplies all five, always:
 
 ``features``
     The ordered feature list, in **source order** with scenarios in line order,
-    each feature and each element carrying a ``status`` **rolled up here**: the
-    templates read a status and never derive one.  Selection is applied here too
-    -- see below.
+    each feature and each element carrying the ``status``
+    :mod:`app.reporting.aggregation` computed for it: the templates read a
+    status and never derive one, and neither does this module.  Selection is
+    applied there too -- see below.
 ``summary``
     Counts of features, scenarios and steps by status, plus the run's earliest
-    scenario start.  Deliberately the same tally, computed by the same rules,
-    that ``GET /reports/summary`` answers with.
+    scenario start, exactly as
+    :func:`app.reporting.aggregation.build_summary` computes them.  This is no
+    longer *the same rules* as ``GET /reports/summary`` applies -- that was the
+    claim two independent tallies made while disagreeing -- but the same
+    **values**, because both surfaces read the one aggregate.
 ``metadata``
     The environment and run descriptor: ``implementation{name,version}``,
     ``runtime{name,version}``, ``os{name}``, ``cpu{name}``, ``generated_at`` and
@@ -80,6 +85,44 @@ names and this module supplies all five, always:
     :class:`markupsafe.Markup` **here**, which is the one reason no template in
     this project marks anything trusted and autoescaping stays on everywhere.
 
+Where the numbers come from
+---------------------------
+**Nothing on this page is aggregated here.**
+:mod:`app.reporting.aggregation` is the one normalised result model AAP 0.3.4
+and 0.4.2 require -- *"Both HTML outputs and the HTTP views render over one
+normalized result model \u2026 so no view contradicts an artifact"* -- and this
+module is one of its four consumers, alongside
+:mod:`app.reporting.pretty_reports`, the Pretty templates and
+``app/web/routes.py``.  Status normalisation, the severity fold, selection, the
+step and scenario counts and the run's earliest start all live there;
+:func:`build_render_context` makes **one** call to
+:func:`app.reporting.aggregation.normalize_run` and hands its answer to the
+template.  The aggregation names this module still exports -- ``status_token``,
+``roll_up_status``, ``element_status``, ``feature_status``,
+``decorated_features``, ``emitted_features``, ``earliest_start``,
+``build_summary`` and the status vocabulary -- are that module's own functions
+bound here, not second implementations of them: a second implementation is
+exactly what produced the contradictions below.
+
+Two of those contradictions are worth naming, because the tally this module
+used to keep got them wrong and its own documentation defended the result:
+
+* **A step-less element is ``passed`` on every surface.**  It was ``passed`` in
+  this writer and ``unknown`` in ``GET /reports/summary``, and the writer was
+  right: an empty ``StatusCounter`` in
+  ``net.masterthought:cucumber-reporting:5.6.1`` answers ``PASSED``, and the
+  reference tree renders ``EmployeeFc.feature``'s empty Background as passed.
+  That is now a single measured constant,
+  :data:`app.reporting.aggregation.EMPTY_ELEMENT_STATUS`, rather than a
+  divergence this file described as deliberate.
+* **Hook statuses take part in an element's and a feature's status.**  They
+  reached some Pretty surfaces and were ignored here.
+  ``Element.calculateElementStatus`` folds ``stepsStatus`` with
+  ``beforeStatus`` and ``afterStatus``, so a scenario whose steps all passed
+  but whose after-hook failed is no longer badged as a pass on this page.  A
+  hook is still never counted as a *step* and its duration is never added,
+  because ``TagObject.addElement`` sums ``Step.getDuration()`` alone.
+
 Three obligations the templates cannot enforce and this module discharges:
 
 * the stylesheet text must not contain a closing style tag and the script text
@@ -90,18 +133,23 @@ Three obligations the templates cannot enforce and this module discharges:
 * **non-selected scenarios are dropped before rendering.**
   ``artifact/element.html`` states it as a premise -- the selection flag is not
   rendered *because* such scenarios never reach a template -- and the rule is
-  the JSON writer's: a scenario the tag expression did not select never started,
-  the JVM emitted no test case for it, and a feature left with no test case is
-  omitted altogether.  Rendering it would put a scenario on this page that
-  ``target/cucumber.json`` does not carry, and the viewer reads that file.
+  the JSON writer's, applied once by
+  :func:`app.reporting.aggregation.selected_features`: a scenario the tag
+  expression did not select never started, the JVM emitted no test case for it,
+  and a feature left with no test case is omitted altogether.  Rendering it
+  would put a scenario on this page that the merged Cucumber JSON report does
+  not carry, and the viewer reads that report.
 
 Boundaries
 ----------
 Imports are stdlib, :mod:`jinja2`, :mod:`markupsafe`,
-:mod:`app.reporting.events` and :mod:`app.utils.paths`, and nothing else: the
-dependency graph's edge runs from the services to the writers and never back, so
-no service is imported here, and neither is Flask, Selenium,
-:mod:`app.config` nor :mod:`app.web`.  The template environment is a plain
+:mod:`app.reporting.aggregation`, :mod:`app.reporting.events` and
+:mod:`app.utils.paths`, and nothing else: the dependency graph's edge runs from
+the services to the writers and never back, so no service is imported here, and
+neither is Flask, Selenium, :mod:`app.config` nor :mod:`app.web`.  The
+aggregation module is a peer within this package and imports nothing beyond the
+standard library and the result schema, so consuming it adds no edge.  The
+template environment is a plain
 :class:`jinja2.Environment` because this writer runs inside a worker process
 that never builds an application -- the framework's template helper and
 application proxy both need an application context, and a framework-built static
@@ -123,9 +171,11 @@ that publisher and imposes nothing on artifacts.
 **A test outcome never raises.**  ``testFailureIgnore`` is true in the retained
 build file and all six publisher thresholds are ``-1``: a failed, undefined,
 pending or skipped scenario is data to render, and every read of the result set
-here is total.  Only a genuine render or I/O fault propagates, which is the
-command's writer-failure exit class -- artifacts written before it remain and
-the failing writer is named on stderr.
+here and in :mod:`app.reporting.aggregation` is total.  Only a genuine render
+or I/O fault propagates, which is the command's writer-failure exit class --
+artifacts written before it remain, **this artifact's own previous copy
+included**, because the page is published by rename rather than by truncation
+(see :func:`write_html_report`), and the failing writer is named on stderr.
 
 No merge-conflict marker is ever emitted.  The markers exist only in the
 unmodified reference checkout (AAP 0.2.2), and ``.gitattributes`` keeps
@@ -136,17 +186,41 @@ HTML.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Sequence
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
+from uuid import uuid4
 
 from jinja2 import Environment, FileSystemLoader
 from markupsafe import Markup
 
+# The aggregation authority.  Every name here is imported for one of two
+# reasons and never for a third: ``normalize_run``, ``selected_features``,
+# ``as_mapping`` and ``as_text`` are *used* below, and the rest are the surface
+# this module has always exported -- kept importable from here, with the
+# authority's meaning, because a consumer that imported them from this writer
+# must keep working and must not be handed a second implementation.
+from app.reporting.aggregation import (
+    EMPTY_AGGREGATE_STATUS,
+    EMPTY_ELEMENT_STATUS,
+    KNOWN_STATUSES,
+    STATUS_PRECEDENCE,
+    STATUS_READING_ORDER,
+    UNKNOWN_STATUS,
+    as_mapping,
+    as_text,
+    build_summary,
+    decorated_features,
+    earliest_start,
+    element_status,
+    feature_status,
+    normalize_run,
+    roll_up_status,
+    selected_features,
+    status_token,
+)
 from app.reporting.events import (
-    ELEMENT_TYPE_BACKGROUND,
-    ELEMENT_TYPE_SCENARIO,
     JsonDict,
     ResultSet,
     format_timestamp,
@@ -223,79 +297,15 @@ FORBIDDEN_IN_STYLE: Final[str] = "</style"
 #: which is why the check is a substring scan rather than a parse.
 FORBIDDEN_IN_SCRIPT: Final[str] = "</script"
 
-#: Every status token the templates recognise, quoted from ``status_token`` in
-#: ``app/templates/partials/status_badge.html``, which quotes the
-#: ``data-tqa-status`` enumeration in ``app/static/css/main.css``.
-KNOWN_STATUSES: Final[tuple[str, ...]] = (
-    "passed",
-    "failed",
-    "skipped",
-    "pending",
-    "undefined",
-    "untested",
-    "ambiguous",
-)
-
-#: What a blank, absent or unrecognised status normalises to.  A status the
-#: result model never produced must not be reported as a pass.
-UNKNOWN_STATUS: Final[str] = "unknown"
-
-#: Severity order, most severe first.  Nothing in the Java source pins an
-#: ordering -- it computes no aggregate status at all -- so this is the
-#: conventional Cucumber precedence, and it is the *same tuple* as
-#: ``STATUS_PRECEDENCE`` in ``app/templates/view/overview.html``,
-#: ``app/reporting/pretty_reports.py`` and ``app/web/routes.py``, because a
-#: scenario badge on this page and the same scenario's status in the viewer must
-#: not disagree.  Read it as: a failure beats an undefined or ambiguous step,
-#: which beat a pending one, which beats a skipped or untested one, which beat a
-#: pass -- so one failure is never averaged away by the passes around it.
-STATUS_PRECEDENCE: Final[tuple[str, ...]] = (
-    "failed",
-    "undefined",
-    "ambiguous",
-    "pending",
-    "skipped",
-    "untested",
-    "passed",
-)
-
-#: Reading order for the tally: the reference overview page's own column order
-#: first, then the three states it has no column for, then the fallback.  Fixed
-#: rather than sorted, so identical input yields an identical tally.
-STATUS_READING_ORDER: Final[tuple[str, ...]] = (
-    "passed",
-    "failed",
-    "skipped",
-    "pending",
-    "undefined",
-    "untested",
-    "ambiguous",
-    UNKNOWN_STATUS,
-)
-
-#: The status an element with no steps takes.  Measured rather than chosen:
-#: ``EmployeeFc.feature`` declares a Background with an empty body and the
-#: reference generator renders each of its step-less occurrences as passed.
-EMPTY_ELEMENT_STATUS: Final[str] = "passed"
-
-#: The status an aggregate with nothing at all under it takes -- a feature
-#: carrying no element.  Deliberately not a pass: nothing ran.
-EMPTY_AGGREGATE_STATUS: Final[str] = UNKNOWN_STATUS
-
-#: The three group names of the tally, in the order ``artifact/metadata.html``
-#: presents them.
-_SUMMARY_GROUPS: Final[tuple[str, ...]] = ("features", "scenarios", "steps")
-
-#: The key ``artifact/metadata.html`` and ``GET /reports/summary`` both read for
-#: the run's earliest scenario start.
-_SUMMARY_START_KEY: Final[str] = "start_timestamp"
-
-#: The nested count map's key, which is the shape ``GET /reports/summary``
-#: answers with.
-_SUMMARY_BY_STATUS_KEY: Final[str] = "by_status"
-
-#: The group total's key.
-_SUMMARY_TOTAL_KEY: Final[str] = "total"
+#: How the temporary file the page is published from is named.  Dot-prefixed,
+#: because :func:`app.utils.paths.resolve_artifact` rejects every path
+#: component beginning with a dot, so the temporary cannot be served by
+#: ``GET /artifacts/<name>`` during the moment it exists; derived from the
+#: destination, so it is recognisable in a directory listing; and carrying the
+#: process identifier and a random token, so two writers publishing at once
+#: cannot claim one temporary.  Formatted with ``name``, ``pid`` and ``token``;
+#: see :func:`write_html_report`.
+_TEMPORARY_NAME: Final[str] = ".{name}.{pid}.{token}.partial"
 
 #: The metadata sub-objects that carry a name and a version, so a gap in one can
 #: be filled from the local probe without discarding the other half.
@@ -308,370 +318,40 @@ _NAMED_METADATA_KEYS: Final[tuple[str, ...]] = ("os", "cpu")
 #: :func:`app.reporting.events.run_metadata` uses, so the two agree.
 _UNKNOWN_METADATA_VALUE: Final[str] = ""
 
-#: The key on a feature and an element that this module fills in.
-_STATUS_KEY: Final[str] = "status"
-
-#: The key on an element that records whether the tag expression selected it.
-_SELECTED_KEY: Final[str] = "selected"
-
 
 # --------------------------------------------------------------------------- #
-# Total coercions.  Every read of the result set goes through one of these, so
-# a malformed document produces a poorer page rather than an exception: a test
-# outcome, and the shape of the document that records it, must never fail a
-# run.
+# What this module no longer computes.
+#
+# The coercions, the predicates, the status fold, the selection rule and the
+# tally all used to live here, and the four other report surfaces each kept a
+# copy.  They now live once, in :mod:`app.reporting.aggregation`, and the names
+# below are that module's functions bound into this namespace: importing
+# ``status_token`` or ``build_summary`` from this writer still works and still
+# means what it meant, and there is no second implementation to drift.  The two
+# aliases exist so the metadata block's call sites keep the spelling they
+# always had -- a thin wrapper would be a second answer to "what is a
+# malformed document?", and a rename would churn lines no finding touches.
 # --------------------------------------------------------------------------- #
 
-
-def _as_mapping(value: Any) -> JsonDict:
-    """Return ``value`` when it is a mapping, otherwise an empty mapping.
-
-    Args:
-        value: Anything at all, including ``None`` and a key that was never
-            there.
-
-    Returns:
-        The mapping, or ``{}``.  Never raises.
-    """
-    return value if isinstance(value, dict) else {}
-
-
-def _mappings(value: Any) -> list[JsonDict]:
-    """Return the mapping members of ``value``, in order.
-
-    A string and a mapping are rejected outright rather than iterated: both are
-    iterable and iterating either yields nonsense -- characters in one case, key
-    names in the other.
-
-    Args:
-        value: A candidate sequence, or anything at all.
-
-    Returns:
-        The members that are mappings, in input order.  Never raises.
-    """
-    if not isinstance(value, (list, tuple)):
-        return []
-    return [member for member in value if isinstance(member, dict)]
-
-
-def _as_text(value: Any) -> str:
-    """Return ``value`` as trimmed text, or ``""``.
-
-    Only a string contributes: a number, a container or ``None`` arriving where
-    text belongs is a malformed document, and surfacing it as the characters
-    ``None`` on a report page would be worse than surfacing nothing.
-
-    Args:
-        value: Anything at all.
-
-    Returns:
-        The trimmed string, or ``""``.  Never raises.
-    """
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _is_background(element: JsonDict) -> bool:
-    """Report whether ``element`` is a Background occurrence.
-
-    The type is the model's own discriminator, and the keyword answers for a
-    hand-built document that carries no type.  An unrecognised value reads as a
-    test case, which is what :func:`app.reporting.events.new_element` does with
-    one and what keeps its results from being lost.
-
-    Args:
-        element: A Background or scenario element.
-
-    Returns:
-        ``True`` only for a Background occurrence.
-    """
-    declared = _as_text(element.get("type")).lower()
-    if declared:
-        return declared == ELEMENT_TYPE_BACKGROUND
-    return _as_text(element.get("keyword")).lower() == ELEMENT_TYPE_BACKGROUND
-
-
-def _is_scenario_element(element: JsonDict) -> bool:
-    """Report whether ``element`` is counted as a scenario by the tally.
-
-    Strictly ``type == "scenario"``, which is the rule ``GET /reports/summary``
-    applies, so the two cannot count the run differently.  Note the deliberate
-    asymmetry with :func:`_is_background`: an element of an unexpected type is
-    *rendered* as a scenario, because losing its results would be worse, but it
-    is not *counted* as one, because an unexpected type is not evidence that a
-    test case ran.
-
-    Args:
-        element: A Background or scenario element.
-
-    Returns:
-        ``True`` only for an element whose declared type is ``"scenario"``.
-    """
-    return _as_text(element.get("type")).lower() == ELEMENT_TYPE_SCENARIO
-
-
-def _is_selected(element: JsonDict) -> bool:
-    """Report whether the tag expression selected ``element``.
-
-    Absent means selected: a hand-built document that omits the flag means
-    "this ran", and over-reporting a scenario is far less harmful than dropping
-    one that executed.  Only an explicit ``False`` is a decision.
-
-    Args:
-        element: A Background or scenario element.
-
-    Returns:
-        ``False`` only when the element carries ``"selected": False``.
-    """
-    return element.get(_SELECTED_KEY, True) is not False
-
-
-# --------------------------------------------------------------------------- #
-# Status: normalisation, and the roll-up the templates decline to compute
-# --------------------------------------------------------------------------- #
-
-
-def status_token(status: Any) -> str:
-    """Normalise one status exactly as ``status_token`` does in the partial.
-
-    ``app/templates/partials/status_badge.html`` is the project's single
-    normalisation point and this is its Python twin.  The rule: coerce to text,
-    trim, fold to lower case, and answer with that token when it is one of
-    :data:`KNOWN_STATUSES` -- otherwise :data:`UNKNOWN_STATUS`.  Normalising and
-    rolling up are deliberately separate jobs: this function decides how a
-    status is *spelled*, :func:`roll_up_status` decides *which* status an
-    aggregate has.
-
-    Args:
-        status: A raw ``result.status``, or anything at all: a number, ``None``,
-            a container, or a key that was never there.
-
-    Returns:
-        One of :data:`KNOWN_STATUSES`, or :data:`UNKNOWN_STATUS`.  Never raises.
-
-    Examples:
-        >>> status_token("Passed")
-        'passed'
-        >>> status_token(None)
-        'unknown'
-        >>> status_token("executing")
-        'unknown'
-    """
-    candidate = _as_text(status).lower()
-    return candidate if candidate in KNOWN_STATUSES else UNKNOWN_STATUS
-
-
-def roll_up_status(
-    statuses: Iterable[Any],
-    empty: str = EMPTY_ELEMENT_STATUS,
-) -> str:
-    """Fold a collection of statuses into the one that describes them all.
-
-    The ordering is :data:`STATUS_PRECEDENCE`, most severe first::
-
-        failed > undefined > ambiguous > pending > skipped > untested > passed
-
-    and it is documented here because **nothing in the Java source pins it**:
-    the Java step classes compute no aggregate status, so the precedence is the
-    conventional Cucumber one, and it is shared verbatim with
-    ``app/templates/view/overview.html``, :mod:`app.reporting.pretty_reports`
-    and ``app/web/routes.py`` so that no two surfaces can grade the same run
-    differently.  The fold is over a *set*, and a maximum over a total order is
-    associative, which is why rolling steps up to an element and elements up to
-    a feature gives the same answer as rolling every step of the feature up at
-    once.
-
-    Args:
-        statuses: Raw or already-normalised statuses, in any order.  Each is put
-            through :func:`status_token` first, so a mixed collection is fine.
-        empty: The answer for a collection that is empty, or that holds nothing
-            the precedence names.  The element-level default is
-            :data:`EMPTY_ELEMENT_STATUS`, which is measured rather than chosen:
-            ``EmployeeFc.feature`` declares a Background with an empty body and
-            the reference generator renders each step-less occurrence as passed.
-            A caller asking a run-level question -- "what is a feature with no
-            elements at all?" -- passes :data:`EMPTY_AGGREGATE_STATUS`.
-
-    Returns:
-        The most severe status present, or ``empty``.  Never raises.
-
-    Examples:
-        >>> roll_up_status(["passed", "skipped", "failed"])
-        'failed'
-        >>> roll_up_status(["passed", "undefined", "pending"])
-        'undefined'
-        >>> roll_up_status([])
-        'passed'
-        >>> roll_up_status([], empty=UNKNOWN_STATUS)
-        'unknown'
-        >>> roll_up_status(["executing"], empty=UNKNOWN_STATUS)
-        'unknown'
-    """
-    present = {status_token(status) for status in statuses}
-    for candidate in STATUS_PRECEDENCE:
-        if candidate in present:
-            return candidate
-    return empty
-
-
-def _step_statuses(element: JsonDict) -> list[str]:
-    """Return the normalised status of every step of ``element``, in order.
-
-    Args:
-        element: A Background or scenario element.
-
-    Returns:
-        One token per step.  A step whose result carries no status at all -- a
-        step the run never reached -- contributes :data:`UNKNOWN_STATUS` rather
-        than being dropped, so it cannot be silently read as a pass.
-    """
-    return [
-        status_token(_as_mapping(step.get("result")).get("status"))
-        for step in _mappings(element.get("steps"))
-    ]
-
-
-def _fold_step_statuses(tokens: Sequence[str]) -> str:
-    """Fold step tokens, keeping the two empty cases apart.
-
-    The distinction matters and a single fallback cannot express it:
-
-    * **no steps at all** is :data:`EMPTY_ELEMENT_STATUS`, the measured
-      behaviour of ``EmployeeFc.feature``'s empty Background;
-    * **steps whose statuses are all unrecognised** is
-      :data:`UNKNOWN_STATUS`, because a status the result model never produced
-      must not be reported as a pass -- a step that arrived without a status is
-      a step whose outcome nobody knows.
-
-    Args:
-        tokens: Normalised step tokens, in any order.
-
-    Returns:
-        The most severe status present, or the appropriate empty answer.
-    """
-    if not tokens:
-        return EMPTY_ELEMENT_STATUS
-    return roll_up_status(tokens, empty=UNKNOWN_STATUS)
-
-
-def element_status(element: JsonDict) -> str:
-    """Return the rolled-up status of one element, from its own steps alone.
-
-    A scenario is not coloured by its neighbours and a Background occurrence is
-    not coloured by the scenario that follows it: each element's badge answers
-    for that element.
-
-    Args:
-        element: A Background or scenario element.
-
-    Returns:
-        The most severe status among its steps; :data:`EMPTY_ELEMENT_STATUS`
-        for an element with no steps; :data:`UNKNOWN_STATUS` when it has steps
-        but none of them carries a status the model recognises.
-
-    Examples:
-        >>> element_status({"steps": [{"result": {"status": "passed"}},
-        ...                           {"result": {"status": "failed"}}]})
-        'failed'
-        >>> element_status({"steps": []})
-        'passed'
-        >>> element_status({"steps": [{"result": {}}]})
-        'unknown'
-    """
-    return _fold_step_statuses(_step_statuses(element))
-
-
-def feature_status(feature: JsonDict) -> str:
-    """Return the rolled-up status of one feature, from its elements.
-
-    The fold is over **every** element, Background occurrences included, which
-    is the same rule ``GET /reports/summary`` applies: a Background failure
-    moves its feature's status without moving any scenario's, because the
-    failure is real and belongs to that feature.
-
-    Args:
-        feature: A feature mapping.
-
-    Returns:
-        The most severe status among its elements, or
-        :data:`EMPTY_AGGREGATE_STATUS` for a feature carrying no element -- a
-        feature with nothing under it did not pass, it did not run.
-
-    Examples:
-        >>> feature_status({"elements": [
-        ...     {"steps": [{"result": {"status": "passed"}}]},
-        ...     {"steps": [{"result": {"status": "skipped"}}]}]})
-        'skipped'
-        >>> feature_status({"elements": []})
-        'unknown'
-    """
-    elements = _mappings(feature.get("elements"))
-    if not elements:
-        return EMPTY_AGGREGATE_STATUS
-    return roll_up_status(
-        (element_status(element) for element in elements),
-        empty=UNKNOWN_STATUS,
-    )
-
-
-
-# --------------------------------------------------------------------------- #
-# Selection.  A scenario the tag expression did not select never started, so
-# the JVM emitted no test case for it and it is absent from the JSON report;
-# ``artifact/element.html`` states as a premise that such scenarios never reach
-# a template.  The grouping below is local to this writer rather than borrowed,
-# because the *rule* it serves is this writer's: the merge in
-# :mod:`app.reporting.events` groups for a different purpose, ordering.
-# --------------------------------------------------------------------------- #
-
-
-def _element_units(elements: Sequence[JsonDict]) -> list[list[JsonDict]]:
-    """Group elements into Background-occurrence-plus-scenario units.
-
-    The Background occurrence emitted for a scenario belongs immediately in
-    front of it and shares its fate: if the scenario is dropped, its Background
-    occurrence goes with it, or the page would show a background for a test case
-    it does not show.  Grouping first is what makes that exact.
-
-    Args:
-        elements: One feature's elements, in document order.
-
-    Returns:
-        The units, in input order: ``[background, scenario]`` normally,
-        ``[scenario]`` for a feature with no Background, and ``[background]``
-        for the pathological trailing occurrence with no scenario, which is kept
-        as a unit of its own rather than attached to something it did not
-        precede.
-    """
-    units: list[list[JsonDict]] = []
-    for element in elements:
-        if _is_background(element):
-            units.append([element])
-            continue
-        if units and len(units[-1]) == 1 and _is_background(units[-1][0]):
-            units[-1].append(element)
-        else:
-            units.append([element])
-    return units
+#: :func:`app.reporting.aggregation.as_mapping`, under the name the metadata
+#: block calls it by.
+_as_mapping = as_mapping
+
+#: :func:`app.reporting.aggregation.as_text`, likewise.
+_as_text = as_text
 
 
 def emitted_features(result_set: ResultSet | None) -> list[JsonDict]:
     """Return the features this page renders, in source order.
 
-    Two rules, both the JSON writer's, so that this page and
-    ``target/cucumber.json`` describe the same run:
-
-    * a unit whose scenario -- or whose Background occurrence -- carries an
-      explicit ``"selected": False`` is dropped whole;
-    * a feature left with no test case is dropped altogether, which includes a
-      feature left with nothing but Background occurrences: an occurrence is
-      emitted *for* a test case, so one without its scenario represents none.
-      Under the default ``@Smoke`` filter that is what reduces the suite's ten
-      features to the one the reference artifact carries, and it is what makes
-      the template's empty state reachable rather than decorative.
-
-    Nothing is sorted and nothing is mutated: a feature whose elements survive
-    unchanged is passed through as it stands, and one that loses a unit is
-    **copied** with a new element list, so the caller's document is untouched.
+    This writer's name for :func:`app.reporting.aggregation.selected_features`,
+    which applies the JSON writer's two selection rules -- drop a
+    Background-plus-scenario unit that was not selected, then drop a feature
+    left with no test case -- so that this page and the merged Cucumber JSON
+    report describe the same run.  The delegation is deliberate rather than an alias:
+    ``artifact/element.html`` and the tests written against this module address
+    the rule by *this* name, while the rule itself must have exactly one
+    implementation.
 
     Args:
         result_set: The merged result document, or ``None`` for a run that
@@ -679,242 +359,11 @@ def emitted_features(result_set: ResultSet | None) -> list[JsonDict]:
             case, so ``None`` yields an empty list rather than an error.
 
     Returns:
-        The feature mappings to render, in document order.  Never raises.
+        The feature mappings to render, in document order.  Nothing is sorted
+        and nothing is mutated: a feature that loses a unit is copied, so the
+        document the other three writers see is untouched.  Never raises.
     """
-    document = _as_mapping(result_set)
-    kept: list[JsonDict] = []
-    for feature in _mappings(document.get("features")):
-        elements = _mappings(feature.get("elements"))
-        units = [
-            unit
-            for unit in _element_units(elements)
-            if all(_is_selected(element) for element in unit)
-        ]
-        surviving = [element for unit in units for element in unit]
-        if not any(not _is_background(element) for element in surviving):
-            # No test case survived, so the JVM would have created no feature
-            # map at all.  Dropped rather than rendered as a row of zeros.
-            continue
-        if len(surviving) == len(elements):
-            kept.append(feature)
-        else:
-            kept.append({**feature, "elements": surviving})
-    return kept
-
-
-def decorated_features(features: Sequence[JsonDict]) -> list[JsonDict]:
-    """Return ``features`` with a rolled-up ``status`` on every level.
-
-    The templates read a status and never derive one -- ``artifact/feature.html``
-    and ``artifact/element.html`` both say so -- so this is where a status
-    arrives.  Each element gets the status of its own steps and each feature the
-    status of its elements, and the shallow copies mean the caller's document
-    keeps whatever it had: this writer is one of four fed from a single merged
-    result set, and a writer that edited that set in place would change what the
-    others see.
-
-    Args:
-        features: The feature mappings to decorate, already selection-filtered
-            by :func:`emitted_features`.
-
-    Returns:
-        A new list of new feature mappings, in input order, each carrying a new
-        element list of new element mappings.  Order is preserved throughout:
-        features in source order, elements exactly where the model puts them,
-        each Background occurrence repeated in its own position.  Never raises.
-    """
-    decorated: list[JsonDict] = []
-    for feature in features:
-        elements = [
-            {**element, _STATUS_KEY: element_status(element)}
-            for element in _mappings(feature.get("elements"))
-        ]
-        # Rolled up from the decorated copies, so the feature's badge is
-        # exactly the fold of the badges shown beneath it.
-        rolled = (
-            roll_up_status(
-                (element[_STATUS_KEY] for element in elements),
-                empty=UNKNOWN_STATUS,
-            )
-            if elements
-            else EMPTY_AGGREGATE_STATUS
-        )
-        decorated.append(
-            {**feature, "elements": elements, _STATUS_KEY: rolled}
-        )
-    return decorated
-
-
-# --------------------------------------------------------------------------- #
-# The tally.  Deliberately the same counting rules ``GET /reports/summary``
-# applies, so the artifact and the viewer cannot disagree about one run.
-# --------------------------------------------------------------------------- #
-
-
-def _parse_start(value: str) -> datetime | None:
-    """Parse one ``start_timestamp``, or answer ``None``.
-
-    The values :func:`app.reporting.events.format_timestamp` emits are
-    millisecond-precision UTC ISO-8601 ending in a literal ``Z``.  That suffix
-    is rewritten to an explicit offset before parsing, and a value that parses
-    without one is read as UTC, so every instant returned here is aware and any
-    two of them compare without raising.
-
-    Args:
-        value: A non-empty timestamp string.
-
-    Returns:
-        The instant, or ``None`` when the string is not a timestamp at all.
-    """
-    text = f"{value[:-1]}+00:00" if value.endswith("Z") else value
-    try:
-        moment = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
-
-
-def earliest_start(features: Sequence[JsonDict]) -> str | None:
-    """Return the run's earliest scenario start, as the model spells it.
-
-    Scenario elements only: a Background occurrence carries no
-    ``start_timestamp`` at all.  Selection is by parsed instant and the string
-    is returned **verbatim** rather than reformatted, so the value on this page
-    is the value the JSON artifact carries; the string breaks a tie between two
-    identical instants, so the answer does not depend on the order the workers
-    merged in.
-
-    Args:
-        features: The feature mappings to scan.
-
-    Returns:
-        The earliest usable timestamp string, or ``None`` when no scenario
-        carries one and when none of the values present can be parsed -- a
-        malformed value is dropped rather than reported as the run's start.
-        Never raises.
-    """
-    parsed: list[tuple[datetime, str]] = []
-    for feature in features:
-        for element in _mappings(feature.get("elements")):
-            if not _is_scenario_element(element):
-                continue
-            candidate = _as_text(element.get("start_timestamp"))
-            if not candidate:
-                continue
-            moment = _parse_start(candidate)
-            if moment is not None:
-                parsed.append((moment, candidate))
-    if not parsed:
-        return None
-    return min(parsed, key=lambda pair: (pair[0], pair[1]))[1]
-
-
-def _count_group(tokens: Sequence[str]) -> JsonDict:
-    """Build one group of the tally, in both shapes its two readers need.
-
-    ``GET /reports/summary`` answers with ``{"total": ..., "by_status": {...}}``
-    and ``app/templates/artifact/metadata.html`` reads a **flat** mapping,
-    looking each status up on the group itself.  Emitting both from one count
-    is what lets the artifact state per-status figures while remaining exactly
-    the body the route returns; the nested map is a mapping rather than a
-    number, so the template's own "anything else the writer counted" loop
-    renders nothing for it.
-
-    Args:
-        tokens: One normalised status token per counted thing.
-
-    Returns:
-        The total, always present and ``0`` included; the nested map, carrying
-        only the non-zero statuses in :data:`STATUS_READING_ORDER`; and each of
-        those same statuses flattened onto the group in that same order, so the
-        mapping is deterministic for identical input.
-    """
-    by_status: dict[str, int] = {}
-    for token in STATUS_READING_ORDER:
-        counted = tokens.count(token)
-        if counted:
-            by_status[token] = counted
-    group: JsonDict = {
-        _SUMMARY_TOTAL_KEY: len(tokens),
-        _SUMMARY_BY_STATUS_KEY: by_status,
-    }
-    group.update(by_status)
-    return group
-
-
-def build_summary(features: Sequence[JsonDict]) -> JsonDict:
-    """Count the run: features, scenarios and steps by status, and its start.
-
-    One pass, three tallies, and the rules are ``GET /reports/summary``'s:
-
-    * **Steps** -- every step of every element, Background occurrences
-      included, because an occurrence genuinely runs once per scenario.
-    * **Scenarios** -- elements typed ``scenario`` and never the element count,
-      since backgrounds interleave and repeat.  A scenario's status is the worst
-      among its **own** steps, so a background failure is not reported as a
-      scenario failure.
-    * **Features** -- the worst status among that feature's elements,
-      Background occurrences included: a background failure moves its feature's
-      status without moving any scenario's.  Folding steps into elements and
-      elements into a feature is the *same* maximum as folding every step of
-      the feature at once, because a maximum over a total order is associative
-      -- so this figure is the route's figure, and it is also, by construction,
-      the fold of the badges this page shows.
-
-    The step-less element is the one place this tally and the route can differ,
-    and the difference is deliberate: an element with no steps counts as passed
-    here, because that is what the reference generator renders for
-    ``EmployeeFc.feature``'s empty Background, and counting it any other way
-    would put a badge on this page that the tally beside it contradicts.  A
-    feature carrying no element at all counts as :data:`UNKNOWN_STATUS` in both.
-    For every input carrying at least one step -- which is every real run --
-    the two agree exactly.
-
-    Args:
-        features: The feature mappings this page renders -- already
-            selection-filtered, so the tally counts what the page shows and what
-            the JSON artifact carries, and not the scenarios neither holds.
-            Decoration is irrelevant here: every figure is recomputed from the
-            steps, so a hand-built feature list without a ``status`` key counts
-            identically.
-
-    Returns:
-        A mapping carrying ``features``, ``scenarios`` and ``steps`` -- each a
-        group from :func:`_count_group` -- and ``start_timestamp``.  An empty
-        feature list answers three zero totals, three empty maps and ``None``.
-        Never raises.
-    """
-    feature_tokens: list[str] = []
-    scenario_tokens: list[str] = []
-    step_tokens: list[str] = []
-
-    for feature in features:
-        elements = _mappings(feature.get("elements"))
-        element_tokens: list[str] = []
-        for element in elements:
-            own_steps = _step_statuses(element)
-            step_tokens.extend(own_steps)
-            # One fold per element, reused for that element's own tally entry
-            # and for its feature's, which is what makes the figures on this
-            # page and the badges above them the same reading of one list.
-            token = _fold_step_statuses(own_steps)
-            element_tokens.append(token)
-            if _is_scenario_element(element):
-                scenario_tokens.append(token)
-        feature_tokens.append(
-            roll_up_status(element_tokens, empty=UNKNOWN_STATUS)
-            if elements
-            else EMPTY_AGGREGATE_STATUS
-        )
-
-    counted = (feature_tokens, scenario_tokens, step_tokens)
-    summary: JsonDict = {
-        name: _count_group(tokens)
-        for name, tokens in zip(_SUMMARY_GROUPS, counted, strict=True)
-    }
-    summary[_SUMMARY_START_KEY] = earliest_start(features)
-    return summary
-
+    return selected_features(result_set)
 
 
 # --------------------------------------------------------------------------- #
@@ -1176,9 +625,15 @@ def build_render_context(
 ) -> dict[str, Any]:
     """Build the five-name context ``artifact/report.html`` reads.
 
-    The order of work is the order the values depend on each other: select,
-    decorate, tally, then describe the run with the tally's start time as the
-    fallback for its own.
+    **One** call to :func:`app.reporting.aggregation.normalize_run` supplies
+    every number on the page: it selects, decorates and tallies in the order
+    those values depend on each other, and this function takes the features,
+    the summary and the run's earliest scenario start from that single answer.
+    Computing any of them a second time here is what made this page and
+    ``GET /reports/summary`` capable of contradicting each other, so nothing
+    here recomputes -- the aggregate is read, the assets are inlined, and the
+    metadata block takes the aggregate's start time as the fallback for its
+    own.
 
     Args:
         result_set: The merged result document, or ``None`` for a run that
@@ -1187,24 +642,25 @@ def build_render_context(
 
     Returns:
         A mapping carrying ``features``, ``summary``, ``metadata``,
-        ``inline_css`` and ``inline_js`` -- all five, always, because the
-        template treats the two assets as required rather than defaulted.
+        ``inline_css`` and ``inline_js`` -- exactly those five, always: the
+        template reads no other name and treats the two assets as required
+        rather than defaulted.  ``features`` is a fresh list, so a caller that
+        appends to it cannot reach the immutable aggregate behind it.
 
     Raises:
         OSError: If either inlined asset cannot be read.
         ValueError: If either inlined asset is empty or would close its block
             early; see :func:`inline_asset`.
     """
-    features = decorated_features(emitted_features(result_set))
-    summary = build_summary(features)
+    aggregate = normalize_run(result_set)
     metadata = build_metadata(
         result_set,
         generated_at=generated_at,
-        started_at=summary.get(_SUMMARY_START_KEY),
+        started_at=aggregate.start_timestamp,
     )
     return {
-        "features": features,
-        "summary": summary,
+        "features": list(aggregate.features),
+        "summary": aggregate.summary,
         "metadata": metadata,
         "inline_css": inline_asset(css_asset_path(), FORBIDDEN_IN_STYLE),
         "inline_js": inline_asset(js_asset_path(), FORBIDDEN_IN_SCRIPT),
@@ -1269,16 +725,31 @@ def write_html_report(
 ) -> Path:
     """Write the artifact to :func:`app.utils.paths.cucumber_reports_html_path`.
 
-    The impure half, and deliberately thin: it renders first, so a template or
-    asset fault cannot leave a half-written page, then resolves a destination,
-    creates its parent and writes the text.
+    The impure half, and deliberately thin: it renders the whole document
+    first, so a template or asset fault happens before any file is touched,
+    then resolves a destination, creates its parent and **publishes the page by
+    rename**.
+
+    **Nothing is ever left partially written.**  The bytes go to a temporary
+    file in the destination's own directory -- the same filesystem, because a
+    rename is atomic only within one -- which is flushed and
+    :func:`os.fsync`'ed before it is closed, and only then does
+    :func:`os.replace` move it onto the destination in one indivisible step.
+    So a reader, an archiver or the artifact route serving this page sees
+    either the previous complete page or this one, never a document
+    truncated at the point a write failed.  That is the difference from opening
+    the destination itself: ``"w"`` truncates before the first byte exists, and
+    a failure anywhere after that destroys an artifact that was complete.  The
+    temporary is named by :data:`_TEMPORARY_NAME`, so it is dot-prefixed and
+    unservable while it exists, and it is removed on **every** failure path,
+    the failed rename included.
 
     **Exactly one file is produced.**  No stylesheet, script, image, font or
     sibling page is written beside it -- that is the whole contract of this
-    artifact -- and nothing is deleted or truncated beyond this one file:
-    :mod:`app.utils.paths` creates directories and never removes them, and
-    emptying the build output directory is ``app/cli.py``'s ``--clean`` step,
-    which runs before the suite does.
+    artifact -- and nothing is deleted or truncated beyond this one file and
+    this writer's own temporary: :mod:`app.utils.paths` creates directories and
+    never removes them, and emptying the build output directory is
+    ``app/cli.py``'s ``--clean`` step, which runs before the suite does.
 
     Args:
         result_set: The merged result document, or ``None`` for a run that
@@ -1298,10 +769,13 @@ def write_html_report(
 
     Raises:
         OSError: If an asset cannot be read, the parent directory cannot be
-            created, or the file cannot be written.  Deliberately **not**
-            swallowed: producing this artifact is the writer's contract with the
-            exit table, whose writer-failure class requires the failing writer
-            to be named on stderr while the artifacts written before it remain.
+            created, or the temporary cannot be created, written, synced or
+            renamed onto the destination.  Deliberately **not** swallowed:
+            producing this artifact is the writer's contract with the exit
+            table, whose writer-failure class requires the failing writer to be
+            named on stderr while the artifacts written before it remain -- and
+            after any of these failures the destination still holds the last
+            complete page, because it was never opened for writing.
         ValueError: If either inlined asset is unusable.
         jinja2.TemplateError: If the document fails to render.
     """
@@ -1313,13 +787,48 @@ def write_html_report(
     destination = ensure_parent(
         cucumber_reports_html_path(base) if path is None else path
     )
-    # UTF-8 explicitly, so the French validation message
-    # "Veuillez renseigner ce champ." and the apostrophes in scenario names
-    # survive; newline="\n" so a page written on Windows is byte-identical to
-    # one written on Linux, because the structure of this artifact must not
-    # depend on which branch the pipeline's platform test chose.
-    with open(destination, "w", encoding="utf-8", newline="\n") as stream:
-        stream.write(document)
+    temporary = destination.with_name(
+        _TEMPORARY_NAME.format(
+            name=destination.name,
+            pid=os.getpid(),
+            token=uuid4().hex,
+        )
+    )
+    try:
+        # Mode "x" rather than "w": exclusive creation, so this writer can
+        # never truncate a file it did not create -- not the destination, and
+        # not a temporary another process is publishing from.  UTF-8
+        # explicitly, so the French validation message "Veuillez renseigner ce
+        # champ." and the apostrophes in scenario names survive; newline="\n"
+        # so a page written on Windows is byte-identical to one written on
+        # Linux, because the structure of this artifact must not depend on
+        # which branch the pipeline's platform test chose.
+        with open(temporary, "x", encoding="utf-8", newline="\n") as stream:
+            stream.write(document)
+            # Flushed out of the interpreter's buffer and synced to the device
+            # before the rename, so the name never points at bytes that are
+            # still in flight: a power loss or a full filesystem between the
+            # two leaves the previous complete artifact rather than an empty
+            # or truncated new one.
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    except BaseException:
+        # Every failure path, the failed rename and an interrupt included.
+        # missing_ok covers the exclusive open that never created the file and
+        # the rename that already consumed it; a removal that itself fails is
+        # logged and never allowed to replace the original exception, which
+        # travels on to app/services/report_service.py -- it names this writer
+        # on stderr and turns the fault into the exit contract's
+        # writer-failure class.
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            logger.warning(
+                "Could not remove the temporary file %s",
+                temporary,
+                exc_info=True,
+            )
+        raise
     logger.info("Wrote %s", destination)
     return destination
-

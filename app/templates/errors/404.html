@@ -54,8 +54,11 @@
 
   CLASS VOCABULARY - app/static/css/main.css, the tqa- namespace, and only
   names that file actually declares: tqa-empty for the standing-in block, the
-  same idiom the index uses for its own empty state, and tqa-link for the two
-  anchors, which brings the focus-visible outline with it. Not tqa-error -
+  same idiom the index uses for its own empty state, and tqa-link for the one
+  anchor THIS FILE emits, which brings the focus-visible outline with it. The
+  rendered response carries two anchors, not one: the shell contributes its
+  always-available Artifacts link, and both that one and the body's point at
+  the artifact index. Not tqa-error -
   that one is the red monospace frame for assertion text and tracebacks in a
   report, which is precisely what this page may not carry. The h2, the
   paragraphs and the inline code render at browser defaults, since every
@@ -63,11 +66,12 @@
   this small and is not a reason to invent a class the stylesheet will never
   define.
 
-  NO STATE HOOK AND NO BEHAVIOUR HOOK - there is nothing here to collapse,
-  filter or open, so neither the stylesheet's data-tqa- state attributes nor
-  the script's data-report- hooks appear. Both families read their own absence
-  as the correct default, and report.js is a silent no-op on a page carrying
-  no report markup.
+  NO STATE CLASS AND NO BEHAVIOUR HOOK - there is nothing here to collapse,
+  filter or open, so neither the three runtime state classes report.js writes
+  and main.css reads - report-is-collapsed, report-is-filtered-out,
+  report-lightbox-is-open - nor any of the script's data-report- hooks appear.
+  Both read their own absence as the correct default, and report.js is a
+  silent no-op on a page carrying no report markup.
 
   THE REST OF THE SHELL'S PROHIBITIONS HOLD HERE TOO - no inline script and
   no inline style, so the head and scripts blocks are left unoverridden; no
@@ -78,7 +82,16 @@
   pre-escaped; and no form, no button and nothing else that starts, or appears
   to start, a test run - this surface is read-only, and runs start from the
   command line. active_nav is deliberately not set: an error page is not one
-  of the views, so no navigation link is marked current.
+  of the views, so no navigation link is marked current - and because the shell
+  offers its two report destinations only to a page that has itself cleared the
+  data-availability rule, unset also means no link in the whole response can
+  answer 404 again. That is the whole reason the body below names one
+  destination and not two. The commonest way to arrive at this page is that the
+  results file is absent, unreadable or unparseable; a link to the report
+  overview would then fail for the very cause that rendered this page, which is
+  not guidance. The artifact index is the one route that cannot fail and it
+  reports which artifacts exist, so it is where both anchors of this response
+  lead.
 -#}
 {% extends "base.html" %}
 
@@ -108,8 +121,8 @@
         <p>
             From here, open the
             <a class="tqa-link" href="{{ url_for('web.index') }}">artifact index</a>,
-            which loads whether or not a run has happened yet, or browse the
-            <a class="tqa-link" href="{{ url_for('web.reports_overview') }}">report overview</a>.
+            which loads whether or not a run has happened yet, says which report
+            artifacts are on disk, and links each one that is.
         </p>
     </section>
 {% endblock %}

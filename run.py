@@ -30,8 +30,8 @@ Specification 0.2.2 excludes "an HTTP endpoint that starts a test run.
 Execution stays on the command line; the HTTP surface is read-only."  Runs are
 started by the ``run-tests`` console script alone.
 
-Serving defaults, and the only two things that adjust them
-==========================================================
+Serving defaults, and the only thing that adjusts them
+======================================================
 * **Host** - the loopback address, fixed.  A viewer of local build output has
   no reason to accept connections from the network, and binding every
   interface by default would publish one machine's results to its neighbours.
@@ -41,20 +41,21 @@ Serving defaults, and the only two things that adjust them
   environment variable.  One override exists for one reason: several checkouts
   of this project may need to serve at once on a shared machine, and a fixed
   port makes that impossible.  Unset or empty means the default.
-* **Debug** - off unless ``FLASK_DEBUG`` asks for it, using the same rule
-  Flask's own command line applies to that variable.  Off is the correct
-  default even for a development-only file, because debug mode serves an
-  interactive console capable of executing arbitrary code in this process; a
-  developer who wants the reloader and the debugger opts in per command and
-  knows they have.
 
-Neither variable is a configuration layer, and neither may grow into one.
+Debug mode is off and is not configurable here.  ``debug=False`` is stated
+outright at the call below rather than left to a framework default a later
+edit could move, and no environment variable, option or file switches it on,
+because Flask's debug mode serves an interactive console capable of executing
+arbitrary code in this process.  A developer who wants the reloader and the
+debugger reaches for ``flask run`` per command and knows they have.
+
+The port variable is not a configuration layer, and it may not grow into one.
 Specification 0.4.1 fixes the port's only application-configuration override
 path as the suite runner's browser userdata, stating "this is the only override
-path; no environment layer is added".  Both reads below are server options -
-where to listen, and whether to reload - and they are deliberately two direct
-reads with documented defaults: no file, no precedence chain, no merging, and
-nothing reaching the application's own configuration.
+path; no environment layer is added".  The single read below is a server
+option - where to listen - and it is deliberately one direct read with a
+documented default: no file, no precedence chain, no merging, no second
+variable, and nothing reaching the application's own configuration.
 
 Why the interpreter is not chosen here
 ======================================
@@ -97,8 +98,8 @@ faithfully:
 2. **Import has no other side effect.**  No directory is created, no file is
    written, no configuration file is read and no network or browser access is
    attempted; in particular the generated-output directory does not come into
-   existence.  The port and debug variables are not even consulted, because
-   both reads happen inside the guard.
+   existence.  The port variable is not even consulted, because that one read
+   happens inside the guard.
 3. **Running does serve.**  Started as a script with no generated artifacts
    present, the index answers 200 on the configured port, and a report route
    answers 404 through the rendered error page rather than a traceback.
@@ -107,8 +108,6 @@ faithfully:
 5. **Port resolution.**  Unset or empty yields the default; a whole number in
    range is honoured; a non-numeric or out-of-range value exits with a message
    naming the variable and the accepted range, not a traceback.
-6. **Debug resolution.**  Unset, empty, ``0``, ``false`` or ``no`` yields
-   ``False``; any other non-empty value yields ``True``.
 """
 
 from __future__ import annotations
@@ -119,9 +118,9 @@ from typing import Final
 from app import create_app
 
 #: The published surface: the application object, which is what a WSGI-style
-#: import of this module is for.  The two helpers below are private because
-#: they answer one question each for the guard at the bottom and are of no use
-#: to anything else.
+#: import of this module is for.  The single helper below is private because
+#: it answers one question for the guard at the bottom and is of no use to
+#: anything else.
 __all__ = ["app"]
 
 #: The loopback interface, and not a configurable one.  See the module
@@ -135,13 +134,10 @@ DEFAULT_HOST: Final[str] = "127.0.0.1"
 #: a string below.
 DEFAULT_PORT: Final[int] = 5000
 
-#: Chooses the listening port when several checkouts must serve at once.
+#: Chooses the listening port when several checkouts must serve at once.  It is
+#: the only environment variable this file reads; see the module docstring on
+#: why no debug variable joins it.
 PORT_VARIABLE: Final[str] = "FLASK_PORT"
-
-#: Opts into the reloader and the interactive debugger.  Flask's own command
-#: line reads the same variable, and :func:`_debug_from_environment` applies the
-#: same rule to it.
-DEBUG_VARIABLE: Final[str] = "FLASK_DEBUG"
 
 
 def _port_from_environment() -> int:
@@ -184,22 +180,6 @@ def _port_from_environment() -> int:
     return port
 
 
-def _debug_from_environment() -> bool:
-    """Return whether to serve in debug mode, resolving the opt-in variable.
-
-    The rule is Flask's own, reproduced rather than imported so that this file
-    depends on nothing beyond the factory: false when the variable is unset,
-    empty, ``0``, ``false`` or ``no`` in any casing, and true for any other
-    non-empty value.  Matching Flask means a developer who already exports the
-    variable for ``flask run`` gets the same behaviour here, with no second
-    convention to learn.
-
-    :returns: ``True`` to enable the reloader and the interactive debugger.
-    """
-    value = os.environ.get(DEBUG_VARIABLE)
-    return bool(value and value.lower() not in {"0", "false", "no"})
-
-
 #: The application, built by the factory - the one action this module performs
 #: at import time, and the only line it has in common with ``wsgi.py``.  The
 #: factory holds no module-level state, so building one here cannot disturb
@@ -216,14 +196,19 @@ if __name__ == "__main__":
     # from ``wsgi.py``: without it, importing the module would start a server
     # and every importer - a test, a shell, a documentation tool - would hang.
     #
-    # Both environment reads sit inside it deliberately, so that an import
-    # neither consults nor validates them, and a mistyped override can only
-    # ever fail the person who typed it.
+    # The one environment read sits inside it deliberately, so that an import
+    # neither consults nor validates the variable, and a mistyped override can
+    # only ever fail the person who typed it.
+    #
+    # ``debug=False`` is passed explicitly, not omitted: the interactive
+    # debugger and the reloader are never wanted from this entry point, and
+    # saying so here means no framework default or environment variable can
+    # turn them on behind a reader's back.
     #
     # Flask's development server announces what it is on startup, which is the
     # whole of the "this is not production" messaging this file needs.
     app.run(
         host=DEFAULT_HOST,
         port=_port_from_environment(),
-        debug=_debug_from_environment(),
+        debug=False,
     )

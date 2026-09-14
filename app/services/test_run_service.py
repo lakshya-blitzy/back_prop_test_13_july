@@ -17,9 +17,9 @@ None of that configuration executes in the source project.  Every runner class
 lives under ``src/main/java``, there is no ``src/test/java``, and the surefire
 include above matches *test* classes only, so the pipeline's own command --
 ``mvn -B clean test`` (``Jenkins:8``, ``Jenkins:10``) -- reports "No tests to
-run." and BUILD SUCCESS, leaving ``target/`` with nothing but ``classes``,
-``generated-sources`` and ``maven-status``: no ``cucumber.json``, no
-``rerun.txt``, no HTML.  The surefire block is **latent configuration**.
+run." and BUILD SUCCESS, leaving the build-output directory with nothing but
+``classes``, ``generated-sources`` and ``maven-status``: no JSON report, no
+rerun manifest, no HTML.  The surefire block is **latent configuration**.
 
 This port **activates** that latent behaviour: the suite really runs and really
 produces the four artifacts, because literal parity with a stage that executes
@@ -36,9 +36,17 @@ Three consequences, and one of them is a deviation
   claimed.**  It removes a thread-count cap on threads inside a single JVM;
   the commented-out ``<threadCount>4</threadCount>`` at ``pom.xml:24`` is
   exactly what it replaced.  A Python Selenium session is not thread-shareable
-  in that way, so concurrency here is **process-based with a CPU-count
-  default** (:func:`default_worker_count`).  That is a recorded deviation from
-  the source's execution model, not a translation of it.
+  in that way, so concurrency here is a **process pool sized at the CPU
+  count** -- the model AAP deviation D04 records and AAP 0.1.2 names
+  ("Process-pool runner; CPU-count default"), built for every real run by
+  :func:`_run_shards` as a :class:`~concurrent.futures.ProcessPoolExecutor`
+  over :func:`_run_shard_task`.  :func:`default_worker_count` supplies the
+  default size and :func:`_effective_worker_count` the ceiling: *uncapped* is
+  the one thing the port must not be, because a worker here is an OS process
+  driving a browser rather than a thread in a JVM, so an explicit
+  ``--workers`` request is bounded at four processes per CPU.  That whole
+  model is a recorded deviation from the source's execution model, not a
+  translation of it.
 * ``testFailureIgnore=true`` (``pom.xml:25``), together with the six ``-1``
   thresholds on the Jenkins Cucumber publisher (``Jenkins:15``), means **a
   test outcome must never reach the exit status**.  This module never exits a
@@ -75,6 +83,15 @@ launching a browser or a real engine:
    scenario order, background position, statuses -- is **identical whatever
    the worker count**.
 
+That seam is also the one thing that selects the supervision mechanism, and
+the reason two exist.  A stub or a mock **cannot cross a process boundary** --
+it is not picklable -- so an injected ``spawn`` is supervised by threads
+inside the calling process, where the stub lives and where a test can observe
+it.  An injected seam is therefore the *only* way the thread path is reached;
+a real run always uses the process pool D04 prescribes.  Both paths call
+:func:`_run_one_shard`, produce exactly one :class:`ShardResult` per shard and
+order them by shard index, so nothing downstream can tell them apart.
+
 A note for ``app/cli.py``, which consumes this module
 -----------------------------------------------------
 :class:`RunOutcome` is the interface to the exit contract, and two of its
@@ -91,18 +108,72 @@ A single falsy check would collapse the two and break both rows.  And under
 writes no artifacts at all (the Java ``FailedTestRunner`` declared an empty
 plugin list), so ``merge_produced_nothing`` stays ``False`` and a ``None``
 document there must **not** be read as the empty-merge condition.
+
+Which is why there is a third signal, independent of both:
+``infrastructure_error`` says that *this port's own* intermediate storage
+failed -- the per-worker directory could not be created, so nothing executed,
+or it could not be removed afterwards, so intermediate documents remain in
+the workspace.  Neither is a test outcome and neither is expressible through
+the two states above: a rerun that cannot create its directory executes no
+selected scenario while looking exactly like the rerun that succeeded, which
+is the one case where "a rerun writes nothing" must not be read as "a rerun
+went fine".  ``app/cli.py`` therefore reads this field **before** its rerun
+short-circuit, and maps it onto its artifact-failure status.
+
+One emitter per incident
+------------------------
+:class:`RunOutcome` is also how this module *reports*, and the division is
+exact: **a fact the outcome carries is logged by the command that reads the
+outcome, and never here as well.**  A tolerated selection problem travels on
+``parse_errors``, a dead shard's reason on ``dead_shards``, and ``app/cli.py``
+is the single emitter of the record that names each one, beside the exit class
+it implies.  Logging them here too - which this module did, until the
+duplication was reviewed - puts one incident in the CI console twice under two
+logger names, so a reader counting ERROR records over-counts the run and
+neither layer is the canonical account of anything.
+
+What stays here is the progress this module alone knows and no outcome field
+carries: how many scenarios were selected and from what, how the shards were
+sized, which shard started, and the closing counts.  That is INFO on stdout,
+by the split ``app/logging_config.py`` installs.  The one exception to the
+rule, and the reason it is stated as a rule about *facts* rather than about
+layers, belongs to the sibling service: ``app/services/report_service.py``
+emits the writer-failure cause with its traceback at the point the exception
+is caught, because a traceback is the one thing an outcome cannot usefully
+carry to a later reader.
 """
 
+import contextvars
 import logging
+import multiprocessing
 import os
+import secrets
 import shutil
+import signal
+import stat
 import subprocess
 import sys
+import threading
+import time
+from collections import deque
 from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    Executor,
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    as_completed,
+)
+
+# The pool's own failure mode, and the reason it is imported from the
+# submodule: ``concurrent.futures`` re-exports ``BrokenExecutor`` but not this
+# subclass (measured on this interpreter), and catching the subclass is what
+# lets a lost pool worker be reported as the shard it was running.
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Final, Protocol, runtime_checkable
+from types import FrameType
+from typing import IO, Any, Final, Protocol, runtime_checkable
 
 # behave's own parser, deliberately rather than a hand-rolled Gherkin reader:
 # selection must not be able to disagree with what the engine will actually
@@ -115,6 +186,13 @@ from behave.parser import ParserError, parse_file
 # selection functions propagate, and it is deliberately never caught here.
 from cucumber_tag_expressions import TagExpressionParser
 
+# The rendering half of the worker relay.  ``app/logging_config.py`` owns this
+# port's console-logging contract -- the stream split this module's levels
+# depend on, and the sanitizing, bounding and redacting of untrusted text --
+# so the relay below constructs no safe text of its own.  Importing it here is
+# cycle-free by construction: that module imports only the standard library
+# and nothing under ``app``.
+from app.logging_config import render_worker_line
 from app.reporting.events import (
     FORMATTER_SCOPED_NAME,
     ResultSetError,
@@ -155,10 +233,14 @@ __all__ = [
     "default_worker_count",
     "merge_worker_results",
     "prepare_workers_dir",
+    "reclaim_workers_root",
+    "run_directory_is_active",
+    "run_directory_owner",
     "run_suite",
     "select_rerun_scenarios",
     "select_scenarios",
     "shard_scenarios",
+    "terminate_live_workers",
 ]
 
 #: Module logger.  ``app/logging_config.py`` installs the handler split this
@@ -257,14 +339,28 @@ class WorkerProcess(Protocol):
 
     :class:`subprocess.CompletedProcess` satisfies this structurally, which is
     what lets the ``spawn`` seam be stubbed with any object carrying the same
-    three attributes.
+    three attributes.  That is also why ``output_relayed`` below is **not** a
+    member of this protocol: adding it would stop a plain
+    :class:`~subprocess.CompletedProcess` from satisfying the protocol, so it
+    is an *optional* convention read with :func:`getattr` instead.
 
     Attributes:
         returncode: The engine's exit status.  **A positive non-zero value is
             normal** -- behave exits ``1`` when scenarios fail -- and is never
             treated as an error here.
-        stdout: Captured standard output, relayed as run progress.
-        stderr: Captured standard error, relayed as engine diagnostics.
+        stdout: Standard output, or ``None``.  Relayed as run progress by
+            :func:`_relay_output` unless the launch already relayed it live.
+        stderr: Standard error, or ``None``.  Relayed as engine diagnostics
+            under the same rule.
+
+    Notes:
+        A launch that has *already* relayed its output line by line -- which
+        the real launch does, see :func:`_spawn_worker` -- says so by carrying
+        a true ``output_relayed`` attribute, and :func:`_relay_output` then
+        prints nothing.  Without that marker every line would appear twice,
+        once live and once after the fact; with it, the two paths (live
+        relaying, and a stubbed result relayed afterwards) coexist without
+        either one changing what a reader sees.
     """
 
     returncode: int | None
@@ -273,7 +369,11 @@ class WorkerProcess(Protocol):
 
 
 #: Signature of the ``spawn`` seam: it takes the argument list and the working
-#: directory, and returns something shaped like a completed process.
+#: directory, and returns something shaped like a completed process.  Two
+#: positional arguments, deliberately and permanently: a shard's identity does
+#: **not** travel through this signature, so a stub written against it keeps
+#: working.  The shard label a relayed line is tagged with travels through
+#: :data:`_shard_output_label` instead.
 SpawnCallable = Callable[[Sequence[str], Path], WorkerProcess]
 
 
@@ -338,10 +438,13 @@ class ShardPlan:
             feature and ascending by line within a feature.  Never empty: a
             worker is never spawned with nothing to do.
         output_path: Where this worker writes its intermediate result
-            document, from :func:`~app.utils.paths.worker_result_path`.
-            Computed in the **parent**, so the parent knows every expected
-            path before a single child starts and can tell an absent file from
-            an unreadable one at merge time.
+            document: the run's own directory from
+            :func:`prepare_workers_dir`, joined with the file name
+            :func:`~app.utils.paths.worker_result_path` builds.  Computed in
+            the **parent**, so the parent knows every expected path before a
+            single child starts and can tell an absent file from an
+            unreadable one at merge time -- and confined to this run's
+            directory, so no path here can ever name a file another run wrote.
     """
 
     index: int
@@ -410,6 +513,28 @@ class RunOutcome:
             **not** :data:`NEUTRAL_TAG_EXPRESSION`: that tautology is the
             mechanism that suppresses ``behave.ini``'s default, not a filter
             the user asked for, and it must never surface in a report.
+        infrastructure_error: Why this port's own intermediate storage failed,
+            or ``None`` when it did not.  Two causes, and they are reported
+            through one field because they carry one consequence -- the run
+            cannot report success:
+
+            * the per-worker directory could not be **created**, so no
+              scenario was executed at all; or
+            * a per-worker directory could not be **removed** afterwards, so
+              intermediate result documents remain in a workspace whose
+              publisher glob is narrowed (``Jenkins:15``) precisely because
+              nothing intermediate may be read by it.
+
+            ``app/cli.py`` reads this **before** its ``rerun`` short-circuit,
+            because a rerun writes no artifacts by design and would otherwise
+            hide a rerun that executed nothing; and it reads it **after** the
+            report fan-out when a document exists, because a cleanup failure
+            must not cost a completed run its four artifacts.  Which of the
+            two happened is legible from the two fields above: a creation
+            failure leaves ``result_set`` ``None`` with ``worker_count`` at
+            ``0``, while a removal failure leaves the merged document intact.
+            Defaulted, so every existing construction of this class stays
+            valid and the field means "nothing went wrong" by omission.
     """
 
     result_set: dict[str, Any] | None
@@ -422,11 +547,32 @@ class RunOutcome:
     rerun: bool
     dry_run: bool
     tag_expression: str | None
+    infrastructure_error: str | None = None
 
 
 # --------------------------------------------------------------------------- #
 # Worker count
+#
+# The default is the CPU count; the ceiling below exists because a worker here
+# is an OS process driving a browser, so an unbounded --workers value would
+# spawn one process, one browser and one driver per scenario.
 # --------------------------------------------------------------------------- #
+
+#: How many worker processes one CPU may carry before a request is capped.
+#:
+#: **Why more than one per CPU is legitimate.**  A worker spends almost all of
+#: its wall time waiting -- for a browser to start, for a page to load, and in
+#: the seventeen fixed sleeps this suite preserves -- so it is I/O-bound and
+#: oversubscribing the CPUs is the whole point of running in parallel at all.
+#: Four is that oversubscription expressed as a policy: generous enough that
+#: no realistic machine is starved of concurrency, small enough that the
+#: browsers still fit in memory.
+_WORKERS_PER_CPU: Final[int] = 4
+
+#: Floor under the ceiling, so a single-CPU machine (a container with one
+#: allotted core is the common case) can still oversubscribe modestly rather
+#: than being pinned to four workers.
+_MINIMUM_WORKER_CEILING: Final[int] = 8
 
 
 def default_worker_count() -> int:
@@ -438,14 +584,40 @@ def default_worker_count() -> int:
     at ``pom.xml:24`` records what the source replaced with the uncapped
     setting.
 
+    The default is **never** capped by :func:`_worker_ceiling`: the ceiling
+    bounds what a user may ask for, and the CPU count is by construction
+    already inside it.
+
     Returns:
         :func:`os.cpu_count`, or ``1`` where the platform cannot report it.
     """
     return os.cpu_count() or 1
 
 
+def _worker_ceiling() -> int:
+    """Return the largest worker count this machine will be asked to run.
+
+    Derived from the CPU count rather than fixed, so the bound follows the
+    hardware instead of a number invented here, and floored so the smallest
+    machine still gets useful concurrency.
+
+    Returns:
+        ``max(_WORKERS_PER_CPU * default_worker_count(),
+        _MINIMUM_WORKER_CEILING)`` -- on a 12-CPU machine, 48; on a 1-CPU
+        machine, 8.
+    """
+    return max(_WORKERS_PER_CPU * default_worker_count(), _MINIMUM_WORKER_CEILING)
+
+
 def _effective_worker_count(requested: int | None, selected_count: int) -> int:
     """Clamp a requested worker count to something spawnable.
+
+    Three bounds apply, in this order: the CPU-derived ceiling from
+    :func:`_worker_ceiling` (explicit requests only), the number of selected
+    units, and a floor of one.  The ceiling is what stops ``--workers 5000``
+    on a large suite from becoming one process, one browser and one driver per
+    scenario; capping is reported at ``WARNING`` rather than applied silently,
+    because the user asked for something the run did not do.
 
     Args:
         requested: The caller's ``--workers`` value, or ``None`` for the
@@ -456,13 +628,31 @@ def _effective_worker_count(requested: int | None, selected_count: int) -> int:
 
     Returns:
         ``0`` when nothing was selected, so no worker is spawned at all.
-        Otherwise at least ``1`` and never more than ``selected_count`` -- a
-        worker is never given an empty shard.  ``1`` is the sequential mode.
+        Otherwise at least ``1``, never more than ``selected_count`` -- a
+        worker is never given an empty shard -- and, for an explicit request,
+        never more than :func:`_worker_ceiling`.  ``1`` is the sequential
+        mode, and both it and the ``None`` default pass through untouched.
     """
     if selected_count <= 0:
         return 0
-    unspecified = requested is None or requested <= 0
-    resolved = default_worker_count() if unspecified else requested
+    if requested is None or requested <= 0:
+        resolved = default_worker_count()
+    else:
+        resolved = requested
+        ceiling = _worker_ceiling()
+        if resolved > ceiling:
+            logger.warning(
+                "Requested %d worker(s), which exceeds this machine's ceiling "
+                "of %d (%d CPU(s) x %d worker(s) per CPU, minimum %d); "
+                "running %d instead",
+                requested,
+                ceiling,
+                default_worker_count(),
+                _WORKERS_PER_CPU,
+                _MINIMUM_WORKER_CEILING,
+                ceiling,
+            )
+            resolved = ceiling
     return max(1, min(resolved, selected_count))
 
 
@@ -724,8 +914,9 @@ def select_rerun_scenarios(
 ) -> tuple[list[ScenarioRef], list[str]]:
     """Select the scenarios a rerun should execute, from the rerun manifest.
 
-    This is the port of ``FailedTestRunner``, whose whole configuration was
-    ``features = "@target/rerun.txt"``.  The manifest is parsed by
+    This is the port of ``FailedTestRunner``, whose whole configuration was a
+    ``features`` declaration naming the rerun manifest as its feature source
+    (``FailedTestRunner.java:11``).  The manifest is parsed by
     :func:`~app.reporting.rerun_report.parse_rerun_file`, the single owner of
     that grammar -- nothing is parsed here, so the format the writer produces
     and the format the rerun consumes cannot drift apart.
@@ -740,13 +931,19 @@ def select_rerun_scenarios(
             ``None`` for the working directory.
 
     Returns:
-        A ``(selected, problems)`` pair.  Every location named by the manifest
-        is selected, enriched with the scenario's name and effective tags
+        A ``(selected, problems)`` pair.  Every location the parser hands
+        over is selected, enriched with the scenario's name and effective tags
         where the feature file still declares one at that line.  A location
-        that can no longer be resolved is **kept anyway** and noted in
+        whose line no longer names a scenario is **kept anyway** and noted in
         ``problems``: dropping it would silently discard a failure, which is
-        the one thing a rerun must not do.  A missing, unreadable or malformed
-        manifest yields no scenarios and a problem message, never an
+        the one thing a rerun must not do.  A location whose feature file does
+        not resolve inside the features directory never arrives here at all --
+        :func:`~app.reporting.rerun_report.parse_rerun_file` applies that
+        confinement tier itself and drops such a line with a warning on
+        stderr, which is the tolerated-manifest row of the AAP 0.4.1 exit
+        table -- so the absent-file branch below is reached only when the file
+        disappears between that check and this read.  A missing, unreadable or
+        malformed manifest yields no scenarios and a problem message, never an
         exception, and leaves the run at status ``0``.
     """
     manifest = rerun_txt_path(base)
@@ -769,6 +966,10 @@ def select_rerun_scenarios(
             units, unit_problems = _units_of(source)
             problems.extend(unit_problems)
         else:
+            # Reached on a race rather than on a stale manifest: the parser's
+            # confinement tier already dropped any entry whose feature file
+            # did not resolve, so arriving here means the file went away
+            # between that resolution and this read.
             problems.append(
                 f"{feature_path}: named by {manifest} but the feature file is absent"
             )
@@ -810,6 +1011,7 @@ def shard_scenarios(
     worker_count: int,
     *,
     base: Path | str | None = None,
+    run_dir: Path | str | None = None,
 ) -> list[ShardPlan]:
     """Distribute the selected units over the workers.
 
@@ -838,6 +1040,16 @@ def shard_scenarios(
             number of units and never less than one.
         base: Directory the per-worker output paths hang off, or ``None`` for
             the working directory.
+        run_dir: This run's own intermediate directory, from
+            :func:`prepare_workers_dir`, which every shard's output file is
+            placed inside.  ``None`` puts the files straight into the shared
+            directory :mod:`app.utils.paths` names, which is what a caller
+            sharding without a prepared run -- a test asserting the
+            exactly-once invariant, say -- gets, and is why the parameter has
+            a default at all.  :func:`run_suite` always supplies one, so no
+            executed run ever writes into the shared directory: see the
+            lifecycle comment above :func:`prepare_workers_dir` for the stale
+            reuse and the cross-run deletion that would otherwise follow.
 
     Returns:
         One :class:`ShardPlan` per worker, in shard order, none of them empty.
@@ -862,11 +1074,40 @@ def shard_scenarios(
             index=index,
             locations=tuple(unit.location for unit in bucket),
             # Named in the parent, so its pid is the one embedded and the
-            # parent knows every expected path before a child starts.
-            output_path=worker_result_path(index, base=base),
+            # parent knows every expected path before a child starts.  The
+            # file *name* always comes from app/utils/paths, the port's owner
+            # of every artifact name; only the directory it sits in is this
+            # run's, which is what isolates concurrent runs from each other.
+            output_path=_shard_output_path(index, base=base, run_dir=run_dir),
         )
         for index, bucket in enumerate(buckets)
     ]
+
+
+def _shard_output_path(
+    index: int,
+    *,
+    base: Path | str | None,
+    run_dir: Path | str | None,
+) -> Path:
+    """Return where one shard writes its intermediate result document.
+
+    Args:
+        index: The shard's zero-based index, which the file name carries.
+        base: Directory the shared intermediate directory hangs off.
+        run_dir: This run's own directory, or ``None`` to use the shared one.
+
+    Returns:
+        The run directory joined with the file name
+        :func:`~app.utils.paths.worker_result_path` builds -- taking the name
+        from that function rather than re-spelling it, so the pid-plus-index
+        naming rule stays in the module that owns it -- or that function's own
+        path when no run directory was supplied.
+    """
+    named = worker_result_path(index, base=base)
+    if run_dir is None:
+        return named
+    return Path(run_dir) / named.name
 
 
 # --------------------------------------------------------------------------- #
@@ -941,55 +1182,698 @@ def build_worker_command(
 
 
 # --------------------------------------------------------------------------- #
-# The target/.workers/ lifecycle
+# The per-worker intermediate directory lifecycle
+#
+# This module is the **single owner** of that directory: it is the only place
+# in the port that creates one or removes one, and ``app/cli.py`` reaches both
+# operations only through the two functions below.  One owner is the point.
+# Two owners, each swallowing its own failure, is how a command returns ``0``
+# with intermediate documents still sitting in a workspace whose publisher
+# glob (``Jenkins:15``) is narrowed to one file precisely because nothing
+# intermediate may be publishable.
+#
+# Every run gets its **own** directory inside the shared one, and that is not
+# tidiness either.  Two things go wrong with a single shared directory:
+#
+# * **Stale reuse.**  A worker file's name carries a process id and a shard
+#   index (``app/utils/paths.worker_result_path``).  Both repeat -- process
+#   ids are recycled and shard indices start at zero every run -- so a file a
+#   previous run failed to remove can be read by a later run as that run's own
+#   result, before the new worker has written anything over it.
+# * **Cross-run deletion.**  Two runs in one checkout would share the
+#   directory, and whichever finished first would delete the other's files,
+#   turning live results into "the worker wrote no result file".
+#
+# A per-run directory removes both: nothing a run reads was written by another
+# run, and nothing a run deletes belongs to another run.  The shared parent is
+# only ever removed when it is empty, which is exactly when no other run holds
+# anything in it.
 # --------------------------------------------------------------------------- #
+
+#: Separator between the two parts of a run directory's name.  The name itself
+#: is built from runtime values only -- this process's id and a random token --
+#: so no *path* literal is introduced here: :mod:`app.utils.paths` remains the
+#: owner of every directory and file name in the port, and the per-worker file
+#: name inside a run directory is still taken from
+#: :func:`~app.utils.paths.worker_result_path` rather than spelled out.
+_RUN_DIR_NAME_SEPARATOR: Final[str] = "-"
+
+#: Bytes of randomness in a run directory's name.  Six bytes is twelve hex
+#: characters: enough that two runs started in the same second by the same
+#: recycled process id cannot collide, short enough to read in a log line.
+_RUN_DIR_TOKEN_BYTES: Final[int] = 6
+
+#: Every run directory this process created and has not yet removed, so that
+#: :func:`cleanup_workers_dir` called with no argument -- the call
+#: ``app/cli.py`` makes on every exit path -- knows precisely what this
+#: invocation is responsible for, and therefore never touches another run's.
+_active_run_dirs: set[Path] = set()
+_active_run_dirs_lock: Final[threading.Lock] = threading.Lock()
+
+
+def _run_dir_name() -> str:
+    """Return a name no other run will use.
+
+    Returns:
+        This process's id and a random token, joined by
+        :data:`_RUN_DIR_NAME_SEPARATOR` -- ``"48123-9f2c1ab77d04"`` and the
+        like.  The process id makes the directory identifiable in a log or an
+        ``ls`` while a run is in progress, and :func:`run_directory_owner`
+        reads it back so that a *live* run's directory is never deleted by
+        anything else; the token is what makes the name unique even when that
+        id has been recycled.
+    """
+    token = secrets.token_hex(_RUN_DIR_TOKEN_BYTES)
+    return f"{os.getpid()}{_RUN_DIR_NAME_SEPARATOR}{token}"
+
+
+def run_directory_owner(name: str) -> int | None:
+    """Return the process id a run directory's name carries.
+
+    Args:
+        name: A single path component from inside the shared intermediate
+            directory.
+
+    Returns:
+        The process id that created it, or ``None`` when the name was not
+        produced by :func:`_run_dir_name` -- which is how anything else found
+        in that directory is told apart from a run's own working space.
+    """
+    pid_text, separator, token = name.partition(_RUN_DIR_NAME_SEPARATOR)
+    if not separator or not pid_text.isdigit():
+        return None
+    if len(token) != _RUN_DIR_TOKEN_BYTES * 2:
+        return None
+    try:
+        int(token, 16)
+    except ValueError:
+        return None
+    return int(pid_text)
+
+
+def _process_is_alive(pid: int) -> bool:
+    """Return whether a process id still belongs to a running process.
+
+    The test is deliberately **fail-safe**: a platform this cannot ask, or an
+    answer it cannot interpret, reports ``True``, because the consequence of
+    wrongly believing a run is alive is a stale directory left for the next
+    clean to remove, while the consequence of wrongly believing it is dead is
+    deleting the results of a run that is still writing them.
+
+    Args:
+        pid: The process id to test.
+
+    Returns:
+        ``True`` when the process exists or cannot be ruled out.
+
+    Notes:
+        :func:`os.kill` is used on POSIX only.  On Windows it does not probe:
+        any signal number other than the two console events **terminates**
+        the target, so the probe there is a synchronisation-handle open and a
+        zero-timeout wait, which observes the process without touching it.
+    """
+    if pid <= 0:
+        return False
+    if _HAS_PROCESS_GROUPS:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Alive, and owned by somebody else.
+            return True
+        except OSError as error:
+            logger.debug("Could not probe process %d: %s", pid, error)
+            return True
+        return True
+    return _windows_process_is_alive(pid)
+
+
+def _windows_process_is_alive(pid: int) -> bool:
+    """Return whether a Windows process id is still running.
+
+    Args:
+        pid: The process id to test.
+
+    Returns:
+        ``True`` when a handle can be opened and the process has not
+        signalled, and when the probe itself is unavailable -- see
+        :func:`_process_is_alive` for why the unknown case is ``True``.
+    """
+    try:
+        import ctypes  # noqa: PLC0415 - Windows only, and only on this path
+    except ImportError:  # pragma: no cover - ctypes ships with CPython
+        return True
+
+    kernel32 = getattr(ctypes, "windll", None)
+    if kernel32 is None:  # pragma: no cover - not Windows
+        return True
+
+    synchronize = 0x00100000
+    wait_timeout = 0x00000102
+    handle = kernel32.kernel32.OpenProcess(synchronize, False, pid)
+    if not handle:
+        # No handle: the process is gone, or it is not ours to observe.  The
+        # second case is indistinguishable here, so the fail-safe answer is
+        # the one the last-error code gives: only "invalid parameter" means
+        # the id does not exist.
+        return kernel32.kernel32.GetLastError() != 87
+    try:
+        return kernel32.kernel32.WaitForSingleObject(handle, 0) == wait_timeout
+    finally:
+        kernel32.kernel32.CloseHandle(handle)
+
+
+def run_directory_is_active(directory: Path) -> bool:
+    """Return whether a run directory belongs to a run still in progress.
+
+    This is what lets one invocation's ``--clean`` empty the build output
+    without destroying another invocation's live intermediates, which is the
+    concurrency defect the per-run directory alone does not fix: the clean
+    step removes the shared directory's contents, and without this test it
+    would remove a running sibling's results and turn them into missing
+    worker files.
+
+    Args:
+        directory: A child of the shared intermediate directory.
+
+    Returns:
+        ``True`` when the name is a run directory whose creating process is
+        still running -- this process's own current run included -- and
+        ``False`` for anything else, which is therefore reclaimable: an
+        abandoned run's leftovers, and anything in that directory that a run
+        did not create.
+    """
+    owner = run_directory_owner(directory.name)
+    if owner is None:
+        return False
+    with _active_run_dirs_lock:
+        if directory in _active_run_dirs:
+            return True
+    return _process_is_alive(owner)
 
 
 def prepare_workers_dir(*, base: Path | str | None = None) -> Path:
-    """Create the directory the per-worker result files are written into.
+    """Create this run's own directory for its per-worker result files.
+
+    The directory is a fresh, uniquely named child of the shared
+    per-worker intermediate directory :mod:`app.utils.paths` names, created on
+    every call -- see the section comment above for the two failure modes a
+    shared directory has.  It is registered as this process's responsibility,
+    so :func:`cleanup_workers_dir` can remove what this invocation created
+    without having to guess.
 
     Args:
         base: Directory it hangs off, or ``None`` for the working directory.
 
     Returns:
-        The created directory.
+        The created directory, which the caller passes to
+        :func:`shard_scenarios` so every shard's output path lands inside it.
 
     Raises:
         OSError: If it cannot be created.  :func:`run_suite` converts that
-            into the empty-merge outcome rather than letting it escape, since
-            a run whose workers have nowhere to write produces no results.
+            into an outcome carrying
+            :attr:`RunOutcome.infrastructure_error` rather than letting it
+            escape, since a run whose workers have nowhere to write executes
+            nothing and must not report success.
     """
-    return ensure_dir(workers_dir(base))
+    directory = ensure_dir(workers_dir(base) / _run_dir_name())
+    with _active_run_dirs_lock:
+        _active_run_dirs.add(directory)
+    return directory
 
 
-def cleanup_workers_dir(*, base: Path | str | None = None) -> None:
-    """Remove the per-worker directory and everything in it.
+def _prune_workers_root(base: Path | str | None) -> None:
+    """Remove the shared intermediate directory if nothing is left in it.
 
-    **Idempotent by contract.**  ``app/cli.py`` removes this directory in an
-    outer ``finally`` as a belt-and-braces guarantee and :func:`run_suite`
-    removes it in its own, so this function is routinely called twice; the
-    second call must be a silent no-op.  :mod:`app.utils.paths` deliberately
-    never deletes anything, which is why the removal lives here.
-
-    It matters concretely that this happens: ``Jenkins:15`` narrows the
-    publisher's ``fileIncludePattern`` to ``target/cucumber.json``, and no
-    intermediate worker JSON may be left visible in the workspace.  Emptying
-    ``target/`` itself belongs to ``app/cli.py``'s ``--clean``, which covers
-    this directory implicitly because it sits inside ``target/``.
+    ``rmdir`` and never ``rmtree``: it succeeds only on an empty directory, so
+    a concurrent run's live directory both prevents the removal and is left
+    untouched by it.  Every failure is expected here rather than exceptional --
+    the directory is absent, or another run still holds a file in it -- so
+    none is reported.
 
     Args:
-        base: Directory it hangs off, or ``None`` for the working directory.
+        base: Directory the shared directory hangs off.
     """
-    directory = workers_dir(base)
+    try:
+        workers_dir(base).rmdir()
+    except OSError:
+        # Absent, not empty, or not ours to remove.  All three are normal.
+        return
+
+
+#: Flags that open a directory without following a symlink at its final
+#: component.  ``O_NOFOLLOW`` is the whole point: a path component swapped for
+#: a link fails the open instead of redirecting everything that follows.
+_NOFOLLOW_DIR_FLAGS: Final[int] = (
+    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+)
+
+#: Whether this platform can enumerate and remove *relative to an open
+#: directory descriptor*.  All four capabilities are needed together, and
+#: POSIX has them while Windows has none; see :func:`_confined_workers_fd` for
+#: what the Windows path does instead.
+_SUPPORTS_CONFINED_REMOVAL: Final[bool] = (
+    hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and os.scandir in os.supports_fd
+    and os.rmdir in os.supports_dir_fd
+    and shutil.rmtree.avoids_symlink_attacks
+)
+
+
+def _confined_workers_fd(base: Path | str | None) -> int | None:
+    """Open the shared intermediate directory without trusting its path.
+
+    The path to it is ``<base>/<target>/<workers>``, and every component after
+    ``base`` is opened with ``O_NOFOLLOW`` relative to the descriptor of the
+    one before, so a link substituted for *any* of them fails the open rather
+    than redirecting a recursive deletion out of the checkout (CWE-59).  The
+    directory names come from :mod:`app.utils.paths`, the port's owner of
+    every path, rather than being spelled out here.
+
+    Args:
+        base: Directory the build output hangs off, or ``None`` for the
+            working directory.  This is the one component taken on trust: it
+            is the checkout the caller chose to run in.
+
+    Returns:
+        A descriptor for the shared intermediate directory, which the caller
+        must close, or ``None`` when it does not exist or cannot be opened
+        through a chain of real directories.
+
+    Raises:
+        OSError: If a component exists but cannot be opened for a reason
+            other than being absent -- a link in the chain among them.  The
+            caller reports that as a cleanup failure rather than proceeding.
+    """
+    root = target_root(base)
+    descriptors: list[int] = []
+    try:
+        parent = os.open(root.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except FileNotFoundError:
+        return None
+    descriptors.append(parent)
+    try:
+        for name in (root.name, workers_dir(base).name):
+            try:
+                child = os.open(name, _NOFOLLOW_DIR_FLAGS, dir_fd=descriptors[-1])
+            except FileNotFoundError:
+                return None
+            descriptors.append(child)
+    except OSError:
+        raise
+    finally:
+        # Every descriptor but the last is scaffolding.  The last is the
+        # caller's, and is only left open when the walk completed.
+        for descriptor in descriptors[:-1]:
+            os.close(descriptor)
+        if len(descriptors) < 3:
+            for descriptor in descriptors[-1:]:
+                os.close(descriptor)
+    return descriptors[-1]
+
+
+def _remove_confined_entry(name: str, workers_fd: int, shown: Path) -> str | None:
+    """Remove one entry of the shared intermediate directory, following no link.
+
+    Args:
+        name: The entry's single path component, never a path.
+        workers_fd: Descriptor of the directory holding it, already opened
+            through a chain of real directories.
+        shown: The entry's path as a human should see it in a diagnostic.
+
+    Returns:
+        ``None`` once the entry is gone, and otherwise a reason.  Removal is
+        descriptor-relative, so no component of ``shown`` is resolved a
+        second time, and a symlink is unlinked as the link it is rather than
+        followed.  **Absence is then confirmed** rather than assumed: a
+        removal that reported success and left the entry behind is the one
+        case a caller must never read as success.
+    """
+    try:
+        if _is_directory_entry(name, workers_fd):
+            shutil.rmtree(name, dir_fd=workers_fd)
+        else:
+            os.unlink(name, dir_fd=workers_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        reason = f"could not remove {shown}: {error}"
+        logger.error("Intermediate cleanup failed: %s", reason)
+        return reason
+
+    try:
+        os.lstat(name, dir_fd=workers_fd)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        reason = f"could not confirm that {shown} is gone: {error}"
+        logger.error("Intermediate cleanup failed: %s", reason)
+        return reason
+    reason = f"{shown} still exists after it was removed"
+    logger.error("Intermediate cleanup failed: %s", reason)
+    return reason
+
+
+def _is_directory_entry(name: str, workers_fd: int) -> bool:
+    """Return whether an entry is a real directory rather than a link to one.
+
+    Args:
+        name: The entry's single path component.
+        workers_fd: Descriptor of the directory holding it.
+
+    Returns:
+        ``True`` only for a real directory.  A symlink - whatever it points
+        at - is ``False``, so it is unlinked instead of walked.
+    """
+    try:
+        status = os.lstat(name, dir_fd=workers_fd)
+    except OSError:
+        return False
+    return stat.S_ISDIR(status.st_mode)
+
+
+def _remove_by_path(directory: Path) -> str | None:
+    """Remove one run directory by path, for a platform without ``at`` calls.
+
+    The fallback for Windows, which AAP section 0.8 lists as supported and
+    which has none of the descriptor-relative calls the POSIX path uses.  It
+    keeps what can be kept without them: the directory is inspected with
+    :func:`os.lstat`, a link is **refused** rather than followed or unlinked,
+    and the removal's postcondition is confirmed afterwards.  What it cannot
+    do is close the window between the inspection and the removal, so that
+    residual race is stated here rather than hidden - a build output
+    directory writable by a hostile process is outside what a build tool can
+    defend on this platform.
+
+    Args:
+        directory: The run directory to remove.
+
+    Returns:
+        ``None`` once it is gone, and otherwise a reason.
+    """
+    try:
+        status = os.lstat(directory)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        reason = f"could not inspect {directory}: {error}"
+        logger.error("Intermediate cleanup failed: %s", reason)
+        return reason
+
+    if stat.S_ISLNK(status.st_mode):
+        reason = (
+            f"{directory} is a symbolic link rather than a run directory, so "
+            "it was neither followed nor removed"
+        )
+        logger.error("Intermediate cleanup failed: %s", reason)
+        return reason
+
     try:
         shutil.rmtree(directory)
     except FileNotFoundError:
-        # Already gone: the idempotent case, and not worth a log line.
-        return
+        return None
     except OSError as error:
-        # Never raised onward.  This runs in a ``finally``, where an exception
-        # would mask whatever the run was already reporting.
-        logger.warning("Could not remove %s: %s", directory, error)
+        reason = f"could not remove {directory}: {error}"
+        logger.error("Intermediate cleanup failed: %s", reason)
+        return reason
+
+    if directory.exists():
+        reason = f"{directory} still exists after it was removed"
+        logger.error("Intermediate cleanup failed: %s", reason)
+        return reason
+    return None
+
+
+def _remove_run_directory(directory: Path, base: Path | str | None) -> str | None:
+    """Remove one run directory, refusing anything that is not one.
+
+    Two confinement rules, and both are refusals rather than best efforts:
+    the directory must be a **direct child** of the shared intermediate
+    directory this ``base`` names, and the path to that shared directory must
+    be a chain of real directories (:func:`_confined_workers_fd`).  Together
+    they mean this function cannot be talked into a recursive deletion
+    somewhere else by a caller's path, by a relinked parent component, or by
+    a link left in place of the directory itself.
+
+    Args:
+        directory: The run directory to remove.
+        base: Directory the shared intermediate directory hangs off.
+
+    Returns:
+        ``None`` once the directory is gone - which includes it never having
+        existed - and otherwise a reason, already logged at ``ERROR``.
+    """
+    expected_parent = workers_dir(base)
+    if directory.parent != expected_parent:
+        reason = (
+            f"{directory} is not inside {expected_parent}, so it was not "
+            "removed: this run's intermediates are the only thing cleanup may "
+            "delete"
+        )
+        logger.error("Intermediate cleanup refused: %s", reason)
+        return reason
+
+    if not _SUPPORTS_CONFINED_REMOVAL:
+        return _remove_by_path(directory)
+
+    try:
+        workers_fd = _confined_workers_fd(base)
+    except OSError as error:
+        reason = (
+            f"could not open {expected_parent} through a chain of real "
+            f"directories, so {directory} was not removed: {error}"
+        )
+        logger.error("Intermediate cleanup refused: %s", reason)
+        return reason
+    if workers_fd is None:
+        # The shared directory is gone, so anything inside it is too.
+        return None
+
+    try:
+        return _remove_confined_entry(directory.name, workers_fd, directory)
+    finally:
+        os.close(workers_fd)
+
+
+def reclaim_workers_root(
+    *, base: Path | str | None = None
+) -> tuple[str | None, tuple[Path, ...]]:
+    """Empty the shared intermediate directory of everything not in use.
+
+    This is what the ``--clean`` step calls for that directory instead of
+    deleting it outright, and what ``app/cli.py`` calls on an exit path that
+    executed nothing.  The distinction it draws is the one the concurrency
+    finding turns on: an abandoned run's leftovers are **reclaimed**, and a
+    live run's directory is **retained**, because a second invocation's clean
+    deleting a first invocation's working files is exactly how live results
+    become missing worker files.  Liveness comes from
+    :func:`run_directory_is_active`, and this process's own current run counts
+    as live.
+
+    Args:
+        base: Directory the shared intermediate directory hangs off, or
+            ``None`` for the working directory.
+
+    Returns:
+        A ``(reason, retained)`` pair.  ``reason`` is ``None`` when
+        everything reclaimable is gone, and otherwise names what could not be
+        removed; ``retained`` names every live run directory left in place,
+        in sorted order, so a caller can report them as deliberately kept
+        rather than treating them as a failed clean.
+    """
+    root = workers_dir(base)
+    if not _SUPPORTS_CONFINED_REMOVAL:
+        return _reclaim_by_path(root, base)
+
+    try:
+        workers_fd = _confined_workers_fd(base)
+    except OSError as error:
+        reason = (
+            f"could not open {root} through a chain of real directories, so "
+            f"nothing in it was removed: {error}"
+        )
+        logger.error("Intermediate cleanup refused: %s", reason)
+        return reason, ()
+    if workers_fd is None:
+        return None, ()
+
+    problems: list[str] = []
+    retained: list[Path] = []
+    try:
+        with os.scandir(workers_fd) as entries:
+            names = sorted(entry.name for entry in entries)
+        for name in names:
+            if run_directory_is_active(root / name):
+                retained.append(root / name)
+                continue
+            problem = _remove_confined_entry(name, workers_fd, root / name)
+            if problem is not None:
+                problems.append(problem)
+    except OSError as error:
+        problem = f"could not list the entries of {root}: {error}"
+        logger.error("Intermediate cleanup failed: %s", problem)
+        problems.append(problem)
+    finally:
+        os.close(workers_fd)
+
+    with _active_run_dirs_lock:
+        for directory in tuple(_active_run_dirs):
+            if directory.parent == root and directory not in retained:
+                _active_run_dirs.discard(directory)
+
+    if not retained:
+        _prune_workers_root(base)
+    if retained:
+        logger.info(
+            "Retained %d live run director(y/ies) in %s: %s",
+            len(retained),
+            root,
+            ", ".join(directory.name for directory in retained),
+        )
+    return (_cleanup_reason(problems), tuple(retained))
+
+
+def _reclaim_by_path(
+    root: Path, base: Path | str | None
+) -> tuple[str | None, tuple[Path, ...]]:
+    """Reclaim the shared intermediate directory without ``at`` calls.
+
+    The Windows counterpart of :func:`reclaim_workers_root`'s main path, with
+    the same retention rule and the same residual race as
+    :func:`_remove_by_path`.
+
+    Args:
+        root: The shared intermediate directory.
+        base: Directory it hangs off.
+
+    Returns:
+        The same ``(reason, retained)`` pair.
+    """
+    try:
+        status = os.lstat(root)
+    except FileNotFoundError:
+        return None, ()
+    except OSError as error:
+        reason = f"could not inspect {root}: {error}"
+        logger.error("Intermediate cleanup failed: %s", reason)
+        return reason, ()
+
+    if stat.S_ISLNK(status.st_mode):
+        reason = (
+            f"{root} is a symbolic link rather than the intermediate "
+            "directory, so nothing in it was removed"
+        )
+        logger.error("Intermediate cleanup refused: %s", reason)
+        return reason, ()
+
+    try:
+        entries = sorted(root.iterdir())
+    except OSError as error:
+        reason = f"could not list the entries of {root}: {error}"
+        logger.error("Intermediate cleanup failed: %s", reason)
+        return reason, ()
+
+    problems: list[str] = []
+    retained: list[Path] = []
+    for entry in entries:
+        if run_directory_is_active(entry):
+            retained.append(entry)
+            continue
+        problem = _remove_by_path(entry)
+        if problem is not None:
+            problems.append(problem)
+
+    with _active_run_dirs_lock:
+        for directory in tuple(_active_run_dirs):
+            if directory.parent == root and directory not in retained:
+                _active_run_dirs.discard(directory)
+
+    if not retained:
+        _prune_workers_root(base)
+    return (_cleanup_reason(problems), tuple(retained))
+
+
+def _cleanup_reason(problems: Sequence[str]) -> str | None:
+    """Combine cleanup problems into the one reason a caller reports.
+
+    Args:
+        problems: Every problem encountered, each already logged.
+
+    Returns:
+        ``None`` when there were none, and otherwise a single line naming
+        them and what their survival means.
+    """
+    if not problems:
+        return None
+    return (
+        f"{len(problems)} intermediate path(s) could not be removed, so "
+        f"per-worker result documents remain in the workspace: "
+        f"{'; '.join(problems)}"
+    )
+
+
+def cleanup_workers_dir(
+    *,
+    base: Path | str | None = None,
+    directory: Path | str | None = None,
+) -> str | None:
+    """Remove a run's intermediate directory, and report whether it is gone.
+
+    **Idempotent, and observably so.**  A directory that is already absent is
+    a success: :func:`run_suite` removes its own directory in its ``finally``
+    and ``app/cli.py`` calls this function again on the way out, so the second
+    call routinely finds nothing to do.  What is *not* silent any more is a
+    removal that fails, because a directory that survives holds this run's
+    intermediate documents -- tracebacks, attachments, per-scenario results --
+    in a workspace where ``Jenkins:15`` narrows the publisher to one file
+    exactly so that nothing intermediate can be read by it.  The reason is
+    returned so the caller can refuse to report success; it is never raised,
+    because this runs in a ``finally`` where an exception would mask whatever
+    the run was already reporting.
+
+    Args:
+        base: Directory the shared intermediate directory hangs off, or
+            ``None`` for the working directory.
+        directory: The one run directory to remove.  ``None`` means "every
+            directory this process created and has not yet removed", which is
+            what ``app/cli.py``'s single call site asks for: it covers a run
+            whose own cleanup could not reach (an interrupt during
+            preparation, say) and reduces to a no-op after a run that cleaned
+            up for itself.  A run directory another process created is never
+            removed by either form.
+
+    Returns:
+        ``None`` when nothing of this invocation's remains; otherwise a
+        one-line reason naming what could not be removed, already logged at
+        ``ERROR``.  ``app/cli.py`` maps a reason onto its artifact-failure
+        status, so a run cannot return ``0`` while its intermediates survive.
+    """
+    if directory is not None:
+        targets = [Path(directory)]
+    else:
+        with _active_run_dirs_lock:
+            targets = sorted(_active_run_dirs)
+
+    problems: list[str] = []
+    for target in targets:
+        # Confined, no-follow, and confirmed gone before it is forgotten -
+        # see :func:`_remove_run_directory`.  A directory that could not be
+        # removed stays registered, so a later call tries it again and the
+        # command cannot lose track of it.
+        problem = _remove_run_directory(target, base)
+        if problem is not None:
+            problems.append(problem)
+            continue
+        with _active_run_dirs_lock:
+            _active_run_dirs.discard(target)
+
+    # Whether or not a removal failed: the shared parent goes only when it is
+    # empty, so this both tidies up after the last run in a workspace and is a
+    # no-op while any other run still holds a directory in it.
+    _prune_workers_root(base)
+    return _cleanup_reason(problems)
 
 
 # --------------------------------------------------------------------------- #
@@ -1001,6 +1885,32 @@ def cleanup_workers_dir(*, base: Path | str | None = None) -> None:
 #: dead-worker line into eighty.
 _MAX_REPORTED_LOCATIONS: Final[int] = 5
 _ELLIPSIS: Final[str] = "..."
+
+#: Thread-name prefix for the supervision threads the ``spawn`` seam uses.
+#: Named so a stack dump taken during a test names the port rather than
+#: ``ThreadPoolExecutor-0_3``.
+_SHARD_THREAD_PREFIX: Final[str] = "testinium-qa-shard"
+
+#: ``sys.platform`` value for Windows, where two of this module's decisions
+#: differ: the pool's own size limit below, and the process-group flag in
+#: :func:`_spawn_worker`.
+_WINDOWS_PLATFORM: Final[str] = "win32"
+
+#: Largest :class:`~concurrent.futures.ProcessPoolExecutor` this module builds
+#: on Windows.  Not a policy of the port's: the standard library raises
+#: ``ValueError("max_workers must be <= 61")`` above it, because a Windows wait
+#: handles at most 63 objects and the pool spends two of them on its own
+#: queues (``concurrent/futures/process.py``, ``_MAX_WINDOWS_WORKERS``).  A
+#: shard count above it is queued through the pool rather than refused: each
+#: shard's output path was computed in the parent and carries the shard index,
+#: so one pool process running several shards in turn writes distinct files.
+_MAX_POOL_PROCESSES: Final[int] = 61
+
+#: How long a process gets to exit after it is asked to, before it is killed.
+#: Only ever spent on the cancellation path, where the run is already over and
+#: the operator is waiting: long enough for a Python process to unwind its own
+#: cleanup, short enough that an interrupt still feels immediate.
+_TERMINATION_GRACE_SECONDS: Final[float] = 5.0
 
 
 def _describe(plan: ShardPlan) -> str:
@@ -1022,6 +1932,37 @@ def _describe(plan: ShardPlan) -> str:
     )
 
 
+def _dead_shard(
+    plan: ShardPlan, detail: str, *, returncode: int | None = None
+) -> ShardResult:
+    """Build the dead result for a shard that could not be run or supervised.
+
+    Every dead result in this module is built here, so each one names its
+    shard through :func:`_describe` -- "the incomplete shard is named on
+    stderr" (AAP 0.4.1) is a property of the message, and a hand-built
+    reason string is how that property gets lost.
+
+    Args:
+        plan: The shard that failed.
+        detail: What became of it, as a verb phrase completing
+            "``shard 3 (...)`` " -- for example ``"could not be started"``.
+        returncode: The engine's status if there was one; ``None`` when the
+            shard never reached the point of having one.
+
+    Returns:
+        A :class:`ShardResult` with ``dead`` set and ``reason`` naming the
+        shard.  ``app/cli.py`` maps a dead shard to its own non-zero class,
+        and the artifacts from the shards that *did* complete are still
+        written, so this is a report and never an abort.
+    """
+    return ShardResult(
+        plan=plan,
+        returncode=returncode,
+        dead=True,
+        reason=f"{_describe(plan)} {detail}",
+    )
+
+
 def _run_base(base: Path | str | None) -> Path:
     """Resolve the directory each worker runs in.
 
@@ -1039,13 +1980,468 @@ def _run_base(base: Path | str | None) -> Path:
     return target_root(base).parent
 
 
-def _spawn_worker(
-    command: Sequence[str], cwd: Path
-) -> subprocess.CompletedProcess[str]:
-    """Launch one worker and wait for it.
+# --------------------------------------------------------------------------- #
+# Live worker output, and the children this process owns
+#
+# Two requirements meet here.  AAP 0.4.1 requires both streams to be
+# line-buffered -- progress to stdout, engine diagnostics to stderr -- which
+# means a worker's line must be relayed when it is written and not when the
+# worker exits; a browser suite runs for minutes, and buffering its output
+# until the end leaves a Jenkins log silent throughout.  And a run that is
+# interrupted must leave nothing behind: a worker sits in its own process
+# group precisely so that stopping it stops the driver and the browser it
+# started, which needs the parent to know which children are still alive.
+# --------------------------------------------------------------------------- #
 
-    The default implementation behind :func:`run_suite`'s ``spawn`` seam.  It
-    is the only place in this module that starts a process.
+#: How many of a worker's most recent lines each stream keeps after relaying
+#: them.  **Bounded on purpose**: holding a whole run's output in memory is
+#: the defect this replaced, and a tail is all an after-the-fact reader of
+#: :attr:`WorkerProcess.stderr` needs, since a shard's classification comes
+#: from its exit status and its result file rather than from its text.
+_RETAINED_OUTPUT_LINES: Final[int] = 20
+
+#: Environment variable that stops the *child's* own stdout and stderr being
+#: block-buffered.  Without it the relay below is live but its input is not:
+#: a Python process whose stdout is a pipe buffers in blocks, so behave's
+#: progress would reach this parent in 8 KiB instalments however promptly the
+#: parent reads.  Setting it is what makes the line-buffered contract in AAP
+#: 0.4.1 true end to end rather than only on the parent's side.
+_UNBUFFERED_ENV_VAR: Final[str] = "PYTHONUNBUFFERED"
+_UNBUFFERED_ENV_VALUE: Final[str] = "1"
+
+#: Whether this platform can put a child in its own process group and signal
+#: that group as a unit.  True on POSIX, false on Windows, where the
+#: equivalent is a creation flag rather than a call.
+_HAS_PROCESS_GROUPS: Final[bool] = (
+    hasattr(os, "killpg") and hasattr(os, "getpgid") and hasattr(os, "setsid")
+)
+
+#: The signal a worker that ignored the polite request is killed with.
+#: ``SIGKILL`` where it exists; on Windows there is no such signal and
+#: :meth:`subprocess.Popen.kill` is the terminal action instead.
+_KILL_SIGNAL: Final[int] = int(getattr(signal, "SIGKILL", signal.SIGTERM))
+
+#: Conventional exit status for a process that died from a signal: ``128 + n``,
+#: as every POSIX shell reports it.
+_SIGNAL_EXIT_BASE: Final[int] = 128
+
+#: How long a reader thread is waited for once its worker has exited.  It
+#: normally ends immediately, at the pipe's EOF; the bound covers the case
+#: where a grandchild inherited the pipe and still holds it open, which must
+#: delay a finished run by a few seconds at most rather than indefinitely.
+_READER_JOIN_SECONDS: Final[float] = 5.0
+
+#: The label relayed lines are tagged with, carried out of band.
+#:
+#: **Why a context variable rather than a parameter.**  The tag identifies the
+#: shard, and :data:`SpawnCallable` -- the documented seam every caller and
+#: every stub is written against -- takes the command and the working
+#: directory and nothing else.  Widening it would break every stub, so
+#: :func:`_run_one_shard` publishes the label here and :func:`_spawn_worker`
+#: reads it in its own thread, where the value it set is visible.  Unset, the
+#: launch falls back to the child's pid, so a direct call to
+#: :func:`_spawn_worker` still produces attributable output.
+_shard_output_label: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "testinium_qa_shard_output_label", default=None
+)
+
+#: Worker subprocesses this process has started and not yet reaped, by pid,
+#: guarded by the lock below because workers are started from several threads
+#: on the seam path and read back from whichever thread handles an interrupt.
+_live_workers: dict[int, subprocess.Popen[str]] = {}
+_live_workers_lock: Final[threading.Lock] = threading.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class _RelayedWorker:
+    """A finished worker whose output was relayed while it ran.
+
+    Satisfies :class:`WorkerProcess` structurally, and adds the
+    ``output_relayed`` marker that stops :func:`_relay_output` printing the
+    same lines a second time.
+
+    Attributes:
+        returncode: The engine's exit status.  Negative means killed by a
+            signal, which is the one status :func:`_run_one_shard` treats as
+            death; positive is an ordinary test outcome.
+        stdout: The last :data:`_RETAINED_OUTPUT_LINES` lines of standard
+            output, newline-joined -- a diagnostic tail, not a transcript.
+        stderr: The same for standard error.
+        output_relayed: Always ``True``.  Present so the marker is explicit
+            on the object rather than inferred from its type.
+    """
+
+    returncode: int | None
+    stdout: str | None
+    stderr: str | None
+    output_relayed: bool = True
+
+
+def _register_worker(process: subprocess.Popen[str]) -> None:
+    """Record a live worker, so an interrupt can find it.
+
+    Args:
+        process: The worker just started.
+
+    Returns:
+        ``None``.
+    """
+    with _live_workers_lock:
+        _live_workers[process.pid] = process
+
+
+def _forget_worker(process: subprocess.Popen[str]) -> None:
+    """Drop a worker from the registry once it has been waited for.
+
+    Idempotent: the owning thread forgets its worker in a ``finally``, and
+    :func:`terminate_live_workers` forgets whatever it stopped, so the same
+    worker is routinely dropped twice.
+
+    Args:
+        process: The worker to drop.
+
+    Returns:
+        ``None``.
+    """
+    with _live_workers_lock:
+        _live_workers.pop(process.pid, None)
+
+
+def _signal_worker_group(
+    process: subprocess.Popen[str], signal_number: int
+) -> bool:
+    """Signal a worker's whole process group, where the platform allows it.
+
+    Signalling the *group* is the difference between stopping a run and
+    leaving a headless browser behind: the engine starts a driver executable
+    which starts a browser, and only the group reaches all three.  The group
+    exists because :func:`_spawn_worker` asked for one.
+
+    Args:
+        process: The worker to signal.
+        signal_number: The signal to send.
+
+    Returns:
+        ``True`` when the group was signalled, ``False`` when this platform
+        has no process groups or the group could no longer be resolved -- in
+        which case the caller falls back to the process itself.
+    """
+    if not _HAS_PROCESS_GROUPS:
+        return False
+    try:
+        os.killpg(os.getpgid(process.pid), signal_number)
+    except OSError as error:
+        # Includes ProcessLookupError, which simply means it has already gone.
+        logger.debug(
+            "Could not signal the process group of worker %d: %s",
+            process.pid,
+            error,
+        )
+        return False
+    return True
+
+
+def _terminate_worker(
+    process: subprocess.Popen[str],
+    *,
+    grace_seconds: float = _TERMINATION_GRACE_SECONDS,
+) -> bool:
+    """Stop one worker and its children, and **wait** for it.
+
+    Polite first: ``SIGTERM`` to the worker's process group, so the engine
+    can close its driver session and write what it has.  Then a bounded
+    grace, then a kill.  Waiting after each signal is not optional -- a
+    cleanup that returns while the process it signalled is still running is
+    exactly how a browser outlives its run.
+
+    Args:
+        process: The worker to stop.
+        grace_seconds: How long it gets to exit before it is killed, and
+            again after the kill before the attempt is reported as failed.
+
+    Returns:
+        ``True`` if the worker was running and has now been stopped,
+        ``False`` if it had already exited.
+    """
+    if process.poll() is not None:
+        return False
+
+    logger.warning("Stopping worker process %d", process.pid)
+    if not _signal_worker_group(process, signal.SIGTERM):
+        try:
+            process.terminate()
+        except OSError as error:
+            logger.debug("Could not terminate worker %d: %s", process.pid, error)
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "Worker process %d did not exit within %.0fs; killing it",
+            process.pid,
+            grace_seconds,
+        )
+    else:
+        return True
+
+    if not _signal_worker_group(process, _KILL_SIGNAL):
+        try:
+            process.kill()
+        except OSError as error:
+            logger.debug("Could not kill worker %d: %s", process.pid, error)
+    try:
+        process.wait(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        # Unkillable, which on POSIX means stuck in uninterruptible I/O.
+        # Reported rather than waited on forever: a run must not hang inside
+        # its own cleanup.
+        logger.error(
+            "Worker process %d could not be stopped and may still be running",
+            process.pid,
+        )
+    return True
+
+
+def terminate_live_workers(
+    *, grace_seconds: float = _TERMINATION_GRACE_SECONDS
+) -> int:
+    """Stop every worker subprocess this process started, and wait for them.
+
+    The cancellation half of the interrupt contract.  Each supervision mode
+    calls it when an interrupt unwinds it -- the sequential path in this
+    process, and the pool task inside each pool worker, so a pool process
+    that is stopped takes its engine subprocess with it instead of orphaning
+    it.  A worker is in its own process group, which means it does **not**
+    receive the ``Ctrl-C`` the terminal delivers to this one; that is
+    deliberate (the engine must not be interrupted mid-write by a signal
+    aimed at the supervisor) and it is precisely why this function exists.
+
+    Idempotent, and safe when nothing is running: the registry is then empty
+    and the call returns ``0``.
+
+    Args:
+        grace_seconds: How long each worker gets between the termination
+            request and the kill.
+
+    Returns:
+        How many workers were still running and have now been stopped.
+    """
+    with _live_workers_lock:
+        processes = list(_live_workers.values())
+
+    stopped = 0
+    for process in processes:
+        try:
+            if _terminate_worker(process, grace_seconds=grace_seconds):
+                stopped += 1
+        except OSError as error:
+            # Never raised onward: this runs while an interrupt is unwinding,
+            # where an exception would replace what the run was reporting.
+            logger.warning(
+                "Could not stop worker process %d: %s", process.pid, error
+            )
+        finally:
+            _forget_worker(process)
+
+    if stopped:
+        logger.warning("Stopped %d worker process(es) still running", stopped)
+    return stopped
+
+
+def _reraise_termination_as_exit(
+    signal_number: int, frame: FrameType | None
+) -> None:
+    """Turn a termination signal into an exception, so cleanup can run.
+
+    Installed by :func:`_run_shard_task` for the duration of one shard, and
+    for one reason: a pool worker terminated on the default disposition dies
+    *immediately*, with no opportunity to stop the engine subprocess it
+    started, and that subprocess -- in its own process group -- would survive
+    as an orphaned browser.  Raising instead unwinds the task through its own
+    handler, which stops the engine and waits for it before the process
+    leaves with the conventional ``128 + signal`` status.
+
+    Args:
+        signal_number: The signal that arrived.
+        frame: The interrupted frame.  Unused; part of the handler signature
+            :func:`signal.signal` requires.
+
+    Raises:
+        SystemExit: Always, carrying ``_SIGNAL_EXIT_BASE + signal_number``.
+
+    Notes:
+        POSIX only in effect.  Windows terminates a process without
+        delivering a signal, so there the pool worker dies outright and its
+        engine subprocess is left to exit on its own; the shard is then
+        reported dead from its missing result file, which is the documented
+        outcome either way.
+    """
+    raise SystemExit(_SIGNAL_EXIT_BASE + signal_number)
+
+
+def _install_termination_handler() -> Any:
+    """Make ``SIGTERM`` raise :exc:`SystemExit` and return what it replaced.
+
+    Returns:
+        The previous handler, to be given back to
+        :func:`_restore_termination_handler`, or ``None`` when no handler
+        could be installed -- which happens off the main thread, where
+        :func:`signal.signal` refuses, and is not an error here: the
+        cancellation path still works, it simply loses the SIGTERM case.
+    """
+    try:
+        return signal.signal(signal.SIGTERM, _reraise_termination_as_exit)
+    except (OSError, ValueError) as error:
+        logger.debug("SIGTERM handler not installed: %s", error)
+        return None
+
+
+def _suppress_termination_signal() -> None:
+    """Stop a further ``SIGTERM`` interrupting a cleanup already under way.
+
+    A supervisor stopping a pool signals every worker, and a pool that then
+    notices one worker has died signals the rest again on its own account.
+    **Measured**: those repeats land inside a worker's cleanup and abandon it
+    half-finished, leaving the engine subprocess -- and the browser it drives
+    -- running after the run is over.  Ignoring the signal for the moment the
+    cleanup takes is what makes the cleanup complete; a kill still reaches
+    this process unconditionally, so nothing here can outlive its supervisor.
+
+    Returns:
+        ``None``.  A platform that will not let the disposition be changed
+        leaves the cleanup interruptible, which is logged at ``DEBUG`` and is
+        not an error.
+    """
+    try:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    except (OSError, ValueError) as error:
+        logger.debug("SIGTERM not suppressed during cleanup: %s", error)
+
+
+def _restore_termination_handler(previous: Any) -> None:
+    """Give ``SIGTERM`` back the handler it had.
+
+    Args:
+        previous: The value :func:`_install_termination_handler` returned.
+            ``None`` means there is nothing to restore, either because
+            installation failed or because the disposition in place was not
+            one Python had set.
+
+    Returns:
+        ``None``.
+    """
+    if previous is None:
+        return
+    try:
+        signal.signal(signal.SIGTERM, previous)
+    except (OSError, ValueError) as error:
+        logger.debug("SIGTERM handler not restored: %s", error)
+
+
+def _process_group_keywords() -> dict[str, Any]:
+    """Return the :class:`subprocess.Popen` keywords that isolate a worker.
+
+    A worker gets its own process group so that stopping it stops everything
+    it started, and so that a ``Ctrl-C`` aimed at this process does not tear
+    the engine down mid-write behind the supervisor's back.
+
+    Returns:
+        ``{"start_new_session": True}`` on POSIX,
+        ``{"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}`` on Windows,
+        and an empty mapping on a platform offering neither -- where the
+        launch still works and only the group isolation is unavailable.
+    """
+    if _HAS_PROCESS_GROUPS:
+        return {"start_new_session": True}
+    # Read with getattr because the attribute exists on Windows only, and
+    # referring to it directly would fail to import elsewhere.
+    creation_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", None)
+    if creation_flags is None:
+        return {}
+    return {"creationflags": creation_flags}
+
+
+def _relay_stream(
+    stream: IO[str], tag: str, level: int, retained: deque[str]
+) -> None:
+    """Relay one worker stream to the log, line by line, as it arrives.
+
+    Runs in its own thread, one per stream, because a worker writes to both
+    and draining them in sequence would deadlock the moment the stream not
+    being read filled its pipe buffer.  Blank lines are dropped -- behave
+    emits many -- and every other line is logged immediately at ``level``, so
+    the record reaches the console handler while the worker is still running.
+
+    Args:
+        stream: The worker's text-mode pipe.
+        tag: Shard label the line is prefixed with, which is what keeps
+            concurrent shards readable.
+        level: ``logging.INFO`` for standard output, ``logging.WARNING`` for
+            standard error, which is the stream split AAP 0.4.1 requires.
+        retained: Bounded tail the relayed lines are also appended to.
+
+    Returns:
+        ``None``.  Returns at the pipe's EOF, which is the worker's exit.
+    """
+    try:
+        # iter(readline, "") rather than iterating the file object: it is
+        # explicit that a line is taken the moment it is complete.
+        for raw_line in iter(stream.readline, ""):
+            line = raw_line.rstrip("\r\n")
+            if not line.strip():
+                continue
+            retained.append(line)
+            logger.log(level, "[%s] %s", tag, line)
+    except (OSError, ValueError) as error:
+        # The pipe was closed under the reader -- what a killed worker and a
+        # closed stream both look like from here.  Never fatal: relayed
+        # output is diagnostics, and the shard's classification comes from
+        # its exit status and its result file.
+        logger.debug("Output relay for %s ended early: %s", tag, error)
+
+
+def _close_worker_streams(process: subprocess.Popen[str]) -> None:
+    """Close a finished worker's pipes.
+
+    :meth:`subprocess.Popen.wait` leaves them open -- only
+    :meth:`~subprocess.Popen.communicate` closes them -- so a run of many
+    shards would otherwise accumulate two descriptors per worker.
+
+    Args:
+        process: The worker whose pipes are no longer needed.
+
+    Returns:
+        ``None``.
+    """
+    for stream in (process.stdout, process.stderr):
+        if stream is None:
+            continue
+        try:
+            stream.close()
+        except OSError as error:
+            logger.debug("Could not close a worker pipe: %s", error)
+
+
+def _spawn_worker(command: Sequence[str], cwd: Path) -> _RelayedWorker:
+    """Launch one worker, relay its output as it arrives, and wait for it.
+
+    The default implementation behind :func:`run_suite`'s ``spawn`` seam, and
+    the only place in this module that starts a process.
+
+    Three properties, each of them load-bearing:
+
+    * **The output is live.**  Both pipes are drained by their own reader
+      thread and every line is logged the moment it is complete, at
+      ``INFO`` for stdout and ``WARNING`` for stderr, so the stream split in
+      AAP 0.4.1 holds *during* the run rather than after it.  The child's own
+      buffering is switched off for the same reason.  What the return value
+      carries is a bounded tail, never the whole transcript.
+    * **The child is isolated.**  It runs in its own process group, so
+      stopping it stops the driver and browser it started, and a ``Ctrl-C``
+      delivered to this process does not reach it behind the supervisor's
+      back.  :func:`terminate_live_workers` is the only thing that stops it.
+    * **It is accounted for.**  The worker is in the registry from the moment
+      it exists until it has been waited for, so an interrupt on any thread
+      can find and reclaim it.
 
     Args:
         command: The argument list from :func:`build_worker_command`.  Passed
@@ -1054,49 +2450,203 @@ def _spawn_worker(
         cwd: The run base.
 
     Returns:
-        The completed process, with output captured as text.
+        The finished worker: its status, a bounded tail of each stream, and
+        the marker that says its output has already been relayed.
+
+    Raises:
+        OSError: If the process cannot be started at all.
+            :func:`_run_one_shard` records that as a dead shard.
+        BaseException: An interrupt that arrives while waiting is re-raised,
+            after the worker has been stopped and waited for.
 
     Notes:
-        ``check=False`` is essential rather than incidental: behave exits
-        non-zero when scenarios fail, and :func:`subprocess.run` would raise
-        on that, converting a test outcome into an exception in direct
-        violation of ``testFailureIgnore=true`` (``pom.xml:25``).
+        There is no ``check`` here and no equivalent of it: behave exits
+        non-zero when scenarios fail, and converting that into an exception
+        would put a test outcome into the exit status in direct violation of
+        ``testFailureIgnore=true`` (``pom.xml:25``).  A **negative** status,
+        which POSIX uses for killed-by-signal, is the one the caller treats
+        as death.
 
-        No timeout is imposed.  A browser suite's duration is not predictable
-        -- this one alone carries seventeen fixed sleeps -- and surefire
-        imposed none either, so a limit invented here could only kill
-        legitimate runs.
+        No timeout is imposed, and no retry.  A browser suite's duration is
+        not predictable -- this one alone carries seventeen fixed sleeps --
+        and surefire imposed none either, so a limit invented here could only
+        kill legitimate runs.  A hung worker is stopped by the operator's
+        interrupt, which the cancellation path above turns into a clean stop.
     """
-    # The suppression on the call below is deliberate: the argv is fixed, no
-    # shell is involved, and the program is this very interpreter rather than
-    # anything a caller supplied.
-    return subprocess.run(
+    # A copy, never a mutation of this process's own environment: the child
+    # inherits everything the run was started with, plus the one variable
+    # that keeps its output unbuffered.
+    environment = dict(os.environ)
+    environment[_UNBUFFERED_ENV_VAR] = _UNBUFFERED_ENV_VALUE
+
+    # The argv is fixed, no shell is involved, and the program is this very
+    # interpreter rather than anything a caller supplied.
+    process = subprocess.Popen(
         list(command),
         cwd=str(cwd),
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
+        bufsize=1,
+        env=environment,
+        **_process_group_keywords(),
+    )
+    _register_worker(process)
+
+    # Read in this thread, where _run_one_shard set it; a reader thread would
+    # see the default, because a new thread starts with an empty context.
+    tag = _shard_output_label.get() or f"pid {process.pid}"
+    stdout_tail: deque[str] = deque(maxlen=_RETAINED_OUTPUT_LINES)
+    stderr_tail: deque[str] = deque(maxlen=_RETAINED_OUTPUT_LINES)
+    readers: list[threading.Thread] = []
+
+    try:
+        for stream, level, retained, stream_name in (
+            (process.stdout, logging.INFO, stdout_tail, "out"),
+            (process.stderr, logging.WARNING, stderr_tail, "err"),
+        ):
+            if stream is None:
+                continue
+            reader = threading.Thread(
+                target=_relay_stream,
+                args=(stream, tag, level, retained),
+                name=f"{_SHARD_THREAD_PREFIX}-{stream_name}-{process.pid}",
+                daemon=True,
+            )
+            reader.start()
+            readers.append(reader)
+        returncode = process.wait()
+    except BaseException:
+        # Everything between the launch and the wait is covered, not just the
+        # wait: an interrupt, or a reader thread that could not be started at
+        # all, would otherwise leave a live child in its own process group
+        # that nothing is left to wait for.  So it is stopped and waited for
+        # here, and the exception travels on untouched.
+        _terminate_worker(process)
+        raise
+    finally:
+        _forget_worker(process)
+        for reader in readers:
+            # Bounded: a grandchild holding the pipe open must not keep a
+            # finished run waiting indefinitely.  The threads are daemons, so
+            # one that outlives this join cannot hold up interpreter exit.
+            reader.join(_READER_JOIN_SECONDS)
+        _close_worker_streams(process)
+
+    return _RelayedWorker(
+        returncode=returncode,
+        stdout="\n".join(stdout_tail),
+        stderr="\n".join(stderr_tail),
     )
 
 
 def _relay_output(plan: ShardPlan, process: WorkerProcess) -> None:
-    """Relay one worker's captured output, tagged with its shard index.
+    """Relay a worker's output after the fact, tagged, sanitized and at level.
 
-    The tag is what keeps concurrent output readable.  Levels follow the
-    stream split ``app/logging_config.py`` installs, so the engine's progress
-    reaches stdout and its diagnostics reach stderr, exactly as the CLI
-    contract requires.
+    Nothing is printed for a worker whose output was already relayed live --
+    see ``process`` below.  For one that was not, every non-blank physical line of the child's ``stdout``, then every
+    non-blank physical line of its ``stderr``, becomes exactly one parent
+    record carrying ``[shard N]``.  That tag on *every* line is what makes
+    concurrent output attributable without tracing, and the relay is the only
+    place a worker's text enters the parent log.
+
+    **No line is trusted as log text.**  What arrives here is whatever the
+    engine, a driver, a page object or a step printed, so each line is
+    rendered by :func:`~app.logging_config.render_worker_line` -- the single
+    implementation of that rendering in this port, in the module that owns
+    the console contract -- before it reaches a record:
+
+    * *Control-safe, and that is what makes the tag a guarantee.*  Terminal
+      escape sequences are removed and every control character is spelled out
+      printably, so a child line containing ``\\r\\n``, ``U+0085`` or
+      ``U+2028`` can no longer break itself into a second, untagged parent
+      line, and a ``CSI`` sequence can no longer recolour or erase what the
+      console already printed.  ``splitlines`` alone never gave that: it
+      splits on the breaks it recognises and leaves a record forgeable by the
+      ones it does not (CWE-117).
+    * *Bounded*, at :data:`~app.logging_config.RELAYED_LINE_LIMIT`
+      characters, with a suffix naming how many were dropped.  A child can
+      emit a single enormous line -- an embedded screenshot, a dumped DOM, a
+      driver's full capability payload -- and forwarding it whole would bury
+      the diagnostics the run is being judged on.  The bound is per line, so
+      nothing is summarised and no line is dropped.
+    * *Redacted* of credential-shaped content: ``key=value`` and
+      ``key: value`` for secret-ish keys, URL userinfo, ``Bearer`` tokens,
+      base64 ``data:`` payloads, long opaque blobs, and a quoted value
+      adjacent to a credential keyword -- which is the shape of this suite's
+      own ``User enters "<username>" username`` step text [Login.feature:15],
+      so a child diagnostic quoting a substituted step no longer carries the
+      account into a CI console.
+
+    **Redaction is log-only, and deliberately so.**  It applies to the parent
+    record built here and to nothing else: not to the worker's argv, not to
+    the per-worker result document, and not to any of the four artifacts.
+    Specification 0.8's test-data note is emphatic that the Gherkin
+    ``Examples`` credentials are pre-existing fixture data for an external
+    instance which no agent may redact, parameterize or rotate, and parity
+    requires the features, the JSON, the rerun manifest and both HTML reports
+    to carry them verbatim.  A console log is not one of those artifacts.
+
+    **Severity survives the process boundary.**  The child is a separate
+    interpreter with its own logging state, and behave's default
+    ``logging_format`` is ``"LOG_%(levelname)s:%(name)s: %(message)s"``
+    installed through ``basicConfig`` (measured against the pinned behave
+    1.3.3), so a child record arrives at column 0 as
+    ``LOG_ERROR:app.reporting.screenshots: ...`` -- on the child's ``stderr``
+    and again inside the ``CAPTURED LOG:`` block on its ``stdout``.  That
+    measured, anchored shape is why a leading token can be read as a level at
+    all.  Relaying every ``stderr`` line at ``WARNING`` -- what this function
+    used to do -- flattened exactly the records that matter: the screenshot
+    helper's suppressed-capture ``logger.exception``, a formatter failure, a
+    system error, all indistinguishable from an ordinary engine warning.  So
+    the stream supplies a **floor**, never a ceiling: ``INFO`` for ``stdout``
+    and ``WARNING`` for ``stderr``, and the record is emitted at
+    ``max(child_level, floor)``.  An ``ERROR`` or ``CRITICAL`` token is
+    honoured on either stream; a ``DEBUG`` or ``INFO`` token on ``stderr``
+    cannot pull a diagnostic below ``WARNING``, which both keeps the
+    published stream split intact and stops a child from muting itself.
+
+    The child's own text is otherwise left alone: the ``LOG_ERROR:`` token
+    stays, naming the child logger that spoke, and nothing is re-wrapped,
+    reordered, summarised or suppressed.  The engine's diagnostics are
+    contract-required output -- sanitizing them is the fix; silencing them
+    would be a regression.
 
     Args:
-        plan: The shard whose output this is.
-        process: The completed worker.
+        plan: The shard whose output this is.  Only its ``index`` is read, as
+            the tag.
+        process: The completed worker.  One carrying a true
+            ``output_relayed`` attribute -- every worker the real launch
+            produces -- has already had every line relayed as it arrived, and
+            nothing is printed for it; printing the retained tail here would
+            show those lines twice.  A stubbed
+            :class:`subprocess.CompletedProcess` from the ``spawn`` seam
+            carries no such marker and is relayed here, exactly as before.
+            ``stdout`` and ``stderr`` are read defensively -- that seam admits
+            any object shaped like :class:`WorkerProcess`, and a stub may
+            carry ``None`` for either.  Relaying reports and decides nothing:
+            a shard's classification and the exit contract come from
+            :class:`ShardResult` alone.
+
+    Returns:
+        ``None``.
     """
+    if getattr(process, "output_relayed", False):
+        return
     for line in (getattr(process, "stdout", None) or "").splitlines():
-        if line.strip():
-            logger.info("[shard %d] %s", plan.index, line)
+        if not line.strip():
+            continue
+        level, safe_text = render_worker_line(
+            line, default_level=logging.INFO
+        )
+        logger.log(level, "[shard %d] %s", plan.index, safe_text)
     for line in (getattr(process, "stderr", None) or "").splitlines():
-        if line.strip():
-            logger.warning("[shard %d] %s", plan.index, line)
+        if not line.strip():
+            continue
+        level, safe_text = render_worker_line(
+            line, default_level=logging.WARNING
+        )
+        logger.log(level, "[shard %d] %s", plan.index, safe_text)
 
 
 def _run_one_shard(
@@ -1134,25 +2684,31 @@ def _run_one_shard(
         spawn: The launch seam.
 
     Returns:
-        The shard's result.  Never raises: a launch failure is recorded, not
-        propagated, so one bad worker cannot abort a run.
+        The shard's result.  No :exc:`Exception` is propagated: a launch
+        failure is recorded, so one bad worker cannot abort a run.
+
+    Raises:
+        BaseException: An interrupt, and only an interrupt, travels through
+            here untouched -- :func:`_spawn_worker` has stopped the worker and
+            waited for it by then.  Stopping a run is the operator's decision
+            and is never turned into a shard outcome.
     """
     command = build_worker_command(plan, tags=tags, browser=browser, dry_run=dry_run)
     logger.info(
         "Shard %d starting: %d scenario(s)", plan.index, len(plan.locations)
     )
+    # Published for the launch to read, because the shard's identity cannot
+    # travel through the two-argument spawn seam; see _shard_output_label.
+    label_token = _shard_output_label.set(f"shard {plan.index}")
     try:
         process = spawn(command, cwd)
     except Exception as error:  # noqa: BLE001
         # Deliberately broad: a launch failure is data, not an abort.  The
         # documented case is OSError, but whatever a launch raises, one bad
         # worker must not take the other shards down with it.
-        return ShardResult(
-            plan=plan,
-            returncode=None,
-            dead=True,
-            reason=f"{_describe(plan)} could not be started ({error!r})",
-        )
+        return _dead_shard(plan, f"could not be started ({error!r})")
+    finally:
+        _shard_output_label.reset(label_token)
 
     _relay_output(plan, process)
     returncode = getattr(process, "returncode", None)
@@ -1160,18 +2716,522 @@ def _run_one_shard(
         # Killed by a signal.  On Windows a killed process reports a large
         # positive status instead, which is indistinguishable from an ordinary
         # failure here; the result-file check catches that case at merge time.
-        return ShardResult(
-            plan=plan,
+        return _dead_shard(
+            plan,
+            f"was terminated by signal {-returncode} and its results are "
+            "incomplete",
             returncode=returncode,
-            dead=True,
-            reason=(
-                f"{_describe(plan)} was terminated by signal {-returncode} "
-                "and its results are incomplete"
-            ),
         )
 
     # Alive, whatever the status: see the trap above.
     return ShardResult(plan=plan, returncode=returncode, dead=False, reason=None)
+
+
+def _run_shard_task(
+    plan: ShardPlan,
+    tags: str | None,
+    browser: str | None,
+    dry_run: bool,
+    cwd: Path,
+    verbose: bool,
+) -> ShardResult:
+    """Run one shard inside a pool worker process and return its result.
+
+    **This is the function the process pool executes.**  It is a module-level
+    function taking only picklable arguments because it has to be: the start
+    method is ``forkserver`` on Linux and ``spawn`` on Windows, and both
+    re-import this module in the child and resolve the call by name.  A
+    closure, a bound method, or the injectable ``spawn`` seam cannot make that
+    crossing -- which is exactly why the seam keeps a thread path, see
+    :func:`_run_shards_in_threads`.  Importing this module in a child is safe
+    and cheap because it has no import-time side effects: it defines names and
+    opens nothing.
+
+    The child is a **new process**, so it configures the console contract
+    itself rather than inheriting it; what it does inherit is the parent's
+    stdout and stderr *descriptors*, which is what makes that work.  Its first
+    act is therefore to install this port's handler split, so a line it
+    relays lands on the same stream it would have landed on had the shard run
+    in the parent -- ``INFO`` to stdout, ``WARNING`` and above to stderr (AAP
+    0.4.1).  :mod:`app.logging_config` is imported inside the function rather
+    than at module scope so that importing this module -- which every child
+    does, and which selection and merging in the parent also do -- stays as
+    cheap as it is today.
+
+    Args:
+        plan: The shard to run.  Its ``output_path`` was computed in the
+            parent, so the child writes exactly where the parent will look.
+        tags: The user's tag expression, or ``None``.
+        browser: Browser override, or ``None``.
+        dry_run: Whether to pass ``--dry-run``.
+        cwd: The run base, which the worker subprocess runs in.
+        verbose: Whether the parent's logger was at ``DEBUG``.  Carried across
+            the boundary because the child cannot read the parent's logger,
+            and dropping it would silently downgrade a verbose run.
+
+    Returns:
+        The shard's result, pickled back to the parent.  A launch failure and
+        a non-zero engine status are both recorded rather than raised -- see
+        :func:`_run_one_shard`.
+
+    Raises:
+        BaseException: Re-raised after the engine subprocess this task
+            started has been stopped and waited for.  Reached when the pool
+            worker is terminated by the parent's cancellation path (as
+            :exc:`SystemExit`, via :func:`_reraise_termination_as_exit`) or
+            when a ``Ctrl-C`` reaches the whole process group.
+    """
+    from app.logging_config import configure_logging  # noqa: PLC0415,RUF100
+
+    configure_logging(verbose=verbose)
+    previous_handler = _install_termination_handler()
+    try:
+        return _run_one_shard(
+            plan,
+            tags=tags,
+            browser=browser,
+            dry_run=dry_run,
+            cwd=cwd,
+            spawn=_spawn_worker,
+        )
+    except BaseException:
+        # This pool worker is going away.  Its engine subprocess is in its
+        # own process group and would survive as an orphan -- with a browser
+        # attached -- so it is stopped and waited for first, under a
+        # suppressed SIGTERM so a repeat cannot abandon that half-done.  The
+        # exception itself is untouched: an interrupt is the operator's
+        # decision and never becomes a status.
+        _suppress_termination_signal()
+        terminate_live_workers()
+        raise
+    finally:
+        _restore_termination_handler(previous_handler)
+
+
+def _ordered_results(
+    plans: Sequence[ShardPlan], collected: dict[int, ShardResult]
+) -> list[ShardResult]:
+    """Return exactly one result per plan, in shard order.
+
+    This enforces the invariant ``app/cli.py``'s exit contract rests on:
+    **every plan leaves supervision with a result.**  A plan that reached
+    neither the collected results nor an exception handler -- which no known
+    path produces -- would otherwise raise :exc:`KeyError` out of a run and
+    become an undocumented exit ``1``; here it becomes a dead shard like any
+    other supervision failure.
+
+    Args:
+        plans: The shards, in shard order.
+        collected: Results by shard index, in any order.
+
+    Returns:
+        One result per plan, ordered by shard index rather than by completion,
+        so everything downstream is deterministic.
+    """
+    ordered: list[ShardResult] = []
+    for plan in plans:
+        result = collected.get(plan.index)
+        if result is None:
+            result = _dead_shard(plan, "was never supervised to completion")
+            logger.error("%s", result.reason)
+        ordered.append(result)
+    return ordered
+
+
+def _pool_process_count(shard_count: int) -> int:
+    """Size the process pool for a shard count.
+
+    Args:
+        shard_count: How many shards will be submitted.
+
+    Returns:
+        ``shard_count``, at least ``1`` and on Windows at most
+        :data:`_MAX_POOL_PROCESSES`, above which the standard library refuses
+        to build a pool at all.
+    """
+    if sys.platform == _WINDOWS_PLATFORM:
+        return max(1, min(shard_count, _MAX_POOL_PROCESSES))
+    return max(1, shard_count)
+
+
+def _child_process_pids() -> frozenset[int]:
+    """Return the pids of the multiprocessing children this process owns.
+
+    Read through :func:`multiprocessing.active_children`, which is the public
+    API for it: the executor's own collection of processes is private, and
+    reaching into it would couple this module to standard-library internals
+    that change between releases.
+
+    Returns:
+        The pids currently reported, omitting any child whose pid is not yet
+        assigned.
+    """
+    return frozenset(
+        child.pid
+        for child in multiprocessing.active_children()
+        if child.pid is not None
+    )
+
+
+def _terminate_new_children(
+    preexisting: frozenset[int],
+    *,
+    grace_seconds: float = _TERMINATION_GRACE_SECONDS,
+) -> int:
+    """Terminate and join the multiprocessing children started since a snapshot.
+
+    Only children **absent** from the snapshot are touched, so a host
+    application that already had multiprocessing children when it called
+    :func:`run_suite` keeps them: this module reclaims what it started and
+    nothing else.  Each one is asked to stop and then **waited for**, because
+    returning while a signalled process is still alive is the behaviour that
+    leaves a browser running after the run is over.
+
+    **The three phases are not cosmetic, and the order is the fix.**  Asking
+    one child to stop, waiting for it and killing it before turning to the
+    next was measured to lose the other children's cleanup: a pool that
+    notices one worker has died terminates the rest itself, and those repeated
+    signals arrive in the middle of another worker's own unwinding and abandon
+    it half-done -- leaving exactly the orphaned engine process this function
+    exists to prevent.  So every child is signalled *first*, and none is
+    killed while another may still be cleaning up.
+
+    Args:
+        preexisting: Pids from :func:`_child_process_pids`, taken before the
+            pool was created.
+        grace_seconds: How long the children get, **together**, between the
+            termination request and the kill, so the whole cancellation is
+            bounded by the grace rather than by the number of workers.
+
+    Returns:
+        How many children were asked to stop.
+    """
+    children = [
+        child
+        for child in multiprocessing.active_children()
+        if child.pid not in preexisting
+    ]
+    if not children:
+        return 0
+
+    # Phase one: ask all of them to stop, before waiting for any of them.
+    for child in children:
+        try:
+            child.terminate()
+        except (OSError, ValueError) as error:
+            # Never raised onward: this runs while an interrupt or a
+            # supervision failure is being reported.
+            logger.warning(
+                "Could not stop worker process %s: %s", child.pid, error
+            )
+
+    # Phase two: wait for all of them against one shared deadline.  Each has
+    # its own engine subprocess to stop and wait for, which is what the grace
+    # is for.
+    deadline = time.monotonic() + grace_seconds
+    for child in children:
+        child.join(max(0.0, deadline - time.monotonic()))
+
+    # Phase three: whatever is left ignored the request or is stuck.
+    for child in children:
+        if not child.is_alive():
+            continue
+        logger.warning(
+            "Worker process %s did not stop within %.0fs; killing it",
+            child.pid,
+            grace_seconds,
+        )
+        try:
+            child.kill()
+            child.join(grace_seconds)
+        except (OSError, ValueError) as error:
+            logger.warning(
+                "Could not kill worker process %s: %s", child.pid, error
+            )
+
+    logger.warning("Stopped %d worker process(es) of this run", len(children))
+    return len(children)
+
+
+def _abandon_executor(
+    executor: Executor, *, pool_children: frozenset[int] | None = None
+) -> None:
+    """Stop an executor now, without waiting for the work still in flight.
+
+    ``shutdown(wait=True)`` -- which is what leaving a ``with`` block does --
+    is precisely wrong here: it joins the workers, so a single hung child
+    would hold the interrupt, the merge and the reporting open indefinitely.
+    So the executor is told to stop and to cancel whatever it has not started,
+    and the children are then reclaimed explicitly.
+
+    Args:
+        executor: The executor to abandon.
+        pool_children: For a process pool, the pids that existed before it was
+            created, from :func:`_child_process_pids`; every child started
+            since is terminated and joined.  ``None`` for a thread pool, which
+            owns no child process of its own.
+
+    Returns:
+        ``None``.
+    """
+    executor.shutdown(wait=False, cancel_futures=True)
+    # Workers this process started itself -- the sequential and seam paths --
+    # first, then the pool's children, each of which stops its own worker as
+    # it goes.
+    terminate_live_workers()
+    if pool_children is not None:
+        _terminate_new_children(pool_children)
+
+
+def _run_shards_in_pool(
+    plans: Sequence[ShardPlan],
+    *,
+    tags: str | None,
+    browser: str | None,
+    dry_run: bool,
+    cwd: Path,
+) -> list[ShardResult]:
+    """Run the shards through a process pool -- the model D04 prescribes.
+
+    One :class:`~concurrent.futures.ProcessPoolExecutor` process per shard
+    (bounded by :func:`_pool_process_count`), each running
+    :func:`_run_shard_task`, each of those launching and supervising its own
+    engine subprocess.  Neither ``mp_context`` nor ``max_tasks_per_child`` is
+    passed: the platform's default start method is the correct one here, and a
+    task limit would buy a fresh interpreter per shard for isolation this
+    module does not need, since a worker's real state lives in its behave
+    subprocess rather than in the pool process.
+
+    **Nothing escapes this function.**  Pool construction, submission, a
+    worker process lost mid-shard, and a task that somehow failed are each
+    converted into a named dead shard, and results already collected are
+    kept: a supervision failure is a documented non-zero class with artifacts
+    written from the shards that completed, never an undocumented exit ``1``.
+    The single exception is a :exc:`BaseException` -- an interrupt -- which
+    cancels the pool, reclaims its children and is then re-raised untouched,
+    because stopping a run is the operator's decision and this module turns no
+    such decision into a status.
+
+    **One requirement this places on the caller**, and it is the standard
+    :mod:`multiprocessing` one rather than anything of this module's: under
+    ``forkserver`` and ``spawn`` the child imports the parent's ``__main__``,
+    so that module must be import-safe.  The ``run-tests`` console script is
+    (its body sits under an ``if __name__ == "__main__"`` guard, verified in
+    the installed script), and a program embedding :func:`run_suite` must be
+    too.
+
+    Args:
+        plans: The shards, in shard order.  Two or more; a single shard is the
+            sequential path.
+        tags: The user's tag expression, or ``None``.
+        browser: Browser override, or ``None``.
+        dry_run: Whether to pass ``--dry-run``.
+        cwd: The run base, which each worker runs in.
+
+    Returns:
+        One result per shard, ordered by shard index.
+
+    Raises:
+        BaseException: Re-raised, and only for an interrupt: the pool is shut
+            down without waiting and every child it started is terminated and
+            joined first.
+    """
+    collected: dict[int, ShardResult] = {}
+    # Taken before the pool exists, so the cancellation path can tell the
+    # pool's own children from any the caller already had.
+    preexisting = _child_process_pids()
+    # The child cannot read the parent's logger, so verbosity travels with the
+    # task rather than being rediscovered there.
+    verbose = logger.getEffectiveLevel() <= logging.DEBUG
+    size = _pool_process_count(len(plans))
+
+    try:
+        executor = ProcessPoolExecutor(max_workers=size)
+    except (OSError, RuntimeError, ValueError) as error:
+        # Nothing can run, and this must still be an outcome rather than an
+        # exception: every shard becomes a named dead shard, which app/cli.py
+        # maps to its dead-worker status.
+        logger.error(
+            "A worker pool of %d process(es) could not be created (%r); no "
+            "shard was executed",
+            size,
+            error,
+        )
+        return [
+            _dead_shard(
+                plan,
+                f"could not be supervised: a worker pool of {size} "
+                f"process(es) could not be created ({error!r})",
+            )
+            for plan in plans
+        ]
+
+    logger.info(
+        "Supervising %d shard(s) in a pool of %d worker process(es)",
+        len(plans),
+        size,
+    )
+    futures: dict[Future[ShardResult], ShardPlan] = {}
+    try:
+        for plan in plans:
+            try:
+                future = executor.submit(
+                    _run_shard_task, plan, tags, browser, dry_run, cwd, verbose
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                # RuntimeError covers a pool already shut down and, as its
+                # subclass, a pool broken by an earlier submission.
+                collected[plan.index] = _dead_shard(
+                    plan,
+                    f"could not be submitted to the worker pool ({error!r})",
+                )
+            else:
+                futures[future] = plan
+
+        # Results are taken as they complete, so a dead shard is reported
+        # while the others are still running.
+        for future in as_completed(futures):
+            plan = futures[future]
+            try:
+                result = future.result()
+            except BrokenProcessPool as error:
+                # The pool process holding this shard died outright -- killed
+                # by the OS, or its interpreter crashed.  Every other pending
+                # future fails the same way and each is reported against its
+                # own shard.
+                result = _dead_shard(
+                    plan, f"lost its worker process ({error!r})"
+                )
+            except Exception as error:  # noqa: BLE001
+                # Deliberately broad, and the last line of defence:
+                # supervision must never abort the run.
+                result = _dead_shard(
+                    plan, f"failed while being supervised ({error!r})"
+                )
+            collected[result.plan.index] = result
+    except Exception as error:  # noqa: BLE001
+        # Supervision itself failed, outside any one shard.  The pool is
+        # abandoned and every shard still without a result is recorded.
+        logger.error("The worker pool failed while supervising (%r)", error)
+        _abandon_executor(executor, pool_children=preexisting)
+        for plan in plans:
+            collected.setdefault(
+                plan.index,
+                _dead_shard(plan, f"could not be supervised ({error!r})"),
+            )
+    except BaseException:
+        _abandon_executor(executor, pool_children=preexisting)
+        raise
+    else:
+        # Every task is finished, so this join is immediate.
+        executor.shutdown(wait=True)
+
+    return _ordered_results(plans, collected)
+
+
+def _run_shards_in_threads(
+    plans: Sequence[ShardPlan],
+    *,
+    tags: str | None,
+    browser: str | None,
+    dry_run: bool,
+    cwd: Path,
+    spawn: SpawnCallable,
+) -> list[ShardResult]:
+    """Run the shards in this process, supervised by threads.
+
+    **Reached only when the caller injected a ``spawn`` seam.**  A stub is not
+    picklable and a real run therefore never comes here; what this path buys
+    is that a test can observe its own seam, in its own process, while still
+    exercising the concurrent code path.  The guarantees are identical to
+    :func:`_run_shards_in_pool`'s -- one named result per shard, nothing but
+    an interrupt escaping -- so the two are interchangeable downstream.
+
+    Args:
+        plans: The shards, in shard order.  Two or more.
+        tags: The user's tag expression, or ``None``.
+        browser: Browser override, or ``None``.
+        dry_run: Whether to pass ``--dry-run``.
+        cwd: The run base, which each worker runs in.
+        spawn: The injected launch seam.
+
+    Returns:
+        One result per shard, ordered by shard index.
+
+    Raises:
+        BaseException: Re-raised, and only for an interrupt: the pool is shut
+            down without waiting first.
+    """
+    collected: dict[int, ShardResult] = {}
+    try:
+        executor = ThreadPoolExecutor(
+            max_workers=len(plans), thread_name_prefix=_SHARD_THREAD_PREFIX
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        logger.error(
+            "A supervision pool of %d thread(s) could not be created (%r); "
+            "no shard was executed",
+            len(plans),
+            error,
+        )
+        return [
+            _dead_shard(
+                plan,
+                f"could not be supervised: a supervision pool of "
+                f"{len(plans)} thread(s) could not be created ({error!r})",
+            )
+            for plan in plans
+        ]
+
+    futures: dict[Future[ShardResult], ShardPlan] = {}
+    try:
+        for plan in plans:
+            try:
+                future = executor.submit(
+                    _run_one_shard,
+                    plan,
+                    tags=tags,
+                    browser=browser,
+                    dry_run=dry_run,
+                    cwd=cwd,
+                    spawn=spawn,
+                )
+            except (OSError, RuntimeError, ValueError) as error:
+                # A thread that cannot be started, or a pool already shut
+                # down: the shard is dead, the others carry on.
+                collected[plan.index] = _dead_shard(
+                    plan,
+                    f"could not be submitted for supervision ({error!r})",
+                )
+            else:
+                futures[future] = plan
+
+        for future in as_completed(futures):
+            plan = futures[future]
+            try:
+                result = future.result()
+            except Exception as error:  # noqa: BLE001
+                # Deliberately broad, and the last line of defence:
+                # supervision must never abort the run.
+                result = _dead_shard(
+                    plan, f"failed while being supervised ({error!r})"
+                )
+            collected[result.plan.index] = result
+    except Exception as error:  # noqa: BLE001
+        logger.error("Thread supervision failed (%r)", error)
+        _abandon_executor(executor)
+        for plan in plans:
+            collected.setdefault(
+                plan.index,
+                _dead_shard(plan, f"could not be supervised ({error!r})"),
+            )
+    except BaseException:
+        _abandon_executor(executor)
+        raise
+    else:
+        executor.shutdown(wait=True)
+
+    return _ordered_results(plans, collected)
 
 
 def _run_shards(
@@ -1185,11 +3245,23 @@ def _run_shards(
 ) -> list[ShardResult]:
     """Run every shard, concurrently, and return the results in shard order.
 
-    The concurrency unit is the **OS process** -- one subprocess per shard,
-    which is what makes this port's deviation from ``useUnlimitedThreads``
-    process-based.  The threads exist only to wait on those children, so they
-    hold no test state and do no work; a :class:`ProcessPoolExecutor` wrapped
-    around a subprocess launch would buy nothing.
+    Three paths, and which one runs is fully determined by the inputs:
+
+    * **one shard** -- the ``--workers 1`` sequential mode AAP 0.6 names.  It
+      runs in this process and builds no executor at all.
+    * **an injected ``spawn`` seam** -- threads in this process, because a
+      stub cannot be pickled across a process boundary; see
+      :func:`_run_shards_in_threads`.
+    * **anything else, which is every real run** -- the process pool AAP
+      deviation D04 prescribes; see :func:`_run_shards_in_pool`.
+
+    The concurrency unit is the **OS process** in all three: even sequentially
+    the engine runs as a child, because a Selenium session is not
+    thread-shareable and ``parallel=methods`` (``pom.xml:22``) has no
+    thread-level equivalent here.  What the pool adds over the threads it
+    replaces is that the supervision itself is a process too, so a shard's
+    engine has a parent that can be signalled, waited for and accounted for
+    independently of this one.
 
     Args:
         plans: The shards, in shard order.
@@ -1201,60 +3273,50 @@ def _run_shards(
 
     Returns:
         One result per shard, ordered by shard index rather than by completion
-        order, so everything downstream is deterministic.
+        order, so everything downstream is deterministic.  Every shard is
+        accounted for: no failure of the supervision machinery leaves a plan
+        without a result, and none of those failures is raised out of here.
+
+    Raises:
+        BaseException: Re-raised, and only for an interrupt, after the
+            children this run started have been stopped and waited for.
     """
     cwd = _run_base(base)
     if len(plans) == 1:
         # --workers 1 is the sequential mode, and takes no pool at all.
-        return [
-            _run_one_shard(
-                plans[0],
-                tags=tags,
-                browser=browser,
-                dry_run=dry_run,
-                cwd=cwd,
-                spawn=spawn,
-            )
-        ]
-
-    collected: dict[int, ShardResult] = {}
-    with ThreadPoolExecutor(
-        max_workers=len(plans), thread_name_prefix="testinium-qa-shard"
-    ) as pool:
-        futures = {
-            pool.submit(
-                _run_one_shard,
-                plan,
-                tags=tags,
-                browser=browser,
-                dry_run=dry_run,
-                cwd=cwd,
-                spawn=spawn,
-            ): plan
-            for plan in plans
-        }
-        # Output is relayed as each worker finishes, which is what keeps a
-        # long run informative rather than silent until the end.
-        for future in as_completed(futures):
-            plan = futures[future]
-            try:
-                result = future.result()
-            except Exception as error:  # noqa: BLE001
-                # Deliberately broad, and the last line of defence:
-                # supervision must never abort the run, so anything the task
-                # failed with becomes a dead shard instead of an exception.
-                result = ShardResult(
-                    plan=plan,
-                    returncode=None,
-                    dead=True,
-                    reason=(
-                        f"{_describe(plan)} failed while being supervised "
-                        f"({error!r})"
-                    ),
+        try:
+            return [
+                _run_one_shard(
+                    plans[0],
+                    tags=tags,
+                    browser=browser,
+                    dry_run=dry_run,
+                    cwd=cwd,
+                    spawn=spawn,
                 )
-            collected[result.plan.index] = result
+            ]
+        except BaseException:
+            # Only an interrupt reaches here: _run_one_shard records every
+            # Exception as a dead shard.  The worker is in its own process
+            # group, so it has to be stopped explicitly before the interrupt
+            # travels on -- and it travels on untouched, because stopping a
+            # run is the operator's decision and never a status.
+            terminate_live_workers()
+            raise
 
-    return [collected[plan.index] for plan in plans]
+    if spawn is not _spawn_worker:
+        return _run_shards_in_threads(
+            plans,
+            tags=tags,
+            browser=browser,
+            dry_run=dry_run,
+            cwd=cwd,
+            spawn=spawn,
+        )
+
+    return _run_shards_in_pool(
+        plans, tags=tags, browser=browser, dry_run=dry_run, cwd=cwd
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1507,12 +3569,27 @@ def run_suite(
     Returns:
         The outcome.  Every signal is independent and no precedence is
         encoded: exit-code precedence, when several coexist, is
-        ``app/cli.py``'s decision.
+        ``app/cli.py``'s decision.  That includes
+        :attr:`RunOutcome.infrastructure_error`, which this function sets when
+        the run's own intermediate directory could not be created -- in which
+        case nothing was executed -- or could not be removed afterwards, in
+        which case the results are still returned and only the workspace is
+        unclean.
 
     Raises:
         TagExpressionError: If ``tags`` is malformed.  The one propagating
             failure, because an invalid option value is a usage error rather
             than a test outcome; see :func:`_parse_tag_expression`.
+        BaseException: An interrupt is re-raised untouched, after this run's
+            children have been stopped and its intermediate directory
+            removed: stopping a run is the operator's decision, and this
+            module turns no such decision into an outcome.
+        SystemExit: What a ``SIGTERM`` becomes for the duration of the run,
+            for the same reason and by the same path: a handler is installed
+            around the execution phase so that a terminated supervisor
+            unwinds - stopping its engine, driver and browser and removing
+            its intermediates - instead of dying between statements and
+            orphaning them.  The previous disposition is restored afterwards.
     """
     spawn_worker: SpawnCallable = _spawn_worker if spawn is None else spawn
     # What the run records, as against what goes on the command line: the
@@ -1524,11 +3601,19 @@ def run_suite(
     else:
         selected, problems = select_scenarios(tags=tags, base=base)
 
-    # Tolerated failures: reported on stderr and survived, never raised and
-    # never counted as a dead worker.  Each leaves the run at status 0,
-    # matching the source's own tolerance of a missing configuration file.
-    for message in problems:
-        logger.error("%s", message)
+    # Tolerated failures: survived, never raised and never counted as a dead
+    # worker.  Each leaves the run at status 0, matching the source's own
+    # tolerance of a missing configuration file.
+    #
+    # They are *carried* rather than logged.  Every one of them reaches the
+    # caller verbatim on ``RunOutcome.parse_errors``, and ``app/cli.py`` is
+    # the single emitter of the record that names it - one ERROR counting
+    # them, then one naming each.  Emitting them here as well would put one
+    # incident in the CI console twice under two logger names, doubling the
+    # error count a publisher and a reader see for a run whose status the
+    # exit contract keeps at 0.  This is the module's half of the one-emitter
+    # rule stated in its docstring: a fact an outcome carries is reported by
+    # the command that reads the outcome, never by both.
     parse_errors = list(problems)
 
     selected_count = len(selected)
@@ -1566,23 +3651,25 @@ def run_suite(
         )
 
     worker_count = _effective_worker_count(workers, selected_count)
-    plans = shard_scenarios(selected, worker_count, base=base)
-    logger.info(
-        "Sharding %d scenario(s) over %d worker(s)", selected_count, len(plans)
-    )
 
+    # Prepared *before* sharding, because every shard's output path lives
+    # inside this run's own directory and the plans carry those paths.
     try:
-        prepare_workers_dir(base=base)
+        run_dir = prepare_workers_dir(base=base)
     except OSError as error:
-        # Nowhere for the workers to write, so nothing can be produced.  This
-        # is not a tolerated failure and not a dead worker: it is the
-        # empty-merge state, reached without spawning anything.
+        # Nowhere for the workers to write, so nothing can be produced and
+        # nothing is spawned.  This is neither a tolerated failure nor a dead
+        # worker: it is a failure of this port's own intermediate storage, and
+        # it is reported as one so that it cannot be mistaken -- under
+        # ``rerun`` in particular -- for a run that simply wrote no artifact.
+        # Carried on ``infrastructure_error``, not logged here: the directory
+        # path and the operating system's own reason travel in the message
+        # text, and ``app/cli.py`` names it once alongside the exit class it
+        # produces.
         message = (
-            f"{workers_dir(base)}: the per-worker directory cannot be created "
-            f"({error}); no scenario was executed"
+            f"{workers_dir(base)}: this run's per-worker directory cannot be "
+            f"created ({error}); no scenario was executed"
         )
-        logger.error("%s", message)
-        parse_errors.append(message)
         return RunOutcome(
             result_set=None,
             selected_count=selected_count,
@@ -1594,8 +3681,30 @@ def run_suite(
             rerun=rerun,
             dry_run=dry_run,
             tag_expression=recorded_tags,
+            infrastructure_error=message,
         )
 
+    plans = shard_scenarios(selected, worker_count, base=base, run_dir=run_dir)
+    logger.info(
+        "Sharding %d scenario(s) over %d worker(s) in %s",
+        selected_count,
+        len(plans),
+        run_dir,
+    )
+
+    cleanup_error: str | None = None
+    # For the duration of the run only, SIGTERM raises instead of killing this
+    # process outright.  Without it a ``kill`` of the supervisor - which is
+    # what a CI job's "abort" sends - takes the default disposition and dies
+    # between statements, leaving the engine, its driver and its browser
+    # running in their own process groups with nothing left to wait for them.
+    # Raising unwinds through the same path an interrupt takes, so the
+    # children are stopped and waited for and this run's intermediates are
+    # removed.  Installed here rather than in ``app/cli.py`` because this is
+    # the frame that owns the children; restored in the ``finally`` so a
+    # caller's own disposition survives, and a no-op off the main thread,
+    # where signal handlers cannot be installed at all.
+    previous_termination_handler = _install_termination_handler()
     try:
         shard_results = _run_shards(
             plans,
@@ -1609,20 +3718,34 @@ def run_suite(
         )
         documents, shard_results, _ = _collect_shard_documents(shard_results)
         merged = _merge_documents(documents, base=base)
+    except BaseException:
+        # An interrupt, a SIGTERM turned into one by the handler above, or a
+        # defect: every worker this run started is stopped and waited for
+        # before the exception travels on, and the ``finally`` below still
+        # removes the intermediates.
+        terminate_live_workers()
+        raise
     finally:
-        # Removed whether the merge succeeded or failed, so no intermediate
-        # worker JSON is ever left where the Jenkins publisher could see it.
-        # Idempotent, because app/cli.py removes it again in an outer finally.
-        cleanup_workers_dir(base=base)
+        _restore_termination_handler(previous_termination_handler)
+        # Removed whether the merge succeeded or failed, and whether or not an
+        # interrupt is travelling through this frame, so no intermediate
+        # worker document is ever left where the Jenkins publisher could see
+        # it.  Only *this* run's directory is removed -- a concurrent run's is
+        # neither read nor deleted -- and a failure to remove it is recorded
+        # rather than swallowed: this module owns the directory, so it owns
+        # saying whether it is gone.
+        cleanup_error = cleanup_workers_dir(base=base, directory=run_dir)
 
-    # A dead shard is reported even if the caller ignores the field, and it
-    # never suppresses artifacts: the merged set from the shards that did
-    # complete is still returned.
+    # A dead shard never suppresses artifacts: the merged set from the shards
+    # that did complete is still returned.  Each reason names its shard, its
+    # scenario count and what went wrong, and it is carried on
+    # ``RunOutcome.dead_shards`` rather than logged here - ``app/cli.py``
+    # emits one record per reason beside the status a dead shard implies, so
+    # the incident and its consequence read as one account instead of
+    # appearing twice under two logger names.
     dead_shards = tuple(
         result.reason for result in shard_results if result.dead and result.reason
     )
-    for reason in dead_shards:
-        logger.error("%s", reason)
 
     if merged is not None:
         # Only the two run-level fields the merge cannot know.  started_at,
@@ -1641,7 +3764,7 @@ def run_suite(
         result_set = merged
         # STATE TWO: scenarios were selected and not one worker file could be
         # read.  Distinct from STATE ONE above in both value and consequence -
-        # non-zero, and target/ left exactly as the clean step left it.
+        # non-zero, and the build output left as the clean step left it.
         merge_produced_nothing = merged is None
 
     logger.info(
@@ -1661,4 +3784,10 @@ def run_suite(
         rerun=rerun,
         dry_run=dry_run,
         tag_expression=recorded_tags,
+        # The run executed and produced whatever it produced; what failed is
+        # the removal of its intermediates.  Reported rather than raised, and
+        # reported *with* the results rather than instead of them, so the
+        # caller still writes the four artifacts and then declines to call the
+        # run a success.
+        infrastructure_error=cleanup_error,
     )

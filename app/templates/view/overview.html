@@ -95,10 +95,13 @@
                      passed. A scenario with no steps is unknown.
     3. Feature       The same precedence applied across the steps of ALL that
        status        feature's elements, backgrounds included.
-    4. Duration      The sum of the duration values that are PRESENT, in
-                     nanoseconds, rendered as seconds to three decimals. With
-                     no duration key present at all the total is unknown rather
-                     than zero, and renders an em dash.
+    4. Duration      The sum of the duration values that are PRESENT AND
+                     USABLE, in nanoseconds, rendered as seconds to three
+                     decimals. Usable is the step partial's own exported
+                     predicate - a non-negative integer that is not a boolean -
+                     so this total can never count a sample the step row
+                     declines to render. With no usable duration at all the
+                     total is unknown rather than zero, and renders an em dash.
     5. Earliest      The lowest start_timestamp present across scenario
        start         elements. These strings compare lexicographically because
                      the format is fixed-width UTC. None present renders an em
@@ -133,8 +136,9 @@
   summary with tqa-count, tqa-filter with tqa-filter-btn, tqa-table-wrap with
   tqa-table, tqa-feature with tqa-feature-name and tqa-feature-desc, tqa-tags
   with tqa-tag, tqa-timestamp, tqa-duration, tqa-link and tqa-empty. Status
-  colour arrives only as the data-tqa-status attribute, which the stylesheet
-  matches case-insensitively; there is no per-status class to write. The page
+  colour arrives only as the data-report-status attribute, which the
+  stylesheet matches case-insensitively; there is no per-status class to
+  write, and there is no second status attribute. The page
   shell classes belong to base.html and are not repeated here.
 
   Two placements follow that stylesheet rather than the page order alone. The
@@ -157,10 +161,18 @@
 
   NO STATE HOOK IS SERVER-RENDERED. The stylesheet reads the absence of its
   three boolean state attributes as expanded, visible and closed, and report.js
-  sets its own three state classes at run time, writing aria-pressed="false"
-  onto every filter control as it initialises. What is authored here is
-  therefore the fully visible, unfiltered page, which is exactly what it means
-  with scripting turned off and on paper.
+  sets its own three state classes at run time, writing the pressed state onto
+  every filter control as it initialises. What is authored here is therefore
+  the fully visible, unfiltered page, which is exactly what it means with
+  scripting turned off and on paper.
+
+  THE ONE CONTROL STATE THAT IS AUTHORED is aria-pressed, and it is authored to
+  say what the unfiltered page shows: report.js's filter model is a show-set in
+  which an empty set means every row is visible, so the reserved "all" control
+  is pressed exactly while no status is selected. "all" is authored pressed and
+  each status control unpressed - the same values the script writes when it
+  initialises - so a reader with scripting disabled is told the truth and a
+  reader with it enabled sees no state flip as the script loads.
 
   Standing prohibitions, each with its reason: automatic escaping is never
   turned off and no value is ever marked pre-escaped, because feature
@@ -175,8 +187,18 @@
   passes to the artifact endpoint as an argument.
 -#}
 {% extends "base.html" %}
+{#- "reports" is the value for this page and this page alone: it is the report
+    overview, so the shell marks that link as the current page here, and offers
+    both report destinations because rendering at all proves the results file
+    usable. The two detail views declare "reports-detail" instead, which offers
+    the same destinations and marks neither. -#}
 {% set active_nav = "reports" %}
 {% from "partials/status_badge.html" import status_badge, status_token %}
+{#- The project's duration predicate, imported rather than restated: the step
+    partial renders a duration only for a non-negative, non-boolean integer,
+    so the totals below have to admit exactly the same values or this page
+    would count a sample no step row shows. -#}
+{% from "partials/step_row.html" import duration_is_usable %}
 
 {#- Rule 2 of the aggregation contract, as data. Highest severity first: the
     first member of this sequence that occurs among a set of step statuses is
@@ -282,10 +304,20 @@
                 {%- set token = status_token(result.status|default('', true))|string|trim -%}
                 {%- set _ = element_steps.append(token) -%}
                 {%- set _ = tally.steps.append(token) -%}
-                {#- A skipped step carries no duration key at all, and a
-                    non-numeric one would poison the sum, so both are counted
-                    as no sample rather than as zero. -#}
-                {%- if result.duration is defined and result.duration is number -%}
+                {#- A skipped step carries no duration key at all, and a value
+                    the step row would decline to render - a float, a negative
+                    count, a boolean, anything but a non-negative integer -
+                    must not reach a total the page shows beside that row. Both
+                    are therefore counted as no sample rather than as zero, and
+                    the test is the step partial's own exported predicate so
+                    that one reading of a duration serves the step, the feature
+                    and the run.
+
+                    The plain default filter and never its boolean form: the
+                    boolean form would replace the INTEGER ZERO a skipped or
+                    undefined step records, and zero is a duration the model
+                    really carries. -#}
+                {%- if duration_is_usable(result.duration|default(none))|trim != '' -%}
                     {%- set tally.duration_ns = tally.duration_ns + result.duration -%}
                     {%- set tally.samples = tally.samples + 1 -%}
                 {%- endif -%}
@@ -384,7 +416,7 @@
         {%- for token in STATUS_READING_ORDER %}
         {%- set counted = run.steps|select('equalto', token)|list|length %}
         {%- if counted %}
-        <li class="tqa-count" data-tqa-status="{{ token }}">
+        <li class="tqa-count" data-report-status="{{ token }}">
             {{ status_badge(token) }}
             <strong>{{ counted }}</strong>
         </li>
@@ -402,7 +434,7 @@
         {%- for token in STATUS_READING_ORDER %}
         {%- set counted = run.scenarios|select('equalto', token)|list|length %}
         {%- if counted %}
-        <li class="tqa-count" data-tqa-status="{{ token }}">
+        <li class="tqa-count" data-report-status="{{ token }}">
             {{ status_badge(token) }}
             <strong>{{ counted }}</strong>
         </li>
@@ -429,10 +461,18 @@
         filter. Both of a feature's elements carry the same status, so one
         filter hides its row and its block together. They are
         non-navigating buttons because the behaviour script never suppresses
-        an authored default action, and they are authored unpressed because the
-        unfiltered page is the authored state. -#}
+        an authored default action.
+
+        THE AUTHORED PRESSED STATE IS THE UNFILTERED PAGE'S OWN. The behaviour
+        script's filter model is a show-set per scope in which an EMPTY set
+        means every row is shown, so "all" is pressed exactly while no status
+        is selected - which is the state this page is authored in, and the
+        state a reader with scripting disabled stays in. "all" is therefore
+        authored pressed and each status button unpressed, which is what the
+        script itself writes when it initialises, so the announced state
+        cannot change under the reader as the script loads. -#}
     <div class="tqa-filter" role="group" aria-label="Filter features by status">
-        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="false">
+        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="true">
             All features ({{ rows|length }})
         </button>
         {%- for token in row_statuses %}

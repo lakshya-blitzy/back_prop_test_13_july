@@ -115,7 +115,13 @@ Each item is behaviour to preserve, not an omission:
 * **No raising on a missing key or a missing file.**  The missing file is
   tolerated by ``ConfigurationReader:21-24`` and AAP 0.1.1 records that *"that
   tolerance is behaviour"*.  The single warning it produces is emitted by
-  ``app/utils/properties.py``, not here.
+  ``app/utils/properties.py``, not here.  A **malformed** file is the one case
+  that does reach a caller: ``java.util.Properties`` throws on a bad
+  ``\uXXXX`` escape and ``ConfigurationReader`` catches only ``IOException``,
+  so the reader raises :class:`ValueError` and every accessor here propagates
+  it untouched.  Nothing in this module catches it - swallowing it would
+  restore a tolerance the source does not have - and no configured value or
+  key appears in it, because the reader's message is fixed.
 * **No caching of its own.**  The one-time load and its cache live in
   ``app/utils/properties.py``; a second cache here would stop
   :func:`set_userdata` taking effect and would double the invalidation surface.
@@ -335,10 +341,18 @@ def get_property(key: str) -> str | None:
     distinction the two failure modes get:
 
     * A key **outside** the six raises :class:`ValueError` immediately - it can
-      never be satisfied, so failing loudly is the only useful answer.
+      never be satisfied, so failing loudly is the only useful answer.  That
+      check runs before the reader is consulted, so a programming error is
+      reported whatever state the properties file is in.
     * A key **among** the six that is simply not configured returns ``None``,
       never raises, and lets the failure surface at the point of use.  That is
-      the tolerance AAP 0.8 freezes as an observable contract.
+      the tolerance AAP 0.8 freezes as an observable contract.  A *missing*
+      properties file is the same case: every one of the six reads as ``None``.
+    * A **malformed** properties file is the exception to that: the reader
+      raises :class:`ValueError` for a bad ``\uXXXX`` escape, as
+      ``java.util.Properties`` does, and it propagates through this function
+      uncaught.  Only a file-backed read can hit it - a key supplied by
+      userdata is answered before the reader is reached.
 
     No validation, normalization or type coercion is applied to the value: it
     is returned exactly as userdata or the file supplied it.
@@ -347,7 +361,9 @@ def get_property(key: str) -> str | None:
         case-sensitively.
     :returns: The configured value, or ``None`` when neither the userdata slot
         nor the properties file supplies one.
-    :raises ValueError: If ``key`` is not one of :data:`CONFIG_KEYS`.
+    :raises ValueError: If ``key`` is not one of :data:`CONFIG_KEYS`, or if the
+        properties file holds a malformed ``\uXXXX`` escape - the second case
+        propagated from ``app/utils/properties.py`` with its own fixed message.
     """
     if key not in _CONFIG_KEY_SET:
         raise ValueError(

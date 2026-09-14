@@ -10,9 +10,9 @@ each carrying the line range it ports.
 once in the whole suite, at ``Crm.feature:1``, and it is the default tag filter
 (``CukesRunner.java:18``, carried into ``behave.ini`` as ``default_tags``).  So
 a bare ``run-tests`` selects the CRM feature alone, these twelve steps are the
-ones CI runs on every build, and the committed reference artifacts
-(``target/cucumber.json``, ``target/rerun.txt``) were produced from this very
-feature.  A mistake here is a mistake in the default path.
+ones CI runs on every build, and the committed reference artifacts (the JSON
+report and the rerun manifest) were produced from this very feature.  A
+mistake here is a mistake in the default path.
 
 The twelve definitions
 ----------------------
@@ -53,9 +53,8 @@ unavoidable in this module specifically:
   behave has no ``@and`` decorator at all.  There is nothing else to map them
   onto.
 * The Background step this feature opens with is declared ``@When`` in
-  ``Session.java:12`` yet invoked as ``Given`` here, and the baseline
-  ``target/cucumber.json`` records it as ``"keyword": "Given "`` against
-  ``match.location``
+  ``Session.java:12`` yet invoked as ``Given`` here, and the baseline JSON
+  report records it as ``"keyword": "Given "`` against ``match.location``
   ``com.testinium.step_definitions.Session.user_login_to_test_other_features()``
   - the JVM matching across step types, in this feature's own report.
 
@@ -244,7 +243,7 @@ def user_click_on_the_crm_dashboard(context) -> None:
     page = _page(context)
 
     page.crm_link.click()
-    wait_visible_element(page.crm_link, 2)
+    wait_visible_element(page.CRM_LINK, 2)
 
 
 @step("User click on the pipeline button")
@@ -261,7 +260,7 @@ def user_click_on_the_pipeline_button(context) -> None:
     page = _page(context)
 
     page.create_button.click()
-    wait_visible_element(page.create_button, 2)
+    wait_visible_element(page.CREATE_BUTTON, 2)
 
 
 @step("User can create the new pipeline")
@@ -291,7 +290,7 @@ def user_can_create_the_new_pipeline(context) -> None:
     press_keys(page.expected_revenue, "ENTER", text="8")
     page.priority.click()
     page.create_pipeline.click()
-    wait_visible_element(page.create_pipeline, 2)
+    wait_visible_element(page.CREATE_PIPELINE, 2)
 
 
 @step("User can see the total price")
@@ -394,7 +393,7 @@ def user_can_change_any_user_s_information_like_and(
     page = _page(context)
 
     page.button_pipeline.click()
-    wait_visible_element(page.button_pipeline, 2)
+    wait_visible_element(page.BUTTON_PIPELINE, 2)
     page.edit_button.click()
     page.opportunity_title_edit.clear()
     press_keys(page.opportunity_title_edit, "ENTER", text=opportunity)
@@ -418,7 +417,7 @@ def user_can_save_information(context) -> None:
     """
     page = _page(context)
 
-    wait_visible_element(page.probability_edit, 2)
+    wait_visible_element(page.PROBABILITY_EDIT, 2)
     page.save_edit.click()
 
 
@@ -446,7 +445,7 @@ def user_can_verify_the_information(context) -> None:
     page = _page(context)
 
     page.pipeline_side_button.click()
-    wait_visible_element(page.button_pipeline, 2)
+    wait_visible_element(page.BUTTON_PIPELINE, 2)
 
     actual_name = page.find_title_test.text
     expected_name = "Test2"
@@ -554,12 +553,12 @@ def user_can_register_new_customer(context) -> None:
     page = _page(context)
 
     page.customer_side_button.click()
-    wait_visible_element(page.customer_side_button, 2)
+    wait_visible_element(page.CUSTOMER_SIDE_BUTTON, 2)
     page.create_customer.click()
-    wait_visible_element(page.create_customer, 2)
+    wait_visible_element(page.CREATE_CUSTOMER, 2)
     press_keys(page.input_name, "ENTER", text="Test")
     page.create_customer_button.click()
-    wait_visible_element(page.create_customer_button, 2)
+    wait_visible_element(page.CREATE_CUSTOMER_BUTTON, 2)
     press_keys(page.searching_text, "ENTER", text="aa")
 
 
@@ -586,7 +585,7 @@ def user_can_print_the_profile(context) -> None:
     page = _page(context)
 
     page.name_customer.click()
-    wait_visible_element(page.name_customer, 2)
+    wait_visible_element(page.NAME_CUSTOMER, 2)
     page.print_button.click()
-    wait_visible_element(page.due_payment_button, 2)
+    wait_visible_element(page.DUE_PAYMENT_BUTTON, 2)
     page.due_payment_button.click()

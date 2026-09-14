@@ -23,10 +23,11 @@ miss.  Nothing in this file measures or gates coverage.
 What the suite asserts: structure, never bytes
 ----------------------------------------------
 Byte-stability across runs is impossible and no test may demand it (AAP 0.6).
-``target/cucumber.json`` carries a per-scenario ``start_timestamp`` and measured
-nanosecond durations; failure text embeds a Python traceback; both HTML outputs
-surface timing; and screenshot bytes differ from one capture to the next.  What
-*is* deterministic, and therefore what the suite pins, is **structure**:
+The merged Cucumber JSON report carries a per-scenario ``start_timestamp`` and
+measured nanosecond durations; failure text embeds a Python traceback; both
+HTML outputs surface timing; and screenshot bytes differ from one capture to
+the next.  What *is* deterministic, and therefore what the suite pins, is
+**structure**:
 
 * features in source order, and scenarios in line order within a feature;
 * the Background repeated in the same position among a feature's elements;
@@ -65,7 +66,7 @@ means:
 * **No leaked global state.**  The one autouse fixture returns the two
   process-global holders - the properties cache and the worker-local driver slot
   - to their pre-test state around every test.
-* **No writing into the repository's real ``target/``.**  Path-taking code is
+* **No writing into the repository's real build output.**  Path-taking code is
   driven through the ``base=`` seam with :fixture:`tmp_artifact_root`.
 
 Import path ownership
@@ -73,8 +74,26 @@ Import path ownership
 ``pytest.ini`` states plainly that making ``import app`` and
 ``import features.steps.<module>`` resolve from the repository root is this
 file's job, and that splitting it across two files would leave neither of them
-the answer.  The bootstrap immediately below is that job; see its comment for
-why it cannot be dropped as redundant.
+the answer.  The bootstrap immediately below is that job, and it does it in
+three steps: it *probes* whether the project already resolves from the installed
+environment, *publishes* that answer as
+:data:`PROJECT_IMPORTABLE_FROM_ENVIRONMENT` and
+:fixture:`project_importable_from_environment`, and only then *falls back* to
+the checkout root.  Putting the probe first is what keeps a broken editable
+install or a broken ``pyproject.toml`` package mapping *visible* instead of
+being papered over by a source-tree import; see the bootstrap's own comment for
+the detail.
+
+The Gherkin tree is covered by the same fallback rather than by an entry of its
+own.  It is not part of the installed distribution - ``pyproject.toml`` excludes
+``features*`` - so no installation can ever supply it, and
+:func:`load_step_registry` does not need one: it hands behave the
+``features/steps`` **directory**, which the engine execs each module from
+exactly as a real run does.  A test that nonetheless writes
+``import features.<module>`` is served by the working-directory entry
+``python -m pytest`` prepends - the invocation form the ``Makefile`` and both
+runner scripts use - and, under a bare ``pytest`` that prepends no such entry,
+by the fallback, whose condition names this second case explicitly.
 
 There is deliberately **no** ``tests/__init__.py``.  The AAP 0.3.1 target tree
 does not name one and its absence is load-bearing: with no package marker,
@@ -86,7 +105,9 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import importlib.util
 import json
+import os
 import sys
 import threading
 from collections.abc import Callable, Iterator, Mapping, MutableMapping
@@ -106,22 +127,43 @@ if TYPE_CHECKING:  # pragma: no cover - read by type checkers, never at runtime
     from flask.testing import FlaskClient
 
 # --------------------------------------------------------------------------- #
-# The import-path bootstrap.  This runs at module import time, before the first
-# ``app`` import below, and it is the whole of what ``pytest.ini`` delegates
-# here.
+# The import-path bootstrap: probe first, publish, then fall back.  This runs at
+# module import time, before the first ``app`` import below, and it is the whole
+# of what ``pytest.ini`` delegates here - that file carries no ``pythonpath``
+# key and says so explicitly, because splitting the answer across two files
+# would leave neither of them the answer.
 #
-# Why it is required, so that a later reader does not remove it as redundant:
-# pytest's default *prepend* import mode inserts the test module's **basedir**
-# onto ``sys.path`` - that is ``tests/``, because there is no
-# ``tests/__init__.py`` - and never the rootdir.  A plain ``pytest`` invocation
-# (as opposed to ``python -m pytest``, which prepends the working directory)
-# adds nothing else.  So without this insertion ``import app`` fails whenever
-# the project is not pip-installed, which is the normal case for ``make unit``
-# and is the measured state of a fresh clone here.
+# Step 1, probe.  ``import app`` is meant to resolve from the mandated Python
+# 3.14.6 environment, in which the project is installed (``pip install -e .``,
+# which both runner scripts and the Makefile perform).  Whether it *actually*
+# does is a fact about the packaging - the editable install itself, and
+# ``[tool.setuptools.packages.find]`` and ``[tool.setuptools.package-data]`` in
+# ``pyproject.toml`` - so it is measured before anything is added to
+# ``sys.path``, against a search path from which the checkout root and every
+# cwd-derived entry have been removed.  Measuring after an insertion, or with
+# the working directory left in, would measure the source tree instead and could
+# only ever answer "yes".
 #
-# Insertion is at position 0 and conditional: an entry already present is left
-# exactly where it is, so a deliberate ordering - an editable install, or a
-# PYTHONPATH set by a runner script - is never reshuffled by this file.
+# Step 2, publish.  The answer becomes :data:`PROJECT_IMPORTABLE_FROM_ENVIRONMENT`
+# and the session fixture :fixture:`project_importable_from_environment`, which
+# is what turns a packaging defect into an observable value a test can assert on.
+# That ordering is the whole point: an unconditional insertion - what this file
+# did before - lets the suite import the source tree even when the required
+# installation or the package mapping is broken, and a green run then says
+# nothing about whether the distribution this project ships is importable at all.
+# Nothing here repairs a broken install, and nothing here hides one.
+#
+# Step 3, fall back, and only then.  When the project does not resolve from the
+# environment, the checkout root is inserted at position 0, because an
+# uninstalled clone must stay testable: pytest offers no help of its own - its
+# default *prepend* import mode inserts the test module's **basedir** (that is
+# ``tests/``, because there is deliberately no ``tests/__init__.py``) and never
+# the rootdir, and a plain ``pytest`` invocation, as opposed to
+# ``python -m pytest``, adds nothing else - so without the fallback ``import
+# app`` would fail outright on a fresh clone and ``make unit`` would regress.
+# The insertion remains conditional on absence: an entry already present is left
+# exactly where it is, so a deliberate ordering - a PYTHONPATH set by a runner
+# script - is never reshuffled by this file.
 # --------------------------------------------------------------------------- #
 
 #: The repository root, derived from this file's own position: ``tests/`` ->
@@ -129,7 +171,133 @@ if TYPE_CHECKING:  # pragma: no cover - read by type checkers, never at runtime
 #: symlinks and therefore comparable against paths the production modules build.
 REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[1]
 
-if str(REPO_ROOT) not in sys.path:
+#: The distribution's single importable top-level package, and therefore the one
+#: name the probe below asks about: ``pyproject.toml`` installs ``app*`` and
+#: excludes ``features*``, ``tests*`` and ``scripts*``, so ``app`` resolving
+#: from the environment is exactly what "the project is installed" means here.
+PROJECT_PACKAGE: Final[str] = "app"
+
+#: The Gherkin tree, which is deliberately **not** part of the distribution -
+#: ``pyproject.toml`` excludes ``features*`` - and therefore never resolves from
+#: an installation, however healthy that installation is.  ``pytest.ini`` names
+#: ``import features.steps.<module>`` alongside ``import app`` as something this
+#: file must make work from the repository root, so the fallback below asks
+#: about this name as well as about the package above; the *published* fact
+#: stays about :data:`PROJECT_PACKAGE` alone, because that is the one the
+#: packaging owns.
+FEATURES_PACKAGE: Final[str] = "features"
+
+
+def _project_resolves_from_environment() -> bool:
+    """Report whether :data:`PROJECT_PACKAGE` resolves without the checkout.
+
+    The probe behind step 1 of the bootstrap above.  It answers one question -
+    would ``import app`` succeed on the strength of the environment alone - and
+    answers it without changing anything an importer can observe afterwards:
+
+    * the checkout root and every working-directory-derived entry are dropped
+      from ``sys.path`` for the duration, since either of them would let the
+      source tree answer for an installation that is not there;
+    * ``importlib.util.find_spec`` is used rather than an actual import, so the
+      package is *not* imported here.  For a top-level name that means no module
+      code runs at all, which keeps this probe free of the side effects the
+      deferred imports further down the file exist to avoid;
+    * ``sys.path`` is restored to its original contents in a ``finally``, by
+      slice assignment onto the same list object, so an entry another importer
+      captured by reference is unaffected.
+
+    :returns: ``True`` when the package resolves from the installed environment,
+        ``False`` when it does not resolve at all or cannot be described.
+    """
+    working_directory = os.getcwd()
+
+    # Entries that would let the checkout answer for the environment: the
+    # interpreter's own cwd placeholders, the repository root in both its
+    # resolved and unresolved spellings, and the working directory as
+    # ``python -m pytest`` prepends it.
+    checkout_entries = {
+        "",
+        ".",
+        str(REPO_ROOT),
+        str(Path(__file__).parent.parent),
+        working_directory,
+        str(Path(working_directory).resolve()),
+    }
+
+    original_path = list(sys.path)
+
+    try:
+        sys.path[:] = [
+            entry for entry in original_path if entry not in checkout_entries
+        ]
+
+        try:
+            return importlib.util.find_spec(PROJECT_PACKAGE) is not None
+        except (ImportError, ValueError):
+            # The two failures ``find_spec`` reports rather than returning
+            # ``None`` for: ``ImportError`` (``ModuleNotFoundError`` included)
+            # when the name cannot be searched for, and ``ValueError`` when a
+            # module of that name is already in ``sys.modules`` carrying no
+            # ``__spec__``.  Neither is a resolvable installation, so both are
+            # the same answer as an absent one.
+            return False
+    finally:
+        sys.path[:] = original_path
+
+
+#: Whether the project resolves from the installed environment rather than from
+#: this checkout - measured once, at import time, before the fallback below can
+#: influence it.  ``True`` is the mandated state (the pinned 3.14.6 environment
+#: with ``pip install -e .`` in place); ``False`` means the suite is running
+#: against the source tree, which is legitimate for an uninstalled clone and is
+#: a packaging defect anywhere the installation is supposed to exist.  Published
+#: so that the difference is assertable instead of invisible.
+PROJECT_IMPORTABLE_FROM_ENVIRONMENT: Final[bool] = _project_resolves_from_environment()
+
+
+def _name_resolves(name: str) -> bool:
+    """Report whether ``name`` resolves on ``sys.path`` exactly as it stands now.
+
+    The companion to :func:`_project_resolves_from_environment`, and a different
+    question: that one removes the checkout to measure the *installation*, while
+    this one asks only whether an importer running right now would find the
+    name at all.  Used for :data:`FEATURES_PACKAGE`, which no installation can
+    ever supply.
+
+    :param name: A top-level module or package name.
+    :returns: ``True`` when the name resolves, ``False`` when it does not
+        resolve or cannot be described.  Nothing is imported: ``find_spec`` on a
+        top-level name runs no module code, and the Gherkin tree carries no
+        ``__init__.py``, so it resolves - when it resolves at all - as a
+        namespace package whose discovery executes nothing.
+    """
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+if (
+    not PROJECT_IMPORTABLE_FROM_ENVIRONMENT or not _name_resolves(FEATURES_PACKAGE)
+) and str(REPO_ROOT) not in sys.path:
+    # The recorded fallback of step 3, reached for either of two reasons, both
+    # of them about a name that would otherwise not resolve at all:
+    #
+    #   * the project does not resolve from the environment - an uninstalled
+    #     clone, which must stay testable.  The probe above has already been
+    #     taken and published by this point, so the insertion cannot mask a
+    #     broken install: the fact that the environment could not answer is
+    #     recorded in PROJECT_IMPORTABLE_FROM_ENVIRONMENT whatever happens here,
+    #     and tests/test_app_factory.py proves the packaging in a clean
+    #     subprocess with no checkout on its path at all.
+    #   * the Gherkin tree does not resolve.  It is excluded from the
+    #     distribution by design, so an installation never supplies it, and
+    #     under a bare ``pytest`` invocation - which prepends only the test
+    #     module's basedir, never the rootdir - nothing else does either.
+    #     ``pytest.ini`` delegates ``import features.steps.<module>`` to this
+    #     file in the same breath as ``import app``, so both names are covered
+    #     or neither claim is true.  Under the sanctioned ``python -m pytest``
+    #     the working directory already supplies it and this arm is not reached.
     sys.path.insert(0, str(REPO_ROOT))
 
 # Imported after the bootstrap above, which is exactly why these two are not at
@@ -161,13 +329,13 @@ from app.utils import paths, properties  # noqa: E402
 #: Directory holding the golden baselines and the hand-built result set.
 FIXTURES_DIR: Final[Path] = Path(__file__).resolve().parent / "fixtures"
 
-#: The ``HEAD`` side of the committed ``target/cucumber.json``, taken alone.
+#: The ``HEAD`` side of the reference build's JSON report, taken alone.
 #: The committed artifact carries one unresolved merge-conflict block whose two
 #: sides do not concatenate into valid JSON, so this baseline is one side of it
 #: rather than a marker-stripped whole (AAP 0.6).
 GOLDEN_CUCUMBER_PATH: Final[Path] = FIXTURES_DIR / "golden_cucumber.json"
 
-#: The committed ``target/rerun.txt``, which is marker-free and needed no such
+#: The committed rerun manifest, which is marker-free and needed no such
 #: surgery: one line, one feature, its two failing line numbers appended.
 GOLDEN_RERUN_PATH: Final[Path] = FIXTURES_DIR / "golden_rerun.txt"
 
@@ -276,6 +444,34 @@ def fixtures_dir() -> Path:
     :returns: The fixture-data directory.
     """
     return FIXTURES_DIR
+
+
+@pytest.fixture(scope="session")
+def project_importable_from_environment() -> bool:
+    """Whether ``import app`` resolves from the environment, not this checkout.
+
+    The published outcome of the import bootstrap's probe - see
+    :data:`PROJECT_IMPORTABLE_FROM_ENVIRONMENT` - measured once at import time
+    and before the bootstrap's fallback could influence it.  ``True`` is the
+    mandated state: the pinned Python 3.14.6 environment with the project
+    installed, which is what both runner scripts and the ``Makefile`` establish.
+    ``False`` means every ``import app`` in this session is reading the source
+    tree because the environment could not answer.
+
+    Published as a fixture rather than left as a private detail so that a
+    packaging defect is *observable* from a test.  The full packaging proof -
+    that the installed distribution is importable and carries its templates and
+    static assets - belongs in a clean subprocess, because a subprocess is the
+    only place a result cannot be influenced by this session's own ``sys.path``;
+    this fixture is the in-session half of that story and states which of the
+    two import sources the session is actually exercising.
+
+    Session-scoped because the value is a constant of the interpreter this
+    session runs in, so there is nothing for one test to hand to the next.
+
+    :returns: :data:`PROJECT_IMPORTABLE_FROM_ENVIRONMENT`.
+    """
+    return PROJECT_IMPORTABLE_FROM_ENVIRONMENT
 
 
 # =========================================================================== #
@@ -1375,7 +1571,7 @@ def fake_context(stub_driver: StubDriver) -> FakeContext:
 # accessors takes ``base``, defaulting to the process working directory.  That
 # parameter is the declared unit-test seam and the fixtures below are how this
 # suite uses it: a writer test builds its artifacts under a per-test temporary
-# directory, so **no test ever writes into the repository's real ``target/``**.
+# directory, so **no test ever writes into the repository's own build output**.
 #
 # Nothing here changes the working directory, and no test should.  ``chdir``
 # leaks into whatever runs next in the same process - pytest does not restore it
@@ -1406,10 +1602,10 @@ def tmp_artifact_root(tmp_path: Path) -> Path:
     one session never share one - and it is left in place after the run for
     inspection under pytest's own retention policy.
 
-    Nothing is created inside it: ``target/`` is absent until the code under
-    test creates it, which is what lets a test assert that a writer creates its
-    own parent directory.  :fixture:`prepared_artifact_root` is the variant for
-    tests that need it to exist beforehand.
+    Nothing is created inside it: the build-output directory is absent until
+    the code under test creates it, which is what lets a test assert that a
+    writer creates its own parent directory.  :fixture:`prepared_artifact_root`
+    is the variant for tests that need it to exist beforehand.
 
     :param tmp_path: pytest's per-test temporary directory.
     :returns: An existing, empty directory standing in for a checkout root.
@@ -1421,24 +1617,26 @@ def tmp_artifact_root(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def prepared_artifact_root(tmp_artifact_root: Path) -> Path:
-    """:fixture:`tmp_artifact_root` with an empty ``target/`` already created.
+    """:fixture:`tmp_artifact_root`, plus an empty build-output directory.
 
-    The convenience for a test whose subject writes *into* ``target/`` and is
-    not itself responsible for creating it.  The directory is made through
-    ``app.utils.paths.ensure_dir``, the port's own helper, rather than
-    ``mkdir`` - so the fixture exercises the same code path production does and
-    cannot drift from it.
+    The convenience for a test whose subject writes *into* the build-output
+    directory and is not itself responsible for creating it.  The directory is
+    made through ``app.utils.paths.ensure_dir``, the port's own helper, rather
+    than ``mkdir`` - so the fixture exercises the same code path production
+    does and cannot drift from it.
 
-    ``target/.workers/`` is deliberately **not** created.  That directory's
-    whole lifecycle is under test: ``app/services/test_run_service.py`` creates
-    it before a run, ``--clean`` empties it, and it is removed after the merge
-    whether the merge succeeded or failed, so that no intermediate JSON is ever
-    visible to the Jenkins publisher (AAP 0.4.1).  ``test_cli.py`` and
-    ``test_test_run_service.py`` assert that lifecycle, and a fixture that
-    pre-created the directory would invalidate every one of those assertions.
+    The per-worker intermediate directory is deliberately **not** created.
+    That directory's whole lifecycle is under test:
+    ``app/services/test_run_service.py`` creates it before a run, ``--clean``
+    empties it, and it is removed after the merge whether the merge succeeded
+    or failed, so that no intermediate JSON is ever visible to the Jenkins
+    publisher (AAP 0.4.1).  ``test_cli.py`` and ``test_test_run_service.py``
+    assert that lifecycle, and a fixture that pre-created the directory would
+    invalidate every one of those assertions.
 
     :param tmp_artifact_root: The temporary checkout root.
-    :returns: The same root, with ``target/`` present and empty.
+    :returns: The same root, with the build-output directory present and
+        empty.
     """
     paths.ensure_dir(paths.target_root(tmp_artifact_root))
     return tmp_artifact_root
@@ -1563,7 +1761,7 @@ def normalize_rerun_manifest(text: str) -> str:
 
 @pytest.fixture
 def golden_rerun() -> str:
-    """The committed ``target/rerun.txt``, verbatim.
+    """The committed rerun manifest, verbatim.
 
     Measured properties of this baseline, all of them load-bearing for
     ``test_rerun_report.py``: 50 bytes, a single line, a trailing newline
@@ -1597,7 +1795,7 @@ def golden_rerun_normalized(golden_rerun: str) -> str:
 
 @pytest.fixture
 def golden_cucumber() -> Any:
-    """The golden ``target/cucumber.json``, parsed.
+    """The golden Cucumber JSON baseline, parsed.
 
     This baseline is the ``HEAD`` side of the committed artifact **taken
     alone**.  The committed file carries one unresolved merge-conflict block
@@ -2015,11 +2213,21 @@ def isolate_process_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     what its predecessor left behind, and ``monkeypatch`` restores the module's
     original holder at teardown.  ``app/automation/driver.py`` is imported
     *inside* this fixture rather than at module scope: it is the only module
-    this suite reaches that imports selenium and webdriver-manager, and a
-    collection-time import problem there must not be able to break tests that
-    have nothing to do with the browser.  When it cannot be imported there is no
-    holder to isolate, and the properties half of the fixture still does its
-    job.
+    this suite reaches that imports selenium and webdriver-manager, and keeping
+    that import out of collection is what decides *where* a browser-binding
+    problem is reported: as a setup error attributed to this fixture, naming the
+    defect, rather than as a collection failure of this module that would take
+    the entire suite - including every test with nothing to do with a browser -
+    down with an unrelated traceback.
+
+    Deferred is not optional, though.  The import is **required**, and a failure
+    of it fails setup: this fixture's contract promises every sibling module a
+    fresh session slot, and a missing selenium or webdriver-manager - or any
+    broken import inside the application package - means that promise cannot be
+    honoured.  An :exc:`ImportError` is therefore re-raised as a
+    :exc:`RuntimeError` that names the module, the runtime it needs and the
+    broken promise, so the defect is reported where it is rather than absorbed
+    into a green run against an un-isolated holder.
 
     Nothing else is reset, and one omission is deliberate enough to state:
     ``app/config.py``'s installed userdata is left exactly as it is.  Clearing
@@ -2043,20 +2251,32 @@ def isolate_process_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     :param monkeypatch: pytest's patcher, used for its guaranteed teardown.
     :yields: ``None`` - the fixture is entirely about the state around the test.
+    :raises RuntimeError: If ``app.automation.driver`` cannot be imported,
+        chained from the originating :exc:`ImportError`.  The holder reset this
+        fixture owes every test is then impossible, so setup fails here instead
+        of leaving the slot to carry a value from one test into the next.
     """
     properties.reset_cache()
 
     try:
         from app.automation import driver as driver_module
-    except ImportError:  # pragma: no cover - only when selenium is unavailable
-        driver_module = None
+    except ImportError as exc:
+        raise RuntimeError(
+            "tests/conftest.py: app.automation.driver could not be imported, so "
+            "the autouse isolate_process_state fixture cannot reset the "
+            "worker-local driver session slot it promises every test module in "
+            "this suite. That import needs the pinned browser runtime - "
+            "selenium and webdriver-manager (requirements.txt) - and an "
+            "otherwise importable app package. Install the pinned requirements "
+            f"into the 3.14.6 environment and fix the import: {exc}"
+        ) from exc
 
-    if driver_module is not None:
-        # A fresh holder rather than a cleared one: a new ``threading.local()``
-        # carries no attributes at all, which is the state ``_session()``
-        # reports as ``None`` and therefore the exact equivalent of the ``null``
-        # ``Driver.java:22`` tests against.
-        monkeypatch.setattr(driver_module, "_holder", threading.local())
+    # A fresh holder rather than a cleared one: a new ``threading.local()``
+    # carries no attributes at all, which is the state ``_session()`` reports as
+    # ``None`` and therefore the exact equivalent of the ``null``
+    # ``Driver.java:22`` tests against.  Unconditional, because the import above
+    # either produced the module or failed the test's setup.
+    monkeypatch.setattr(driver_module, "_holder", threading.local())
 
     try:
         yield

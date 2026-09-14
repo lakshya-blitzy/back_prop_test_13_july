@@ -4,15 +4,31 @@
    Consumed twice, which fixes two invariants:
      1. Inlined into the single self-contained report page, where nothing
         outside this text is reachable - hence no imports, no asset
-        references, no webfonts, and glyphs as character escapes.
-     2. Emitted beside the generated report tree, next to three vendored
+        references, no webfonts, no path or name belonging to any other file,
+        and glyphs as character escapes. A reference written even in a comment
+        would travel into that page and break the one property it is checked
+        for, so the other files are described here by role and never named.
+     2. Emitted beside the generated report tree, next to three third-party
         stylesheets loaded in an order this file cannot rely on - hence every
-        selector starts with the "tqa-" class prefix or a "data-tqa-"
-        attribute, with element parts only as descendants or qualifiers.
+        selector starts with the "tqa-" class prefix, a "data-report-"
+        attribute or one of the three runtime state classes, with element
+        parts only as descendants or qualifiers.
 
-   State comes from one status attribute and three boolean attributes whose
-   absence is the default, so with no scripting at all the page stays
-   complete: detail expanded, rows visible, overlay closed, thumbnail shown.
+   THE STATE VOCABULARY, in full, and there is no second one:
+     - data-report-status carries the status of an element. It is the only
+       status hook; every colour, every print rule and the status filter read
+       that one attribute.
+     - report-is-collapsed, report-is-filtered-out and report-lightbox-is-open
+       are the three runtime classes. The behaviour script is their only
+       author and this file is their only reader.
+   Nothing else exists: no parallel family of boolean state attributes, and
+   none may be reintroduced. A selector for state no template and no script
+   produces is a rule that silently never matches, and a second vocabulary
+   beside a live one is indistinguishable from the live one until it breaks.
+
+   The authored default is the ABSENCE of all three runtime classes, so with
+   no scripting at all the page stays complete: detail expanded, rows visible,
+   overlay closed, thumbnail shown.
    -------------------------------------------------------------------------- */
 
 /* ---- tokens and page shell -------------------------------------------------
@@ -223,12 +239,27 @@
 
 /* ---- tables -------------------------------------------------------------- */
 
+/* THE BOUNDED SCROLL REGION EVERY WIDE TABLE SITS IN. The statistics table is
+   twelve columns and the step overview six, neither of which fits a narrow
+   screen: unwrapped, they push the whole document into horizontal overflow
+   and the last columns are clipped off the page. Constraining the overflow
+   here keeps the page itself at the viewport width and confines the scrolling
+   to the table.
+
+   A region that scrolls has to be reachable by keyboard, so a caller gives
+   this element tabindex="0" together with a role and an accessible name; the
+   focus ring below is what makes that reachability visible. */
 .tqa-table-wrap {
     max-width: 100%;
     margin: 0 0 var(--tqa-gap-lg, 16px);
     overflow-x: auto;
     border: 1px solid var(--tqa-line, #d5d9df);
     border-radius: var(--tqa-radius, 4px);
+}
+
+.tqa-table-wrap:focus-visible {
+    outline: 2px solid var(--tqa-link-fg, #0b5fa5);
+    outline-offset: 2px;
 }
 
 .tqa-table {
@@ -369,27 +400,30 @@
     padding: 0 0 0 12px;
 }
 
+/* The matched arguments of a step. The markup is one inline container holding
+   one inline element per argument value - never a table: the model carries a
+   flat list of matched values with no header row and no columns to align, so
+   there is nothing for a table to express. This file used to style the
+   component as one, with border-collapse and th/td rules that no markup could
+   ever match; those declarations are gone and each value is now drawn as its
+   own bordered chip, which is what the structure actually is. */
 .tqa-step-args {
-    width: auto;
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
     max-width: 100%;
     margin: 4px 0;
-    border-collapse: collapse;
     font-family: var(--tqa-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace);
     font-size: 13px;
 }
 
-.tqa-step-args th,
-.tqa-step-args td {
-    padding: 3px 6px;
+.tqa-step-args > * {
+    min-width: 0;
+    padding: 1px 6px;
     border: 1px solid var(--tqa-line, #d5d9df);
-    text-align: left;
-    vertical-align: top;
-    overflow-wrap: anywhere;
-}
-
-.tqa-step-args th {
+    border-radius: var(--tqa-radius, 4px);
     background-color: var(--tqa-surface-alt, #f6f8fa);
-    font-weight: 700;
+    overflow-wrap: anywhere;
 }
 
 /* ---- status ----------------------------------------------------------------
@@ -399,7 +433,7 @@
    comes from the badge markup. Matched case-insensitively.
    -------------------------------------------------------------------------- */
 
-[data-tqa-status="passed" i] {
+[data-report-status="passed" i] {
     --tqa-status-fg: var(--tqa-pass, #12652b);
     --tqa-status-bg: var(--tqa-pass-bg, #e7f6ea);
     --tqa-status-accent: var(--tqa-pass, #12652b);
@@ -407,7 +441,7 @@
     --tqa-status-weight: 600;
 }
 
-[data-tqa-status="failed" i] {
+[data-report-status="failed" i] {
     --tqa-status-fg: var(--tqa-fail, #a01508);
     --tqa-status-bg: var(--tqa-fail-bg, #fdeceb);
     --tqa-status-accent: var(--tqa-fail, #a01508);
@@ -415,7 +449,7 @@
     --tqa-status-weight: 700;
 }
 
-[data-tqa-status="pending" i] {
+[data-report-status="pending" i] {
     --tqa-status-fg: var(--tqa-pending, #6a5000);
     --tqa-status-bg: var(--tqa-pending-bg, #fdf7d9);
     --tqa-status-accent: var(--tqa-pending, #6a5000);
@@ -423,7 +457,7 @@
     --tqa-status-weight: 600;
 }
 
-[data-tqa-status="skipped" i] {
+[data-report-status="skipped" i] {
     --tqa-status-fg: var(--tqa-skipped, #8a4a00);
     --tqa-status-bg: var(--tqa-skipped-bg, #fdefe0);
     --tqa-status-accent: var(--tqa-skipped, #8a4a00);
@@ -431,7 +465,7 @@
     --tqa-status-weight: 600;
 }
 
-[data-tqa-status="undefined" i] {
+[data-report-status="undefined" i] {
     --tqa-status-fg: var(--tqa-undefined, #8f3d00);
     --tqa-status-bg: var(--tqa-undefined-bg, #fce9db);
     --tqa-status-accent: var(--tqa-undefined, #8f3d00);
@@ -439,7 +473,7 @@
     --tqa-status-weight: 700;
 }
 
-[data-tqa-status="untested" i] {
+[data-report-status="untested" i] {
     --tqa-status-fg: var(--tqa-neutral, #494f58);
     --tqa-status-bg: var(--tqa-neutral-bg, #eef0f3);
     --tqa-status-accent: var(--tqa-line-strong, #b6bcc5);
@@ -447,7 +481,7 @@
     --tqa-status-weight: 500;
 }
 
-[data-tqa-status="ambiguous" i] {
+[data-report-status="ambiguous" i] {
     --tqa-status-fg: var(--tqa-ambiguous, #4c4557);
     --tqa-status-bg: var(--tqa-ambiguous-bg, #f2eff7);
     --tqa-status-accent: var(--tqa-ambiguous, #4c4557);
@@ -546,15 +580,64 @@
     background: none;
 }
 
+/* THE THUMBNAIL'S TRIGGER IS A REAL BUTTON, so activation, focus order and
+   Enter/Space all come from the platform rather than from a click handler on
+   an image, which is neither focusable nor keyboard-activatable. Everything
+   here strips the platform's button chrome so the screenshot looks exactly as
+   it did when it was the bare image: no border, no ground, no padding, no
+   inherited button font, and the whole box available to the picture.
+
+   It is not hidden on paper. The button contributes nothing visible of its
+   own, so the printed page shows the screenshot itself. */
+.tqa-shot-trigger {
+    display: block;
+    max-width: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    line-height: 0;
+    text-align: left;
+    cursor: zoom-in;
+}
+
+.tqa-shot-trigger:focus-visible {
+    outline: 3px solid var(--tqa-link-fg, #0b5fa5);
+    outline-offset: 2px;
+}
+
+/* The picture IS the trigger's hit area, because the trigger draws nothing of
+   its own - so the minimum below is what keeps the control operable by
+   pointer. A screenshot's intrinsic size is whatever the browser viewport was
+   and is far larger than this, leaving min-width and min-height inert for
+   every real capture; they bind only on a degenerate image, where without
+   them a 1x1 PNG yields a 3x3 button nobody can hit. 24px is the smallest
+   target WCAG 2.1's successor criterion accepts, and object-fit keeps a small
+   image undistorted inside the box rather than stretching it to fill one. */
 .tqa-shot-thumb {
     display: block;
     max-width: 100%;
     height: auto;
+    min-width: 24px;
+    min-height: 24px;
+    object-fit: contain;
     margin: 6px 0;
     border: 1px solid var(--tqa-line-strong, #b6bcc5);
     border-radius: var(--tqa-radius, 4px);
     background-color: var(--tqa-surface, #ffffff);
     cursor: zoom-in;
+}
+
+/* Hovering or holding the trigger reads on the picture, since the trigger
+   itself draws nothing. */
+.tqa-shot-trigger:hover .tqa-shot-thumb {
+    border-color: var(--tqa-link-fg, #0b5fa5);
+}
+
+.tqa-shot-trigger:active .tqa-shot-thumb {
+    border-color: var(--tqa-link-hover, #083f6e);
 }
 
 .tqa-lightbox {
@@ -564,11 +647,12 @@
     right: 0;
     bottom: 0;
     left: 0;
-    /* ABOVE THE VENDORED FIXED NAVBAR, and every number here is read out of
-       app/static/vendor/css/bootstrap.min.css rather than chosen: that file
-       declares .navbar-fixed-top at 1030, .modal-backdrop at 1040 and .modal
-       at 1050, and every page of the generated report tree carries that
-       navbar. At the previous 1000 the overlay painted UNDER it. Measured in
+    /* ABOVE THE THIRD-PARTY FIXED NAVBAR, and every number here is read out
+       of the vendored grid framework's own stylesheet rather than chosen:
+       that stylesheet declares its fixed-top navbar at 1030, its modal
+       backdrop at 1040 and its modal at 1050, and every page of the generated
+       report tree carries that navbar. At the previous 1000 the overlay
+       painted UNDER it. Measured in
        Chrome two ways, on a tag detail page and on an emitted report page: the
        navbar stayed bright and undimmed over the scrim's top 51px, and
        document.elementFromPoint at the centre of the overlay's own close
@@ -591,7 +675,7 @@
     background-color: rgba(31, 35, 40, 0.85);
 }
 
-.tqa-lightbox[data-tqa-open],
+/* Open is the one runtime class the script writes on the overlay. */
 .tqa-lightbox.report-lightbox-is-open {
     display: flex;
 }
@@ -642,6 +726,15 @@
     background-color: rgba(31, 35, 40, 0.9);
 }
 
+/* Pressed feedback on the close control, matching the toggle's. Its surface
+   is already dark on a dark scrim, so the acknowledgement is a brighter
+   border and a filled ground rather than a tint shift that would be
+   invisible here. */
+.tqa-lightbox-close:active {
+    border-color: #ffffff;
+    background-color: rgba(255, 255, 255, 0.28);
+}
+
 .tqa-lightbox-close:focus-visible {
     outline: 3px solid #ffffff;
     outline-offset: 2px;
@@ -679,6 +772,15 @@
     background-color: var(--tqa-surface-alt, #f6f8fa);
 }
 
+/* Pressed feedback, so activation is acknowledged on the control itself
+   rather than only through the region appearing or disappearing further down
+   the page. Declared after :hover and before :focus-visible so a control
+   being held down while focused still shows its focus ring. */
+.tqa-toggle:active {
+    border-color: var(--tqa-line-strong, #b6bcc5);
+    background-color: #e6eaf0;
+}
+
 .tqa-toggle:focus-visible {
     outline: 2px solid var(--tqa-link-fg, #0b5fa5);
     outline-offset: 2px;
@@ -713,57 +815,58 @@
     background-color: #e6eaf0;
 }
 
+/* THE SELECTED FILTER, and it has to be persistent: :active above lasts only
+   while the pointer is held, so without this rule a chosen filter became
+   indistinguishable from the unchosen ones the instant the button was
+   released, while the rows it hid stayed hidden - a page filtered with no
+   visible indication of what by.
+
+   The behaviour script maintains aria-pressed on every filter control,
+   including the reserved "all" control, which is pressed exactly while no
+   status is selected. That attribute is therefore the state to select on: it
+   is the accessible form as well as the stylistic one, and using it keeps the
+   runtime class set at three.
+
+   The cue is deliberately NOT colour alone. Inverting the ground carries it
+   for a reader who sees colour, and the inset ring plus the heavier weight
+   carry it in greyscale, in high contrast and for colour-vision deficiency.
+   White on this blue measures 5.9:1, above the 4.5:1 threshold for the
+   button's own 13px text. */
+.tqa-filter-btn[aria-pressed="true"] {
+    border-color: var(--tqa-link-hover, #083f6e);
+    background-color: var(--tqa-link-fg, #0b5fa5);
+    box-shadow: inset 0 0 0 2px var(--tqa-surface, #ffffff);
+    color: var(--tqa-surface, #ffffff);
+    font-weight: 700;
+}
+
+.tqa-filter-btn[aria-pressed="true"]:hover {
+    border-color: var(--tqa-link-hover, #083f6e);
+    background-color: var(--tqa-link-hover, #083f6e);
+}
+
 .tqa-filter-btn:focus-visible {
     outline: 2px solid var(--tqa-link-fg, #0b5fa5);
     outline-offset: 2px;
 }
 
 /* ---- state ----------------------------------------------------------------
-   Every hide here is gated on a state attribute, so removing the attributes -
-   or never adding them - leaves the page expanded and fully visible.
+   THE WHOLE OF IT. Three classes, written only by the behaviour script and
+   read only here, each sitting on the element it describes: the collapsible
+   region, the filterable row, the overlay. No state is ever server-rendered
+   and no state is expressed as an attribute, so their joint absence - which
+   is what every template emits - is the complete, expanded, unfiltered page.
+
+   Two selectors deliberately carry no "tqa-" prefix. These are the runtime
+   classes themselves and their names are fixed by the script that writes
+   them; they are already namespaced by their own "report-is-" prefix, which
+   no third-party stylesheet in the emitted tree uses.
+
+   An earlier revision of this file also carried a parallel family of boolean
+   state attributes for these same three states. No template ever produced
+   them and no script ever wrote them, so every one of those rules was dead;
+   they are gone, and the three classes below are the only state contract.
    -------------------------------------------------------------------------- */
-
-.tqa-step[data-tqa-collapsed] .tqa-step-detail {
-    display: none;
-}
-
-.tqa-scenario[data-tqa-collapsed] .tqa-steps {
-    display: none;
-}
-
-.tqa-feature[data-tqa-collapsed] .tqa-scenario,
-.tqa-feature[data-tqa-collapsed] .tqa-background {
-    display: none;
-}
-
-.tqa-step[data-tqa-collapsed] .tqa-toggle::before,
-.tqa-scenario[data-tqa-collapsed] .tqa-toggle::before,
-.tqa-feature[data-tqa-collapsed] .tqa-toggle::before {
-    content: "\25B8";
-}
-
-[data-tqa-filtered] {
-    display: none;
-}
-
-/* The same three states, in the form the script actually produces.
-   ----------------------------------------------------------------------------
-   The rules above were written against boolean state attributes carried by the
-   enclosing element. app/static/js/report.js, which is the sole owner of
-   interactivity across all three surfaces, publishes a different vocabulary: it
-   toggles its own three state classes on the region ITSELF - report-is-collapsed
-   on the collapsible region, report-is-filtered-out on the filterable row and
-   report-lightbox-is-open on the overlay - and it never writes an attribute of
-   the form above. Measured in Chrome: after a thumbnail click the overlay's
-   class became "tqa-lightbox report-lightbox-is-open" with its image source and
-   caption correctly populated, yet no rule matched, so the overlay stayed
-   display:none and the lightbox could not be opened by a reader at all. The
-   mirrors below close that gap for all three states.
-
-   The authored default is unchanged and so is the contract at the top of this
-   file: absence of BOTH forms still means expanded, visible and closed, no
-   state is ever server-rendered, and a page with scripting disabled loses
-   interactivity without losing content. */
 
 .report-is-collapsed {
     display: none;
@@ -774,10 +877,172 @@
 }
 
 /* The collapsed glyph, from the accessible state the script maintains on the
-   control itself, since the class above sits on the region and not on an
+   control itself, since the classes above sit on the region and not on an
    ancestor of the control. */
 .tqa-toggle[aria-expanded="false"]::before {
     content: "\25B8";
+}
+
+/* ---- the generated report tree --------------------------------------------
+   Rules that exist only because one of the two HTML outputs is emitted beside
+   three third-party stylesheets this project does not own and must not edit.
+   Every selector here is still led by a "tqa-" class, so none of it can reach
+   markup outside this project's own containers.
+   -------------------------------------------------------------------------- */
+
+/* THE STATUS PALETTE, WHERE A THIRD-PARTY STYLESHEET ALSO CLAIMS IT.
+   ---------------------------------------------------------------------------
+   That stylesheet colours bare status words as class names, and its choices
+   are not this project's: skipped is a light BLUE there, which is the one
+   status whose colour the plan fixes explicitly - pending and skipped are
+   yellow or orange, and blue reads as neither. Its selectors are single
+   classes, so each rule below outdoes it on specificity and the palette this
+   file declares wins wherever it applies, in any link order.
+
+   Both surfaces that carry these class names - the statistics tables and the
+   brief line of a feature, scenario or steps group - are covered, and the
+   status is still never carried by colour alone: the badge beside it spells
+   the word out. */
+.tqa-table th.passed,
+.tqa-table td.passed,
+.tqa-feature .brief.passed,
+.tqa-scenario .brief.passed,
+.tqa-background .brief.passed,
+.tqa-steps .brief.passed {
+    background-color: var(--tqa-pass-bg, #e7f6ea);
+    color: var(--tqa-pass, #12652b);
+}
+
+.tqa-table th.failed,
+.tqa-table td.failed,
+.tqa-feature .brief.failed,
+.tqa-scenario .brief.failed,
+.tqa-background .brief.failed,
+.tqa-steps .brief.failed {
+    background-color: var(--tqa-fail-bg, #fdeceb);
+    color: var(--tqa-fail, #a01508);
+}
+
+.tqa-table th.skipped,
+.tqa-table td.skipped,
+.tqa-feature .brief.skipped,
+.tqa-scenario .brief.skipped,
+.tqa-background .brief.skipped,
+.tqa-steps .brief.skipped {
+    background-color: var(--tqa-skipped-bg, #fdefe0);
+    color: var(--tqa-skipped, #8a4a00);
+}
+
+.tqa-table th.pending,
+.tqa-table td.pending,
+.tqa-feature .brief.pending,
+.tqa-scenario .brief.pending,
+.tqa-background .brief.pending,
+.tqa-steps .brief.pending {
+    background-color: var(--tqa-pending-bg, #fdf7d9);
+    color: var(--tqa-pending, #6a5000);
+}
+
+.tqa-table th.undefined,
+.tqa-table td.undefined,
+.tqa-feature .brief.undefined,
+.tqa-scenario .brief.undefined,
+.tqa-background .brief.undefined,
+.tqa-steps .brief.undefined {
+    background-color: var(--tqa-undefined-bg, #fce9db);
+    color: var(--tqa-undefined, #8f3d00);
+}
+
+.tqa-table th.untested,
+.tqa-table td.untested,
+.tqa-table th.unknown,
+.tqa-table td.unknown,
+.tqa-feature .brief.untested,
+.tqa-scenario .brief.untested,
+.tqa-background .brief.untested,
+.tqa-steps .brief.untested {
+    background-color: var(--tqa-neutral-bg, #eef0f3);
+    color: var(--tqa-neutral, #494f58);
+}
+
+.tqa-table th.ambiguous,
+.tqa-table td.ambiguous,
+.tqa-feature .brief.ambiguous,
+.tqa-scenario .brief.ambiguous,
+.tqa-background .brief.ambiguous,
+.tqa-steps .brief.ambiguous {
+    background-color: var(--tqa-ambiguous-bg, #f2eff7);
+    color: var(--tqa-ambiguous, #4c4557);
+}
+
+/* THE PAGE CHROME of the generated tree - its navigation bar and its footer.
+   ---------------------------------------------------------------------------
+   The third-party stylesheet renders ordinary text in both at #777 on #f8f8f8,
+   which measures 4.217:1 and is below the 4.5:1 required of normal text. The
+   foreground below measures 8.1:1 on that same ground, and the link colour
+   this file already uses for body copy measures 5.6:1 on it, so both clear
+   the threshold with margin. The vendored file is not edited; a caller adds
+   this class to the two elements and these rules outdo it on specificity.
+   Hover and focus are declared too, since a state that reverts to the
+   third-party colour would reintroduce the same deficit on interaction. */
+.tqa-chrome .navbar-text,
+.tqa-chrome .navbar-text small,
+.tqa-chrome p,
+.tqa-chrome small {
+    color: #43494f;
+}
+
+.tqa-chrome .nav > li > a,
+.tqa-chrome a {
+    color: var(--tqa-link-fg, #0b5fa5);
+}
+
+.tqa-chrome .nav > li > a:hover,
+.tqa-chrome .nav > li > a:focus,
+.tqa-chrome a:hover,
+.tqa-chrome a:focus {
+    color: var(--tqa-link-hover, #083f6e);
+}
+
+.tqa-chrome .nav > li > a:focus-visible,
+.tqa-chrome a:focus-visible {
+    outline: 2px solid var(--tqa-link-fg, #0b5fa5);
+    outline-offset: 2px;
+}
+
+/* THE COLLAPSE CONTROL of the generated tree, as a real button.
+   ---------------------------------------------------------------------------
+   The tree's result detail is expanded and collapsed by the same behaviour
+   script as every other surface, through data-report-toggle, aria-controls
+   and the report-is-collapsed class - not by the third-party collapse widget,
+   which owns no state this file can read and leaves its regions hidden when
+   there is no script at all. A real button is what makes the control
+   focusable and operable by keyboard; the rules below give that button the
+   full-width, unstyled, pointer-cursor appearance the tree's own control had.
+
+   The direction of the tree's chevron glyph came from a class that widget
+   added. It comes from aria-expanded now, which the script maintains, so the
+   glyph and the region can no longer disagree. */
+.tqa-collapse-control {
+    display: block;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.tqa-collapse-control:focus-visible {
+    outline: 2px solid var(--tqa-link-fg, #0b5fa5);
+    outline-offset: 2px;
+}
+
+.tqa-collapse-control[aria-expanded="false"] .chevron::after {
+    content: "\f054";
 }
 
 /* ---- artifact index and empty state -------------------------------------- */
@@ -909,15 +1174,38 @@
         display: none;
     }
 
-    .tqa-step[data-tqa-collapsed] .tqa-step-detail,
-    .tqa-scenario[data-tqa-collapsed] .tqa-steps,
-    .tqa-feature[data-tqa-collapsed] .tqa-scenario:not([data-tqa-filtered]),
-    .tqa-feature[data-tqa-collapsed] .tqa-background,
+    /* Collapse is an affordance, so a collapsed region expands on paper;
+       filtering is a deliberate choice, so a filtered row stays hidden -
+       which is exactly what the exclusion expresses. */
     .report-is-collapsed:not(.report-is-filtered-out) {
         display: block !important;
     }
 
-    [data-tqa-status] {
+    /* The same, for the regions of the generated report tree. That tree's own
+       stylesheet hides a collapsible region unless it carries the widget
+       class its script adds, and on paper there is no script and no reader to
+       expand anything - so every region the port authors inside its own
+       containers is forced visible here, and a printed page carries the whole
+       result rather than only the parts that happened to be open. Scoped to
+       this project's containers so no navigation or third-party widget
+       outside them is affected. */
+    .tqa-feature .collapsable-details,
+    .tqa-scenario .collapsable-details,
+    .tqa-background .collapsable-details,
+    .tqa-steps .collapsable-details {
+        display: block !important;
+    }
+
+    /* Paper does not scroll, so the horizontal constraint that keeps a wide
+       table inside a narrow screen would simply crop it here. The constraint
+       and its frame are both dropped and the table prints at its full
+       width. */
+    .tqa-table-wrap {
+        overflow: visible;
+        border: 0;
+    }
+
+    [data-report-status] {
         --tqa-status-bg: transparent;
     }
 

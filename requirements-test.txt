@@ -7,7 +7,10 @@
 # Unit-test runner for the port's own suite under tests/ - replaces junit:junit.
 pytest==9.1.1
 
-# Coverage measurement for the per-package coverage gates enforced by the
-# Makefile `coverage` target (app/utils 90, app/pages 85,
-# app/automation 80, app/reporting 80).
+# Coverage measurement for the four per-package coverage gates: app/utils 90,
+# app/pages 85, app/automation 80, app/reporting 80. The Makefile `coverage`
+# target is their canonical declaration, and both runner scripts apply the
+# same four scoped commands ahead of the browser run - CI must not depend on
+# make being installed - so this pin is required by the pipeline and not only
+# by a developer command.
 pytest-cov==7.0.0

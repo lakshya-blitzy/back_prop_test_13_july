@@ -43,6 +43,34 @@
   and the line feeds are reproduced as measured, so a reader diffing this
   output against the reference sees the shell line up.
 
+  ---------------------------------------------------------------------------
+  THE ONE DELIBERATE ADDITION TO THE MEASURED SHELL
+  ---------------------------------------------------------------------------
+  ONE line of the head is this port's own and is not in the measured
+  reference: the viewport meta,
+
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  tab-indented like its neighbours and placed AFTER the favicon link and
+  BEFORE the style element, so the emitted head reads title, content type,
+  favicon, viewport, style. That position is chosen so the first six lines of
+  the rendered document stay byte-identical to the measured reference shell -
+  declaration, html, head, title, content-type meta, favicon - and the
+  addition becomes line seven, which is what keeps a diff against the
+  reference aligned and is the shape tests/test_html_report.py encodes.
+
+  It is required rather than decorative. The plan's §0.3.4 makes this
+  artifact's layout RESPONSIVE WITH PRINT RULES, and app/static/css/main.css
+  delivers that mobile-first: its layout widens only inside
+  "only screen and (min-width: 600px)" and "(min-width: 992px)". Without a
+  viewport meta a mobile browser lays the page out in a roughly 980px
+  imaginary viewport and then scales it down, so both of those breakpoints
+  match on a phone and the desktop grid is what gets shrunk to fit. The one
+  line above is the only way a document can tell the browser otherwise, and
+  it costs the artifact nothing it may not spend: a meta element declares no
+  address at all, so the "no external asset reference" rule below is
+  untouched.
+
   The favicon link is the reference line, byte for byte. Its value is an
   inline data URI whose text is percent-encoded down to alphanumerics and
   the characters percent, plus, comma, hyphen, period, slash and colon: it
@@ -85,8 +113,9 @@
                keyword, line, name, description, type and steps plus its own
                rolled-up status, and, for a scenario, id, start_timestamp and
                tags. Every feature is handed to the feature template of this
-               folder whole - this file reads only the status values, and only
-               to build the filter vocabulary.
+               folder whole - this file reads only the ELEMENT status values,
+               and only to build the filter vocabulary, because an element is
+               the only level this page registers as filterable.
 
   summary      Counts of features, scenarios and steps by status, plus the
                run's earliest scenario start. Deliberately THE SAME SHAPE the
@@ -265,10 +294,14 @@
   Every control is a real, non-navigating button carrying its own text label,
   which is what the behaviour script requires - it never suppresses an
   authored default action - and what makes each control's purpose readable
-  without colour. The filter controls are authored UNPRESSED because the
-  unfiltered page is the authored state, and no expanded-state attribute is
-  authored on the expand-all pair: those two act on every detail region in
-  scope rather than on one, and the script owns the mirrors it manages.
+  without colour. The PER-STATUS filter controls are authored UNPRESSED
+  because the unfiltered page is the authored state, while "All results" is
+  authored PRESSED: it is the reserved value that clears the show-set, and an
+  empty show-set is the state this page opens in, so it is the control that
+  describes what the reader is looking at. The behaviour script re-derives
+  that same value. No expanded-state attribute is authored on the expand-all pair
+  either: those two act on every detail region in scope rather than on one,
+  and the script owns the mirrors it manages.
 
   Colour is never the sole carrier of meaning anywhere on this page: each
   filter names its status in words, each badge spells its status out, and the
@@ -293,24 +326,31 @@
 {%- set feature_list = features if (features is defined and features is sequence and features is not string and features is not mapping) else [] -%}
 {%- set renderable_features = feature_list|select('mapping')|list -%}
 {#- ---- the filter vocabulary ------------------------------------------
-    Every filterable element on this page - each feature, and each element
-    inside it - carries its own rolled-up status, and a filter button for a
-    status nothing carries could only ever blank the page. So the button set
-    is the set of statuses ACTUALLY PRESENT, read from the model and folded
-    through the badge partial's normaliser, which is also what puts an absent
-    status in the neutral state rather than dropping it. No count is claimed
+    Every filterable element on this page is an ELEMENT - a scenario or a
+    background, registered as such by the element template of this folder -
+    and never a feature, whose status is a roll-up of exactly those elements:
+    hiding a filterable element hides its whole subtree, so a filterable
+    feature would take its own passed scenarios down with it. The button set
+    is therefore the set of ELEMENT statuses ACTUALLY PRESENT, read from the
+    model and folded through the badge partial's normaliser, which is also
+    what puts an absent status in the neutral state rather than dropping it.
+    A feature's aggregate adds nothing to that set while its elements are
+    read - the fold is by precedence over those same elements - and a status
+    only an aggregate carries, which is what a feature holding no element
+    rolls up to, would be a button that blanks the page. No count is claimed
     beside a filter: the tally in the metadata block is the one place counts
     are stated, and a second count computed here could disagree with it.
 
-    The order is fixed rather than sorted - the reading order the metadata
-    block uses, with the fallback last - so identical input yields identical
-    markup. The alphabetical sorting the pipeline's publisher is configured
-    with is a display option of that publisher and imposes nothing on the
-    artifacts, so nothing is ordered on its account. -#}
-{%- set status_order = ['passed', 'failed', 'skipped', 'pending', 'undefined', 'untested', 'ambiguous', 'unknown'] -%}
+    The order is fixed rather than sorted, and it is IMPORTED from the badge
+    partial that owns the status vocabulary - its reading order, with the
+    fallback last, which is the same sequence the metadata block iterates -
+    so identical input yields identical markup and no surface can order
+    statuses differently from another. The alphabetical sorting the pipeline's
+    publisher is configured with is a display option of that publisher and
+    imposes nothing on the artifacts, so nothing is ordered on its account. -#}
+{%- set status_order = badge.STATUS_READING_ORDER -%}
 {%- set present_statuses = [] -%}
 {%- for feature_item in renderable_features -%}
-    {%- set _ = present_statuses.append(badge.status_token(feature_item.get('status'))) -%}
     {%- set element_items = feature_item.get('elements') -%}
     {%- for element_item in (element_items if (element_items is sequence and element_items is not string and element_items is not mapping) else []) if element_item is mapping -%}
         {%- set _ = present_statuses.append(badge.status_token(element_item.get('status'))) -%}
@@ -323,6 +363,7 @@
 	<title>Cucumber</title>
 	<meta content="text/html;charset=utf-8" http-equiv="Content-Type">
 	<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20class%3D%22ml-3%20ml-md-0%22%20viewBox%3D%220%200%2040.59%2046.31%22%20width%3D%2240.59%22%20height%3D%2246.31%22%3E%0A%20%20%20%20%3Cg%3E%0A%20%20%20%20%20%20%20%20%3Cpath%20fill%3D%22%2323d96c%22%20fill-rule%3D%22evenodd%22%20d%3D%22M30.283%203.645q-.528-.317-1.08-.593a16.164%2016.164%200%2000-1.154-.518c-.124-.052-.247-.1-.372-.149-.343-.127-.689-.268-1.042-.371a19.427%2019.427%200%2010-9.792%2037.51v5.56c11.676-1.753%2022.016-10.979%2022.787-23.093.459-7.289-3.193-14.73-9.347-18.346z%22%2F%3E%0A%20%20%20%20%20%20%20%20%3Cpath%20fill%3D%22%23173647%22%20d%3D%22M15.787%2046.307v-5.935A20.472%2020.472%200%201126.959%201.015c.274.08.557.187.832.291l.248.093c.165.064.291.113.417.167.348.137.739.313%201.208.543q.589.295%201.153.633c6.393%203.756%2010.354%2011.518%209.857%2019.316-.763%2012-10.722%2022.122-23.679%2024.067zm4.8-44.214h-.026a18.366%2018.366%200%2000-3.524%2036.408l.85.165v5.18c11.392-2.224%2020.009-11.272%2020.686-21.922.448-7.033-3.1-14.018-8.83-17.383l-.008-.005A14.691%2014.691%200%200027.654%203.5a5.74%205.74%200%2000-.344-.138l-.27-.1a9.49%209.49%200%2000-.708-.249%2018.425%2018.425%200%2000-5.743-.92z%22%2F%3E%0A%20%20%20%20%20%20%20%20%3Cpath%20fill%3D%22%23173647%22%20fill-rule%3D%22evenodd%22%20d%3D%22M16.666%2010.58a1.8%201.8%200%20011.583.608%204.184%204.184%200%2001.728%201.107c.645%201.422%201.027%203.461.23%204.605a6.334%206.334%200%2001-3.981-3.087%203.236%203.236%200%2001-.347-1.339%201.957%201.957%200%20011.787-1.894zm-5.683%208.025a7.742%207.742%200%20001.218.737%205.789%205.789%200%20004.883-.138%206.116%206.116%200%2000-3.345-3.45%203.664%203.664%200%2000-1.442-.321%201.884%201.884%200%2000-.319%200%201.766%201.766%200%2000-.995%203.172zm6.1%203.433c-.777-.518-2.379-.309-3.312-.292a4.416%204.416%200%2000-1.666.352%203.5%203.5%200%2000-1.218.738%201.817%201.817%200%20001.409%203.171%203.3%203.3%200%20001.442-.321c1.436-.62%203.141-2.32%203.346-3.648zm2.61%202a6.556%206.556%200%2000-3.724%203.506%203.091%203.091%200%2000-.321%201.314%201.907%201.907%200%20003.3%201.346%207.422%207.422%200%2000.7-1.218c.621-1.333.866-3.72.046-4.948zm2.557-7.167a5.941%205.941%200%20003.7-3.167%203.243%203.243%200%2000.319-1.346%201.915%201.915%200%2000-1.794-1.954%201.832%201.832%200%2000-1.6.641%207.382%207.382%200%2000-.705%201.218c-.62%201.434-.842%203.48.081%204.603zm4.208%2012.115a3.244%203.244%200%2000-.321-1.345%205.869%205.869%200%2000-3.554-3.269%205.386%205.386%200%2000-.226%204.711%204.147%204.147%200%2000.7%201.121c1.133%201.23%203.505.32%203.402-1.218zm4.2-6.28a7.466%207.466%200%2000-1.217-.7%204.425%204.425%200%2000-1.666-.352%206.4%206.4%200%2000-3.188.555%205.959%205.959%200%20003.316%203.386%203.672%203.672%200%20001.442.32%201.8%201.8%200%20001.31-3.209z%22%2F%3E%0A%20%20%20%20%3C%2Fg%3E%0A%3C%2Fsvg%3E">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
 	<style>
 {{ inline_css }}
 	</style>
@@ -344,7 +385,14 @@
     </p>
     {%- if renderable_features %}
     <div class="tqa-filter" role="group" aria-label="Filter results by status">
-        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="false">All results</button>
+        {#- Authored PRESSED, because it is: the filter model is a show-set
+            per scope and an EMPTY set means show everything, so with no
+            status selected this is the control that describes what the reader
+            is looking at. The script re-derives the same value on init; this
+            is what the page asserts before the script runs and with no
+            scripting at all, and it is the value the two other surfaces
+            author for the same control. -#}
+        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="true">All results</button>
         {%- for token in filter_tokens %}
         <button type="button" class="tqa-filter-btn" data-report-filter="{{ token }}" aria-pressed="false">{{ token|capitalize }}</button>
         {%- endfor %}

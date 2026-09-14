@@ -66,9 +66,11 @@ about ``LogOutSD.java`` rather than a preference:
   keyboard helper nor the action-chain helper is imported.
 * **Only** :func:`~app.automation.wait_visible_element` from the wait family.
   ``LogOutSD.java:18`` waits on ``ExpectedConditions.visibilityOf`` applied to
-  a ``WebElement``, and that helper is the one wrapper over
-  ``expected_conditions.visibility_of``; the locator-shaped helper beside it
-  resolves a different predicate.
+  a ``WebElement``, and that helper is the port of exactly that predicate.
+  The element it received there was a ``PageFactory`` proxy that re-located on
+  every touch, so the helper takes the **locator** - the page object's
+  upper-case constant, ``page.POP_UP_BUTTON`` - and re-resolves it on each
+  poll of the wait, which is where the three seconds below apply.
 * **Nothing from the configuration accessors** - this class reads no property,
   so the six-key configuration surface of AAP 0.4.1 is untouched here.
 * **No driver-lifecycle call of any kind**, neither creation nor teardown.
@@ -215,14 +217,14 @@ def user_click_log_out_option(context) -> None:
     the contract and is reproduced byte-exactly, so this function is named
     after the phrase and the mismatch is not carried over.
 
-    Each accessor below re-resolves its element against the live DOM, so the
-    menu is located once for the wait and again for the click, mirroring the
-    ``PageFactory`` proxy the Java field held, which re-resolves on every
-    method call.
+    The menu is located afresh for the wait - inside the wait, on every poll,
+    from the locator constant it is given - and again for the click, which
+    goes through the accessor.  Both mirror the ``PageFactory`` proxy the Java
+    field held, which re-resolved on every method call.
     """
     page = _page(context)
 
-    wait_visible_element(page.pop_up_button, 3)
+    wait_visible_element(page.POP_UP_BUTTON, 3)
     page.pop_up_button.click()
     page.log_out_button.click()
 
@@ -290,8 +292,8 @@ def user_can_not_click_the_step_back_button_to_go_the_home_page(
     to ``back()``, the Python binding having no ``navigate()`` intermediary.
 
     ``:33`` passes no message to ``assertTrue``, so this ``assert`` carries
-    none either - inventing one would put text in the report and in
-    ``target/cucumber.json``'s ``error_message`` that the source never emits.
+    none either - inventing one would put text in the report and in the merged
+    Cucumber JSON report's ``error_message`` that the source never emits.
     """
     context.driver.back()
 

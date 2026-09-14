@@ -56,14 +56,18 @@
   The single URL is still built with url_for, and only ever for web.index.
   Two reasons, and the second is the interesting one. First, url_for adds no
   new failure mode: base.html already calls it for the stylesheet, the script
-  and all three navigation links, so this page inherits that call pattern
+  and every navigation link it emits, so this page inherits that call pattern
   whether or not it makes a call of its own. Second, of the six endpoints the
   blueprint carries, web.index is the one that cannot itself fail - GET /
   answers 200 on an empty workspace, before any run has produced anything -
   whereas web.reports_overview and the three routes beside it are bound by
   the viewer's data-availability rule and answer 404 when no usable result
   file exists. A page whose purpose is not to compound a failure links only
-  to the route that cannot fail.
+  to the route that cannot fail. The shell applies that same rule to its own
+  navigation, and an error page sets no active_nav, so the two report
+  destinations are not offered here either. The rendered response therefore
+  carries two anchors - the shell's Artifacts link and this file's single one -
+  and both lead to web.index, so no link in it can fail.
 
   ---------------------------------------------------------------------------
   CONFORMANCE TO THE TWO FIXED CONTRACTS
@@ -78,7 +82,7 @@
   emits no heading at all. active_nav is left unset - the shell reads it as
   active_nav|default(''), so unset is both strict-undefined safe and exactly
   right, because no navigation item is the current view on an error page - so
-  the shell marks none of the three, and no current-page ARIA marker reaches
+  the shell marks nothing as current, and no current-page ARIA marker reaches
   the response.
 
   main.css - the tqa- namespace, composed from names that stylesheet already

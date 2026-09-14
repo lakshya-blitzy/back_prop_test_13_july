@@ -97,7 +97,11 @@
   Identical on both reference feature pages:
 
       the layout's chrome            head, navigation, build-info table
-      the lead                       <h2>Feature Report</h2>, AND NOTHING ELSE
+      the lead                       "Feature Report", AND NOTHING ELSE. The
+                                     reference's element is h2; this page
+                                     emits <h1 class="h2"> for the reason
+                                     recorded at the block itself, which is
+                                     the same type scale.
       the statistics table           one row, inside the Bootstrap grid
       the collapse-all control       the chevron pair
       the element tree               div.feature and everything under it
@@ -116,8 +120,9 @@
   carries two as well, while overview-failures.html carries one. A feature
   page runs to hundreds of lines, so the lower control is what lets a reader
   collapse the tree again without scrolling back up. They are rendered from
-  ONE macro below so the pair cannot drift apart, and neither consumes a
-  collapse id.
+  ONE macro - pretty/_macros.html's collapse_all_control, shared with tag.html,
+  which carries the same pair in the same two positions - so the four blocks
+  cannot drift apart, and none of them consumes a collapse id.
 
   TWO id="report" CONTAINERS BECOME ONE. The reference wraps BOTH the
   statistics table and the element tree in id="report", which is invalid - one
@@ -188,52 +193,51 @@
   it again changes nothing.
 
   ---------------------------------------------------------------------------
-  THE COLLAPSE-ALL CONTROL'S DRIVER: ONE OWNER, DECIDED ON EVIDENCE
+  THE COLLAPSE-ALL CONTROL'S DRIVER: ONE OWNER, app/static/js/report.js
   ---------------------------------------------------------------------------
-  Two independent state mechanisms coexist in this tree, and attaching both to
-  one control would give it two state machines that desynchronise the moment a
-  reader touches either:
+  AAP 0.3.4 names app/static/js/report.js the owner of filtering, expansion
+  and collapse, and the screenshot lightbox, on every surface this project
+  writes. This page holds to that without exception: the collapse-all pair
+  carries data-report-toggle-all="expand" and "collapse", the element, steps
+  and message regions of the tree below carry data-report-detail, and each of
+  their controls is a button carrying data-report-toggle with aria-controls.
+  The vendored collapse widget drives nothing here - no data-toggle, no
+  data-target, no "in" class - and no inline event-handler attribute of any
+  kind is emitted, so the emitted page needs no CSP carve-out for inline
+  script.
 
-    - the VENDORED collapse widget owns the element, steps and message
-      containers, driven by their own data-toggle and data-target attributes
-      and its own "in" class, which _element_tree.html applies to
-      failure-bearing containers as measured. That class is generator
-      vocabulary, not one of this port's state hooks.
-    - app/static/js/report.js owns filtering, step-detail expansion and the
-      screenshot overlay, through its data-report-* selection attributes.
+  WHAT THAT REPLACED, AND WHY. The reference drove this pair with two inline
+  onClick attributes calling the vendored plugin over jQuery -
+  $('#report .collapsable-details').collapse('show') and .collapse('hide') -
+  and the macro is rendered twice, so each feature page carried four of them.
+  Two independent defects followed. The handler attributes are inline script,
+  which this project's templates are forbidden to emit; and the widget they
+  called hides a .collapse region unless it also carries "in", which
+  _element_tree.html applied to failure-bearing regions only - so a reader
+  with scripting disabled could not open a passing scenario at all and a
+  printed page omitted it. _element_tree.html records the measurements; the
+  regions are authored expanded there now, and this pair is what a reader uses
+  to collapse them.
 
-  app/static/js/report.js WAS READ AS GENERATED, and it does not manipulate
-  the vendored widget's class at all: its three state classes are
-  report-is-collapsed, report-is-filtered-out and report-lightbox-is-open, and
-  its toggle-all handler resolves [data-report-detail] regions and toggles
-  report-is-collapsed on them. The element and steps containers on this page
-  carry no data-report-detail - they are the vendored widget's - so a
-  data-report-toggle-all control here would address a different region set
-  altogether, and on this page usually an empty one, since _element_tree.html
-  withholds the failure text and splices arguments inline and step_row then
-  emits no detail region at all.
+  ONE DRIVER PER CONTROL STILL HOLDS, which is what the two-state-machine
+  concern was really about: report.js's toggle-all resolves every
+  [data-report-detail] region in its scope and toggles report-is-collapsed on
+  it, and nothing else on this page touches those regions. report.js writes
+  exactly three runtime classes - report-is-collapsed, report-is-filtered-out
+  and report-lightbox-is-open - and no template authors any of them.
 
-  THE DECISION, therefore: the reference's own onClick is RETAINED, invoking
-  the vendored plugin as the reference does - $('#report .collapsable-details')
-  .collapse('show') and .collapse('hide'). That is reference-carried
-  INVOCATION of a vendored plugin, not new inline behaviour, and this folder
-  is forbidden from reimplementing the widget's collapse logic. NO
-  data-report-toggle-all is emitted anywhere on this page, so exactly one
-  driver is attached to each control and the containers stay purely
-  vendor-driven. tests/test_pretty_reports.py mirrors this choice: the pair
-  renders with the measured classes, and no page carries both an onClick and a
-  data-report-toggle-all.
+  step_row's own toggle and detail region live INSIDE a step, which is a leaf
+  of the tree, so they nest inside an element's region rather than competing
+  with it, and the toggle-all pair reaches them too.
 
-  No report.js state hook is attached to the element or steps containers
-  either. step_row's own toggle and detail region live INSIDE a step, which is
-  a leaf here, so they never compete with the widget - that nesting is
-  expected and correct.
-
-  NO data-report-root IS EMITTED. The script falls back to the whole document
-  when no such ancestor exists, this page has no filter control and no
-  toggle-all of the script's own, and a scope containing nothing the script
-  scopes is a hook with no purpose - which is the reasoning
-  overview_steps.html records for the same omission.
+  NO data-report-root IS EMITTED, and the omission is now load-bearing rather
+  than merely harmless. The script falls back to the whole document when no
+  root ancestor exists; this page has exactly one report region, the
+  element-tree container, so the document scope and a root on that container
+  would select the same elements - and the two collapse-all controls sit
+  OUTSIDE that container, above and below it, where a root on it would put
+  them in a different scope from the regions they act on. The filter group
+  below sits inside it for the same reason read the other way round.
 
   ---------------------------------------------------------------------------
   WHAT THIS PAGE DELEGATES, AND KEEPS DELEGATED
@@ -258,11 +262,12 @@
   the description rendered with its leading indentation verbatim and emitted
   even when empty, the Background occurrence repeated before every scenario
   and carrying no id, tags or start timestamp, the per-scenario start
-  timestamp, the "in" rule on failure-bearing containers only, the step rows
-  with their arguments spliced into the name and a duration fallback for a
-  skipped step that carries no duration key, the failure text in an escaped
-  monospace block, and the screenshot macro called unguarded because its own
-  emptiness is the test and a scenario with no embedding is the normal state.
+  timestamp, every collapsible region authored expanded with a real button
+  beside it, the step rows with their arguments spliced into the name and a
+  duration fallback for a skipped step that carries no duration key, the
+  failure text in an escaped monospace block, and the screenshot macro called
+  unguarded because its own emptiness is the test and a scenario with no
+  embedding is the normal state.
   The single per-page screenshot overlay is the layout's.
 
   COLLAPSE IDS ARE UNIQUE BECAUSE THIS PAGE THREADS ONE COUNTER, which is the
@@ -329,16 +334,20 @@
       clean, but the rule is absolute for output: the reference's markers stay
       in the read-only reference checkout and every writer of this port emits
       clean pages.
-    - NO PRESENTATION STATE OF THE PORT'S OWN: none of main.css's three
-      boolean hooks - data-tqa-collapsed, data-tqa-filtered, data-tqa-open -
-      and none of report.js's three runtime state classes. The stylesheet
+    - NO PRESENTATION STATE OF THE PORT'S OWN: none of the three runtime
+      state classes - report-is-collapsed, report-is-filtered-out,
+      report-lightbox-is-open - which report.js alone writes and main.css
+      alone reads, and which are the whole of this project's state
+      vocabulary. The stylesheet
       reads their absence as expanded, visible and closed, so server output
       always describes a fully expanded, fully visible page and stays correct
-      with scripting off and on paper. Selection attributes are a different
-      thing and are allowed; the vendored widget's "in" is separate again and
-      is kept, applied by _element_tree.html.
-    - NO INLINE JAVASCRIPT beyond the collapse-all control's onClick, which is
-      the reference's own and is the decision recorded above. No chart belongs
+      with scripting off and on paper. Selection and behaviour hooks are a
+      different thing and are allowed: this page emits data-report-status on
+      its report container, data-report-toggle-all on the two collapse-all
+      buttons and data-report-filter on each filter button, and the vendored
+      widget's "in" class is emitted nowhere in this folder any more.
+    - NO INLINE JAVASCRIPT, AND NO EVENT-HANDLER ATTRIBUTE. The collapse-all
+      pair's onClick is gone, for the reason recorded above. No chart belongs
       on this page and the tablesorter initialisation is the layout's, emitted
       exactly once from there.
     - CLASS VOCABULARY: the bare generator classes this page itself emits -
@@ -347,93 +356,118 @@
       fa-2x and collapsable-control, the last of which
       app/static/vendor/css/cucumber.css styles at line 206 while the icons
       resolve from the vendored Font Awesome - and alongside them the port's
-      own data-tqa-status hook on the report container. main.css is entirely
-      tqa- prefixed with no bare element, class or id selector, so the two
-      sets are declared over disjoint selectors and no collision is possible.
+      own tqa-filter and tqa-filter-btn on the filter group and its
+      data-report-status hook on the report container - together with btn,
+      btn-default and btn-lg, which the vendored bootstrap.min.css declares
+      and which give the two collapse-all buttons their target size. Every main.css
+      selector is led by a tqa- class, a data-report- hook or one of the three
+      report-is- runtime classes, so the two sets meet in exactly one place
+      and it is deliberate: main.css restates the bare status classes, scoped
+      inside this project's own containers, where the vendored palette's
+      colour is not the one the required palette specifies. Everywhere else
+      the selectors are disjoint and no collision is possible.
       Every tqa- class inside the tree and inside the table is emitted by the
       macros this page calls.
 
-      TWO tqa- CLASSES ARE DELIBERATELY WITHHELD from this page's own markup,
-      on the measurement overview_steps.html records rather than on taste:
-      tqa-page and tqa-table-wrap impose their own box - a max-width, padding
-      and an overflow container - on markup the Bootstrap grid already lays
-      out, and the grid is what carries this page's responsive and print
-      behaviour. tqa-toggle is likewise not put on the chevron icons: it
-      styles a real button and main.css hides it in print, so it would change
-      both the rendered control and the printed page. The status hook is safe
-      where the classes are not, because every rule main.css declares for
-      data-tqa-status sets custom properties only and so paints nothing by
+      ONE tqa- CLASS IS DELIBERATELY WITHHELD from this page's own markup:
+      tqa-page imposes its own box - a width, a max-width, a margin and
+      padding - on markup the Bootstrap grid already lays out. tqa-table-wrap
+      is NOT withheld any more and is not this page's to add: the statistics
+      macro wraps its own twelve-column table, because the grid sets a column
+      width without bounding a child's overflow and an unwrapped table of that
+      width moves the whole page sideways on a narrow screen.
+      tqa-toggle is likewise withheld from the two collapse-all buttons:
+      main.css gives that class a decorative triangle through ::before, a
+      transparent background and display:none in print, so it would stack a
+      second glyph on the generator's chevron icon, erase the button's own
+      surface and drop the control from the printed page, and its
+      aria-expanded variant addresses a control that names one region -
+      none of which fits a control that acts on a whole scope. The vendored
+      btn btn-default btn-lg, beside the generator's own collapsable-control,
+      is what pretty/_macros.html gives them instead; the per-region controls
+      inside the tree carry tqa-toggle, because there the triangle IS the
+      control. The status hook is safe where the
+      withheld classes are not, because every rule main.css declares for
+      data-report-status sets custom properties only and so paints nothing by
       itself.
     - NO COLOUR, dimension or presentation attribute in the markup and no
       embedded stylesheet block. Status colour comes from the vendored
-      stylesheet's status classes and from main.css's data-tqa-status tokens,
+      stylesheet's status classes - which main.css overrides inside this
+      project's containers where their colour is not the required one - and
+      from main.css's own data-report-status tokens,
       which between them cover all seven statuses; the error text's monospace
       rendering, the expandable step detail, the per-scenario timestamps and
       the metadata block are the partials' and the layout's.
 
   ACCESSIBILITY
   -------------
-  The invisible kind is applied here because it changes nothing rendered: the
-  page's one heading is a real h2 inside the layout's landmarks, the two
-  chevron icons are decorative glyphs with no text of their own and are hidden
-  from assistive technology while carrying a real accessible name for the
-  action they perform, and every status on the page is spelt out in words by
-  the badge and label macros rather than carried by colour alone. Two visible
-  defaults are left as measured, because the reference is authoritative over a
-  generic recommendation and silently changing the rendered output would hide
-  what the source does:
+  The page's lead heading is the document's primary heading and is therefore a
+  real h1, rendered at the measured 24px through the vendored .h3 utility - the
+  lead note below records why that utility and not .h2 - so the heading
+  hierarchy starts where a reader's "jump to the top heading" expects it while
+  the rendered page is unchanged. It sits inside the
+  landmarks _layout.html emits, and every status on the page is spelt out in
+  words by the badge and label macros rather than carried by colour alone.
 
-    BLITZY [A11Y]: the collapse-all controls are <i> elements with an onClick
-      and no role or tabindex, exactly as measured. They are therefore
-      mouse-operable and absent from the tab order. Neither correction is
-      free: adding tabindex alone yields a focusable control that Enter and
-      Space do nothing to, since the handler is a click; adding key handling
-      would put this page in the business of the widget's own behaviour; and
-      turning them into buttons or anchors changes the emitted element type
-      and so departs from the artifact this page is accepted against,
-      structure for structure. Implemented as measured, with an accessible
-      name added - which is invisible - and flagged for a designer decision
-      rather than half-fixed. What survives regardless: the containers a
-      reader opens a report for, the failure-bearing ones, ship expanded.
-    BLITZY [A11Y]: the icons are 2x-scaled glyphs roughly 30px square, below
-      the 44px touch-target recommendation. The size is the vendored fa-2x
-      class the reference applies and is not overridden here. Flagged for
-      review rather than silently enlarged.
+  THE TWO COLLAPSE-ALL CONTROLS ARE REAL BUTTONS, which is a correction to the
+  reference's markup rather than a reproduction of it, and the reference is
+  authoritative over structure only where the structure is defensible:
+
+    - the measured <i> elements were unfocusable, absent from the tab order,
+      operable by pointer alone - Enter and Space do nothing to a click
+      handler on a glyph - and they exposed neither the region they act on nor
+      any state. A <button type="button"> is focusable, is operated by Enter
+      and Space with no key handling of this page's own, announces itself as a
+      control and is what app/static/js/report.js requires of a hook. The
+      chevron survives inside it as a decorative glyph, hidden from assistive
+      technology, and aria-controls names the region the button acts on.
+    - the measured glyphs were ~28px targets, below the 44px minimum. The
+      button's own box clears it: the vendored .btn.btn-default.btn-lg
+      declares 10px/16px padding and an 18px line-box around the 28px .fa-2x
+      glyph, and the emitted control measures 65x59 CSS px in a browser. That
+      is vendored Bootstrap doing the work - no dimension, no style attribute
+      and no stylesheet rule is added by this page.
+    - neither button carries aria-expanded, deliberately: see the note at the
+      macro. They act on every region in scope rather than owning one, and the
+      per-region disclosure controls' aria-expanded is re-derived by the script
+      after every all-click, so the page never reports a state it is not in.
+
+    - each filter control is a button too, with its pressed state on
+      aria-pressed, so the status filter is operable by keyboard and announces
+      what it has selected.
 -#}
 {#- ---------------------------------------------------------------------------
-  TWO IMPORTS, AND THE TWO THIS FILE DELIBERATELY DOES NOT MAKE
+  THREE IMPORTS, AND THE ONE THIS FILE DELIBERATELY DOES NOT MAKE
   ---------------------------------------------------------------------------
-  pretty/_stats_table.html and pretty/_element_tree.html are imported, and
-  every name taken from them is used below. The plain import form is this
-  folder's own: no macro in either file reads an ambient template variable, so
-  the same call renders identically from a page and from a test harness.
+  pretty/_stats_table.html, pretty/_element_tree.html and pretty/_macros.html
+  are imported, and every name taken from them is used below. The plain import
+  form is this folder's own: no macro in any of the three reads an ambient
+  template variable, so the same call renders identically from a page and from
+  a test harness.
 
-  pretty/_macros.html IS NOT IMPORTED HERE, and that is a decision rather than
-  an oversight. The requirements for this file call for it, but this page emits
-  no cell, span, percentage or label of its own: the statistics row's counts,
-  its nanosecond sort attribute, its rendered duration and its capitalised
-  status label are all built inside _stats_table.html, and the element tree's
-  inline durations and timestamps inside _element_tree.html - both of which
-  import that file directly, as its correct owners. Importing it here as well
-  would leave a name this template never uses, which this folder's own
-  convention forbids for the good reason that an unused alias is how the next
-  reader comes to believe a page formats something it does not. The one thing
-  that would justify the import - a feature-level duration - is measured
-  ABSENT from the feature brief, so inventing markup to justify an import
-  would be the worse error. Nothing about the emitted page changes either way.
+  pretty/_macros.html IS IMPORTED FOR ONE NAME, collapse_all_control, and for
+  nothing else. This page emits no cell, span, percentage or label of its own:
+  the statistics row's counts, its nanosecond sort attribute, its rendered
+  duration and its capitalised status label are all built inside
+  _stats_table.html, and the element tree's inline durations and timestamps
+  inside _element_tree.html - both of which import that file directly, as its
+  correct owners. What this page does need from it is the collapse-all pair
+  the two detail pages share, which lives there because four call sites across
+  two pages must not drift and because neither page may import the other.
 
-  partials/status_badge.html is likewise not imported, for a different reason:
-  it is not among this page's declared dependencies. Its status_token is the
-  project's single normalisation point and _element_tree.html does not
-  re-export a name it merely imported, so where this page needs one step's
-  normalised status it asks that file's own steps_status over a one-step list -
-  which is exactly that fold applied to one step, with the empty answer set to
-  'unknown' so an unrecognised status cannot be silently counted as a pass.
-  Normalisation therefore still happens in exactly one place.
+  partials/status_badge.html is the one NOT imported: it is not among this
+  page's declared dependencies. Its status_token is the project's single
+  normalisation point and _element_tree.html does not re-export a name it
+  merely imported, so where this page needs one step's normalised status it
+  asks that file's own steps_status over a one-step list - which is exactly
+  that fold applied to one step, with the empty answer set to 'unknown' so an
+  unrecognised status cannot be silently counted as a pass. Normalisation
+  therefore still happens in exactly one place.
   --------------------------------------------------------------------------- -#}
 {% extends "pretty/_layout.html" %}
 {% import 'pretty/_stats_table.html' as stats %}
 {% import 'pretty/_element_tree.html' as tree %}
+{% import 'pretty/_macros.html' as fmt %}
 
 {#- ---------------------------------------------------------------------
     THE SUBJECT, resolved once and read everywhere below.
@@ -564,46 +598,56 @@
     collapse-all controls consume nothing from it. -#}
 {%- set collapse_ids = namespace(next=0) -%}
 
-
 {#- ---------------------------------------------------------------------
-    THE COLLAPSE-ALL CONTROL, defined once and rendered in both measured
-    positions so the two blocks cannot drift apart.
+    THE STATUS FILTER'S OWN INPUT: which statuses the elements of this
+    feature actually carry, and how many carry each.
 
-    THE DRIVER IS THE VENDORED COLLAPSE PLUGIN, invoked exactly as the
-    reference invokes it, and it is the only driver attached: no
-    data-report-toggle-all is emitted anywhere on this page. The full
-    decision, and the reading of app/static/js/report.js it rests on, is
-    recorded in the header above.
+    THE SET IS DERIVED, NEVER HARD-CODED. A feature page whose scenarios all
+    passed has one status, and offering the other six would give a reader
+    six buttons that empty the tree.
 
-    The selector is well defined precisely because this page emits
-    id="report" once, on the element-tree container: it reaches the element,
-    steps and message containers of the tree and nothing else.
+    THE STATUS READ HERE IS THE ONE THE ROWS EMIT. element_status is the
+    macro element_block itself uses when no status is passed to it - the same
+    fold, with the same 'passed' answer for a step-less Background - so a
+    button can never name a status no element carries, and its count cannot
+    disagree with the number of elements the script hides. Note this is the
+    ELEMENT status and not the row of the statistics table above, which
+    counts steps and scenarios separately.
 
-    The icons are decorative glyphs, so each is hidden from assistive
-    technology and carries a real accessible name for the action it
-    performs - both invisible additions to the measured markup.
+    A Background occurrence is a filterable element in its own right - four
+    of them on the reference CRM page - so it is counted here with the
+    scenarios; the group's accessible name says so.
     --------------------------------------------------------------------- -#}
-{%- macro collapse_all_control() -%}
-<div class="container-fluid">
-  <div class="row">
-    <div class="col-md-1 col-md-offset-10">
-      <i class="fa fa-chevron-circle-down fa-2x collapsable-control"
-        role="button" aria-label="Expand all scenarios and steps"
-        onClick="javascript:$('#report .collapsable-details').collapse('show')"></i>
-      <i class="fa fa-chevron-circle-up fa-2x collapsable-control"
-        role="button" aria-label="Collapse all scenarios and steps"
-        onClick="javascript:$('#report .collapsable-details').collapse('hide')"></i>
-    </div>
-  </div>
-</div>
-{%- endmacro -%}
+{%- set filter_counts = {} -%}
+{%- for element in shown_elements -%}
+    {%- set token = tree.element_status(element)|string|trim -%}
+    {%- set _ = filter_counts.update({token: filter_counts.get(token, 0) + 1}) -%}
+{%- endfor -%}
+{%- set filter_tokens = [] -%}
+{%- for token in tree.STATUS_PRECEDENCE + ('unknown',) -%}
+    {%- if filter_counts.get(token) -%}
+        {%- set _ = filter_tokens.append(token) -%}
+    {%- endif -%}
+{%- endfor -%}
 
 
 {#- The lead: the heading and nothing else, measured. It opens on the block
     tag's own line so the layout's surrounding indentation is reproduced
     exactly; a newline there would insert a blank line the reference does
-    not have. -#}
-{% block lead %}    <h2>Feature Report</h2>
+    not have.
+
+    THE HEADING IS AN h1 AT THE MEASURED 24px, THROUGH THE .h3 UTILITY. The
+    reference emits an h2, which leaves the page with no level-one heading for
+    a reader to jump to. The utility class reads wrong until the cascade is
+    followed: cucumber.css:8-10 pins `h2 { font-size: 24px }`, a bare type
+    selector that beats bootstrap.min.css's own `.h2,h2{font-size:30px}` on
+    load order and cannot match an h1 - so `<h1 class="h2">` would render 30px,
+    measured in Chrome against the reference's 24px. `.h3,h3{font-size:24px}`
+    is the vendored utility whose size equals the measurement, and cucumber.css
+    declares no h3 rule to disturb it. Every page in this folder does the same,
+    id included, so the lead is one shape across the emitted tree.
+    -#}
+{% block lead %}    <h1 class="h3" id="report-heading">Feature Report</h1>
 {%- endblock %}
 
 {#- head_extra is deliberately NOT overridden: the two chart-bearing
@@ -623,7 +667,7 @@
   </div>
 </div>
 
-{{ collapse_all_control() }}
+{{ fmt.collapse_all_control() }}
 
 {# The element tree, and THE ONE id="report" ON THIS PAGE. The status hook
     alongside it is the port's own vocabulary; every main.css rule for that
@@ -637,9 +681,36 @@
     The comment openers in this block carry no whitespace-stripping dash on
     purpose: the blank lines between the four emitted regions are what keeps
     the written page as readable as the reference's own. #}
-<div class="container-fluid" id="report" data-tqa-status="{{ feature_token }}">
+<div class="container-fluid" id="report" data-report-status="{{ feature_token }}">
   <div class="row">
     <div class="col-md-10 col-md-offset-1">
+{%- if filter_tokens %}
+      {# THE STATUS FILTER CONTROLS. Every element in the tree below
+          advertises itself as filterable and carries its status; without
+          controls those hooks were one-sided and the filtering AAP 0.3.4
+          requires of this surface was impossible. Each control is a
+          non-navigating button, because report.js never suppresses an
+          authored default action, and the group sits inside this container,
+          above the tree it filters.
+
+          THE AUTHORED PRESSED STATE IS THE UNFILTERED PAGE'S OWN. The
+          script's filter model is a show-set per scope in which an EMPTY set
+          shows everything, so the reserved "all" control is pressed exactly
+          while no status is selected - the state this page is authored in and
+          the state a reader with scripting disabled stays in. The script
+          re-synchronises both attributes on init, so nothing announced
+          changes under the reader as it loads. #}
+      <div class="tqa-filter" role="group" aria-label="Filter this feature's scenarios and Background occurrences by status">
+        <button type="button" class="tqa-filter-btn" data-report-filter="all" aria-pressed="true">
+          All ({{ shown_elements|length }})
+        </button>
+{%- for token in filter_tokens %}
+        <button type="button" class="tqa-filter-btn" data-report-filter="{{ token }}" aria-pressed="false">
+          {{ token|capitalize }} ({{ filter_counts.get(token) }})
+        </button>
+{%- endfor %}
+      </div>
+{%- endif %}
       {{ tree.feature_block(subject,
                             tag_hrefs=tag_map,
                             counter=collapse_ids,
@@ -648,7 +719,7 @@
   </div>
 </div>
 
-{{ collapse_all_control() }}
+{{ fmt.collapse_all_control() }}
 
 {# The page-owned break before the layout's footer, measured on this page.
     The layout does not emit it, because three of the eight reference pages

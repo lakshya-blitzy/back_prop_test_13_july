@@ -45,8 +45,8 @@ Why these are registered as real hooks
 --------------------------------------
 ``Hooks.java:5`` imports ``@After`` from ``org.junit.After`` instead of
 ``io.cucumber.java.After``, so Cucumber never registers the hook and the Java
-teardown **never runs** -- the reference ``target/cucumber.json`` corroborates
-it by containing no ``embeddings`` and no ``"after"`` key anywhere.  The plan's
+teardown **never runs** -- the reference build's JSON report corroborates it by
+containing no ``embeddings`` and no ``"after"`` key anywhere.  The plan's
 Conflict 6 corrects that defect rather than reproducing it (deviation 6:
 *"the teardown hook is registered as a real hook, enabling failure screenshots
 and per-scenario driver teardown"*), because reproducing it would ship the
@@ -96,10 +96,13 @@ build no web application; and ``behave`` itself, whose model objects are passed
 in rather than imported - which keeps this module importable, and
 unit-testable, without the engine.
 
-Nothing happens at import time beyond binding those names, and only the three
-hooks below are defined: no ``after_all``, no feature-, step- or tag-scoped
+Nothing happens at import time beyond binding those names, and behave finds
+only the three hooks below: no ``after_all``, no feature-, step- or tag-scoped
 hook, and no direct-execution entry point, because ``Hooks.java`` defines
-exactly one hook and behave only ever imports this file.
+exactly one hook and behave only ever imports this file.  The single
+module-private helper, :func:`_scenario_identity`, is not a hook and is not
+exported; it exists because the screenshot module's suppression record has to
+be able to name the scenario whose evidence went missing.
 """
 
 from __future__ import annotations
@@ -115,6 +118,62 @@ from app.reporting.screenshots import DEFAULT_MIME_TYPE, capture_png
 # note), and no state, because the one piece of per-scenario state - the
 # session - lives on behave's context and in the driver holder's slot.
 __all__ = ["after_scenario", "before_all", "before_scenario"]
+
+
+def _scenario_identity(scenario: Any) -> str | None:
+    """Describe ``scenario`` for a diagnostic log record, or return ``None``.
+
+    The screenshot module suppresses capture failures by design (the plan's
+    deviation 19), so its log record is the only trace such a failure leaves.
+    This builds what that record needs to attribute one: the feature file and
+    line in the ``file:line`` shape behave uses for a location, then the
+    scenario's own name in quotes -- ``features/Crm.feature:9 'User can create
+    pipeline in the displayed dashboard'``.
+
+    Three properties matter, and each is deliberate:
+
+    * **It cannot raise.**  It runs inside ``after_scenario``, where an
+      exception would be reported as a hook error against a scenario that has
+      already finished, so every attribute is read with a default and the
+      whole body is guarded.  A scenario object from a unit test may expose
+      none of these attributes; that yields ``None``, not a failure.
+    * **``None`` rather than a placeholder.**  The screenshot module renders no
+      identity segment at all for ``None``, so an unidentifiable scenario
+      leaves the record reading exactly as it did before identities existed.
+    * **Only ``filename``, ``line`` and ``name``.**  No tag, no step text and
+      no table or example row, because those are where a scenario outline's
+      ``<placeholder>`` values land, and ``Login.feature``'s Examples tables
+      hold literal usernames and passwords.  No scenario name in this suite
+      contains a placeholder; an outline's expanded name carries behave's row
+      suffix, which names the Examples table rather than its values.
+      Restricting the identity to these three attributes keeps a credential
+      out of the log by construction rather than by inspection.
+
+    :param scenario: behave's ``Scenario``, or any object at all.
+    :returns: The identity string, or ``None`` when nothing usable is exposed.
+    """
+    try:
+        filename = getattr(scenario, "filename", None)
+        line = getattr(scenario, "line", None)
+        name = getattr(scenario, "name", None)
+
+        parts: list[str] = []
+
+        if filename:
+            # ``line`` is absent on a stub and 0 on a synthetic scenario;
+            # neither is worth appending, and both are falsy.
+            parts.append(f"{filename}:{line}" if line else str(filename))
+
+        if name:
+            parts.append(f"'{name}'")
+
+        return " ".join(parts) if parts else None
+    except Exception:
+        # A model object whose attribute access itself fails must not turn a
+        # finished scenario into a hook error over a log message.  Losing the
+        # identity is the correct trade here; the suppression record still
+        # reaches stderr without it.
+        return None
 
 
 def before_all(context: Any) -> None:
@@ -210,13 +269,26 @@ def after_scenario(context: Any, scenario: Any) -> None:
         session to photograph and is cleared before this returns.
     :param scenario: The finished scenario.  Its ``status`` decides whether
         evidence is gathered and its ``name`` is what the result collector
-        records as the attachment's name.
+        records as the attachment's name.  Its ``filename``, ``line`` and
+        ``name`` also become the diagnostic identity
+        :func:`_scenario_identity` builds, so that a suppressed capture
+        failure names the scenario it belongs to.
     :returns: ``None``.
 
     .. note::
-       **Nothing here changes a scenario's outcome.**  The status is read and
-       never written, and no result is marked failed, passed or skipped.  A
-       screenshot is evidence about a result, never part of one.
+       **The screenshot path cannot change a scenario's outcome; teardown
+       deliberately can.**  Gathering evidence writes nothing back: the status
+       is read and never written, no result is marked failed, passed or
+       skipped, and a capture failure is logged and suppressed inside
+       ``capture_png`` because the plan's deviation 19 sanctions suppression
+       there and only there.  A failing ``quit_driver()`` is the opposite
+       case: it propagates out of this hook, and behave 1.3.3's
+       ``runner.run_hook`` prints ``HOOK-ERROR in after_scenario: ...``,
+       counts a hook failure and records that scenario's status as
+       ``hook_error`` while the remaining scenarios still run and all four
+       artifacts are still written.  A browser that would not close is a real
+       teardown failure, and hiding it would let this boundary report clean
+       teardown over a process that may still be alive.
     """
     try:
         # Hooks.java:13.  ``has_failed()`` rather than a comparison against a
@@ -235,7 +307,16 @@ def after_scenario(context: Any, scenario: Any) -> None:
             # unusable payload.  Duplicating that here would hide real
             # defects, and the plan's deviation 19 places the behaviour there
             # rather than in the caller.
-            png = capture_png(context.driver)
+            #
+            # What this hook does contribute to that suppression is the one
+            # thing only it knows: which scenario the missing evidence belongs
+            # to.  The identity is diagnostic only - it reaches the log record
+            # and never the attachment, whose name the result collector takes
+            # from the scenario it is already tracking.
+            png = capture_png(
+                context.driver,
+                scenario_id=_scenario_identity(scenario),
+            )
 
             if png is not None:
                 # Hooks.java:15.  behave's own embedding protocol: the runner
@@ -263,8 +344,10 @@ def after_scenario(context: Any, scenario: Any) -> None:
         finally:
             # The slot is emptied by ``quit_driver`` itself; this clears the
             # context's reference to the session it just closed, so no later
-            # reader can reach a quit driver. Nested in its own ``finally`` so
-            # that it happens even in the impossible case of ``quit_driver``
-            # raising -- which it does not, by design -- while still letting
-            # such an error propagate rather than swallowing it.
+            # reader can reach a quit driver.  Nested in its own ``finally``
+            # because ``quit_driver`` *can* raise: it installs no handler, so a
+            # browser that refuses to close surfaces here as a behave hook
+            # error rather than being absorbed into a clean teardown.  Both
+            # halves of that are deliberate -- the reference is cleared on
+            # every path, and the failure travels on out of this hook.
             context.driver = None

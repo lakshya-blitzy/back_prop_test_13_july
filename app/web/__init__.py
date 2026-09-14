@@ -49,18 +49,30 @@ Three constructor arguments are deliberately left unset:
 
 Registration
 ------------
-This module only defines the blueprint. Registering it on an application is the
-sole responsibility of the ``create_app()`` factory in the application package,
-which is also the only place the command-line surface and the application-level
-error handlers are wired. Importing this package therefore has no effect on any
-application object; it merely makes the blueprint and its routes available for
-the factory to register exactly once.
+Two different acts, and this module performs exactly one of them.
+
+Binding the six views to the blueprint happens here, once, by calling
+``register_routes()`` from the sibling ``routes`` module with the blueprint
+constructed below. The wiring runs in one direction only: this package imports
+that module, and that module imports nothing from this package, so neither
+import depends on the order the statements in either file happen to be written
+in and either module may be imported first.
+
+Registering the blueprint on an *application* is the other act, and it is the
+sole responsibility of the ``create_app()`` factory in the application package
+-- which is also the only place the command-line surface and the
+application-level error handlers are wired. Importing this package therefore
+has no effect on any application object; it merely makes the blueprint, with
+its six routes already bound, available for the factory to register exactly
+once.
 """
 
 # Ordered canonical name first, alias second, rather than alphabetically.
 __all__ = ["web_bp", "bp"]  # noqa: RUF022
 
 from flask import Blueprint
+
+from .routes import register_routes
 
 #: The port's single blueprint, carrying every read-only viewer route.
 #:
@@ -78,9 +90,10 @@ web_bp: Blueprint = Blueprint("web", __name__)
 #: registering either name registers the one blueprint.
 bp: Blueprint = web_bp
 
-# Imported last, and for its registration side effect alone: ``routes``
-# imports ``web_bp`` from this module, so the blueprint must already be
-# defined when the import runs -- the standard Flask resolution for that
-# circular dependency. The suppression covers the import's placement and
-# its deliberately unused binding, and applies to this line only.
-from . import routes  # noqa: E402,F401,RUF100
+# The six views are bound here, after the blueprint exists and before any
+# caller can see it, so a fully routed blueprint is the only thing this package
+# ever exports. The call is the whole of the wiring: ``routes`` holds the views
+# as plain functions and imports nothing from this package, so the edge runs
+# one way and the order of the statements in either file carries no meaning.
+# Module caching makes this exactly one call per interpreter.
+register_routes(web_bp)

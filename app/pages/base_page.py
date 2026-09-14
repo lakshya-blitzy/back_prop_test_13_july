@@ -46,25 +46,30 @@ and both of these then work, on the class and on an instance:
 Access form                             Yields
 ======================================  =======================================
 ``LoginPage.INPUT_EMAIL``               the ``(By.NAME, "login")`` **tuple**,
-``page.INPUT_EMAIL``                    for ``wait_visible(locator, timeout)``,
-                                        ``press_keys(locator, ...)`` and the
-                                        per-module parity tests
+``page.INPUT_EMAIL``                    for both visibility waits -
+                                        ``wait_visible(locator, timeout)`` and
+                                        ``wait_visible_element(locator,
+                                        timeout)`` - for
+                                        ``press_keys(locator, ...)`` and for
+                                        the per-module parity tests
 ``page.input_email``                    the live **element**, re-resolved on
                                         every access, for ``.click()``,
-                                        ``.send_keys()``, ``.is_displayed()``,
-                                        ``.get_attribute()`` and
-                                        ``wait_visible_element(element, ...)``
+                                        ``.send_keys()``, ``.is_displayed()``
+                                        and ``.get_attribute()``
 ======================================  =======================================
 
-Both forms are required rather than convenient: ``app/automation/waits.py``
-exposes ``wait_visible(locator, timeout)`` *and*
-``wait_visible_element(element, timeout)``, and
-``app/automation/interactions.py``'s ``press_keys`` accepts either a resolved
-element or a ``(By.X, "value")`` pair.  A Java step class reached both shapes
-off the same field - ``loginP.inputEmail`` for the element and ``By.name(...)``
-for a locator - and the two Python names coexist without collision purely
-because Python is case-sensitive: the constant is ``INPUT_EMAIL``, the accessor
-is ``input_email``.
+Both forms are required rather than convenient.  Every element-addressing
+helper in ``app/automation/waits.py`` takes the **locator**, including
+``wait_visible_element``: the ``visibilityOf`` predicate it ports was applied
+to a ``PageFactory`` proxy, which re-located the element *inside* the wait, so
+the port passes the locator and lets the wait resolve it on each poll rather
+than receiving something resolved beforehand.  The element form is what a step
+operates on directly, and it is also what ``press_keys`` accepts alongside a
+``(By.X, "value")`` pair.  A Java step class reached both shapes off the same
+field - ``loginP.inputEmail`` for the element and ``By.name(...)`` for a
+locator - and the two Python names coexist without collision purely because
+Python is case-sensitive: the constant is ``INPUT_EMAIL``, the accessor is
+``input_email``.
 
 Resolution semantics: resolve every time, cache nothing, wait nowhere
 --------------------------------------------------------------------
@@ -606,4 +611,3 @@ class BasePage:
         ``app/pages/sales_page.py``.
         """
         return self.driver.find_elements(*locator)
-

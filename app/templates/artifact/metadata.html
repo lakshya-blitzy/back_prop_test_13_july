@@ -37,15 +37,27 @@
       {% from "artifact/metadata.html" import metadata_block %}
       {{ metadata_block(metadata, summary) }}
 
-  metadata   A mapping. The vocabulary is the one measured from the reference
-             artifact's own payload - protocolVersion, implementation{name,
-             version}, runtime{name,version}, os{name}, cpu{name} - carrying
-             this port's values (behave, CPython, the host platform) in place
-             of the JVM's, which is the same four-key vocabulary
-             app/reporting/events.py fixes and documents against this file.
-             Two run-level timestamps join them, both in the model's own
-             format: generated_at, when the document was written, and
-             started_at, the earliest scenario start.
+  metadata   A mapping. The vocabulary is EXACTLY the four keys this port
+             produces - implementation{name,version}, runtime{name,version},
+             os{name}, cpu{name} - carrying this port's values (behave,
+             CPython, the host platform) in place of the JVM's. That is the
+             same four-key vocabulary app/reporting/events.py fixes in
+             run_metadata and documents against this file, and
+             app/reporting/html_report.py's build_metadata states its return
+             as exactly those four plus the two timestamps. Two run-level
+             timestamps join them, both in the model's own format:
+             generated_at, when the document was written, and started_at, the
+             earliest scenario start.
+
+             The reference artifact's own payload also carried a protocol
+             version, and THIS PORT DOES NOT PRODUCE ONE: nothing in it
+             speaks the JVM formatter's message protocol, so there is no
+             version to state and a row for one could never render. It is a
+             deliberate exclusion rather than an oversight, recorded here so
+             that a reader who finds the key in the reference file does not
+             reintroduce a row nothing can fill. Any further key the writer
+             ever adds arrives with its own row added alongside the six
+             below, never with a row authored ahead of the value.
 
   summary    A mapping of three count groups plus the earliest start:
 
@@ -83,7 +95,8 @@
   STATUS, AND WHERE IT IS DECIDED
   ---------------------------------------------------------------------------
   Never here. partials/status_badge.html is the single place a status is
-  normalised in this project, so every value that lands in a data-tqa-status
+  normalised in this project, so every value that lands in a
+  data-report-status
   attribute goes through status_token first - no lowercase fold, no mapping and
   no derivation of a status is written in this file. The partial is imported
   without the calling context, which is what keeps its output identical on
@@ -190,9 +203,6 @@
     {%- set operating_system = meta.get('os') if meta.get('os') is mapping else {} -%}
     {%- set processor = meta.get('cpu') if meta.get('cpu') is mapping else {} -%}
     {%- set candidate_rows = [
-        {'label': 'Protocol version',
-         'value': (meta.get('protocolVersion') or meta.get('protocol_version'))|default('', true)|string|trim,
-         'time': false},
         {'label': 'Implementation',
          'value': [implementation.get('name')|default('', true)|string|trim,
                    implementation.get('version')|default('', true)|string|trim]|select|join(' '),
@@ -232,9 +242,11 @@
         {'label': 'Steps', 'counts': step_counts}
     ]|selectattr('counts')|list -%}
 
-    {#- The presentation order, quoted from the status vocabulary the badge
-        partial normalises onto, with its fallback last. -#}
-    {%- set status_order = ['passed', 'failed', 'skipped', 'pending', 'undefined', 'untested', 'ambiguous', 'unknown'] -%}
+    {#- The presentation order, IMPORTED from the badge partial that owns the
+        status vocabulary - its reading order, with its fallback last - rather
+        than restated here, so this block cannot drift from the normaliser or
+        from the page that renders the filter buttons in the same order. -#}
+    {%- set status_order = badge.STATUS_READING_ORDER -%}
     {%- set named_keys = status_order + ['total'] -%}
     {%- set earliest_start = (tally.get('started_at') or tally.get('start_timestamp'))|default('', true)|string|trim -%}
     {#- Flatten every group's entries once, so the list wrapper is emitted
@@ -269,14 +281,14 @@
         {%- for token in status_order %}
         {%- set count = counts.get(token) %}
         {%- if count is number and count is not boolean %}
-        <li class="tqa-count" data-tqa-status="{{ badge.status_token(token) }}"><b>{{ count }}</b> <span>{{ group['label'] }} {{ token }}</span></li>
+        <li class="tqa-count" data-report-status="{{ badge.status_token(token) }}"><b>{{ count }}</b> <span>{{ group['label'] }} {{ token }}</span></li>
         {%- endif %}
         {%- endfor %}
         {%- for key in counts|list|reject('in', named_keys)|sort(case_sensitive=true) %}
         {%- set count = counts.get(key) %}
         {%- set token = badge.status_token(key) %}
         {%- if count is number and count is not boolean %}
-        <li class="tqa-count" data-tqa-status="{{ token }}"><b>{{ count }}</b> <span>{{ group['label'] }} {{ key }}{% if (key|string|trim|lower) != token %} ({{ token }}){% endif %}</span></li>
+        <li class="tqa-count" data-report-status="{{ token }}"><b>{{ count }}</b> <span>{{ group['label'] }} {{ key }}{% if (key|string|trim|lower) != token %} ({{ token }}){% endif %}</span></li>
         {%- endif %}
         {%- endfor %}
         {%- endfor %}

@@ -27,10 +27,6 @@ hs_err_pid*
 __pycache__/
 *.pyc
 
-# Packaging metadata produced by the editable install
-# (pip install -e . writes testinium_qa.egg-info/ into the repository root).
-*.egg-info/
-
 # Virtual environments
 .venv/
 venv/

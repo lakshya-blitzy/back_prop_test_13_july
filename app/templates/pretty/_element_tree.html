@@ -90,8 +90,12 @@
     step_block(...)             one div.step, with its failure message
     message_block(...)          one failure message region
     next_id(counter, prefix)    allocates one collapse id from the counter
-    collapse_control_class(expanded)         the measured control class string
-    collapse_details_class(expanded, inner_level=false)  its container's
+    collapse_details_class(inner_level=false)
+                                a collapsible region's class string. There is
+                                no control-class macro: a control is a
+                                <button class="collapsable-control tqa-toggle">
+                                written at each of the three sites, and no
+                                state class exists for it to carry.
 
   THE TWO PREDICATES ANSWER TEXT, NOT A BOOLEAN, because a Jinja macro can
   only answer text: contains_failure yields '1' or '', so a caller writes
@@ -123,27 +127,48 @@
             level and no step-name-* class: that class occurs only on steps.
 
   ELEMENT   div.element > [feature-link row] > div.tags.indention >
-            span.lead-duration.duration > the collapse control wrapping
-            div.brief.<status> (span.keyword.indention, span.name,
-            i.chevron.fa.fa-fw) > div.description.indention > the collapse
-            container. The element keyword is the model's own - Scenario,
+            span.lead-duration.duration > div.brief.<status>
+            (span.keyword.indention, span.name, the status badge and the
+            collapse button) > div.description.indention > the collapsible
+            region. The element keyword is the model's own - Scenario,
             Scenario Outline or Background - and carries NO trailing space,
-            unlike a step keyword.
+            unlike a step keyword. The reference emitted a span here and a div
+            at steps level; both are buttons now, for the reason recorded
+            under COLLAPSE OWNERSHIP below - which also settles the one piece
+            of invalid nesting the measured shape carried, an inline span
+            containing a block div, since a button takes flow content.
 
-  STEPS     div.steps.inner-level > the collapse control wrapping
-            div.brief.<aggregate status> whose keyword is the literal "Steps"
-            and whose span.name is EMPTY > the collapse container holding the
-            steps. Note the class ORDER on that container:
-            "inner-level collapse collapsable-details", where the element's
-            own container has no inner-level.
+  STEPS     div.steps.inner-level > div.brief.<aggregate status> whose keyword
+            is the literal "Steps", whose span.name is EMPTY and whose last
+            child is the collapse button > the collapsible region holding the
+            steps. Note the class ORDER on that region:
+            "inner-level collapsable-details", where the element's own region
+            has no inner-level.
+
+            THE MEASURED TRIGGER WRAPPER IS GONE at both levels, and so is the
+            decorative i.chevron inside the brief. The measurement recorded a
+            pointer-only div (steps) and a <span> holding a block div
+            (element) - invalid nesting, emitted 19 times in one
+            representative page, unreachable by keyboard and absent from the
+            tab order. Each is now one real <button type="button"> inside the
+            brief, in the chevron's place: focusable, Enter- and
+            Space-operable for free, naming the region through aria-controls
+            and reporting its state through aria-expanded. The glyph comes
+            from main.css's .tqa-toggle::before, which flips on
+            aria-expanded="false" - the chevron's flip came from the vendored
+            .collapsed .chevron:after, and "collapsed" is a class report.js
+            never writes.
 
   STEP      div.step > div.brief.step-name-<Keyword>.<status> holding
             span.keyword.indention, span.name and span.lead-duration.duration,
             then - only on a failure - the message region.
 
-  MESSAGE   div.inner-level > div.message.indention > the collapse control
-            holding a bare <a> label > the collapse container holding a <pre>.
-            The anchor has NO href in the reference and none is invented here.
+  MESSAGE   div.inner-level > div.message.indention > div.collapsable-control
+            holding the collapse button and, beside it, the bare <a> label >
+            the collapsible region holding a <pre>. The anchor has NO href in
+            the reference and none is invented here, and it is NOT nested
+            inside the button: the button's accessible name would then be the
+            whole 115-character failure line.
 
   FIVE MEASURED DETAILS THAT ARE EASY TO GET WRONG, each with its evidence:
 
@@ -183,49 +208,55 @@
        identically inside one.
 
   ---------------------------------------------------------------------------
-  THE .in RULE, AND THE COLLAPSE-OWNERSHIP BOUNDARY
+  COLLAPSE OWNERSHIP: ONE OWNER, AND IT IS report.js
   ---------------------------------------------------------------------------
-  The reference expands a container by adding the vendored widget's own "in"
-  class, and it does so on FAILURE-BEARING CONTAINERS ONLY. Measured:
+  The reference expanded a container by adding the vendored widget's own "in"
+  class, on FAILURE-BEARING CONTAINERS ONLY. Measured:
   report-feature_1735223818.html, which has failures, carries four expanded
   containers and six collapsed ones; report-tag_4059758862.html four and two;
-  the failure-free pages carry none at all. So a container is expanded when
-  the element it holds records a failure, and collapsed otherwise. A message
-  container is ALWAYS expanded, in every reference occurrence.
+  the failure-free pages carry none at all.
 
-  The control mirrors it: the reference emits class=" collapsable-control" on
-  an expanded control and class=" collapsed  collapsable-control" on a
-  collapsed one, and the vendored stylesheet turns that second class into the
-  right-pointing chevron through .collapsed .chevron:after. Both strings,
-  including their doubled and trailing spaces, are reproduced exactly as
-  measured by collapse_control_class and collapse_details_class; class tokens
-  are whitespace-separated, so the spacing is invisible to a browser and to a
-  token-level assertion, and reproducing it lets a literal comparison against
-  the reference succeed.
+  THAT MECHANISM IS NOT REPRODUCED, because it cannot coexist with the one the
+  port actually ships. app/static/js/report.js is the single owner of expand
+  and collapse across all three surfaces of this port - the plan names it for
+  exactly that - and it works by adding and removing its own
+  report-is-collapsed class on a [data-report-detail] region. The vendored
+  widget instead needs "in" PRESENT to show a region it has classed
+  "collapse". Put both on one region and a reader gets a region that
+  expand-all can never open: report.js removes a class the widget is not
+  looking at, and the widget's own hidden state survives. Two state machines
+  on one container desynchronise the moment a reader touches either. So this
+  file emits NEITHER vendored class, no data-toggle and no data-target, and
+  every region it emits is:
 
-  "in" IS NOT ONE OF THE PORT'S STATE HOOKS. It is the vendored widget's own
-  expanded-state class and part of the generator vocabulary this folder
-  reproduces, so the rule that forbids server-rendered presentation state does
-  not reach it.
+      <div id="..." class="[inner-level ]collapsable-details"
+           data-report-detail aria-hidden="false">
 
-  WHAT THIS FILE THEREFORE NEVER EMITS: none of the three boolean state hooks
-  app/static/css/main.css reads - data-tqa-collapsed, data-tqa-filtered and
-  data-tqa-open - and none of the three runtime state classes
-  app/static/js/report.js sets - report-is-collapsed, report-is-filtered-out
-  and report-lightbox-is-open. The stylesheet reads the absence of those hooks
-  as expanded, visible and closed, so server output always describes a fully
-  expanded, fully visible page and stays correct with scripting off and on
-  paper. Every sibling template in this port holds to the same rule.
+  AUTHORED EXPANDED, ALWAYS, WITH NO STATE CLASS. That is report.js's own
+  stated markup requirement - "the authored default is expanded and
+  unfiltered" - and what _macros.html's header states for this whole folder.
+  It is also what keeps a page legible with scripting disabled and on paper,
+  which the measured .in rule did not: 12 of 18 containers and 46 report-data
+  leaves were absent from a print rendering of a reference feature page,
+  because the vendored collapsed state is display:none and main.css cannot
+  reach a vendored class it declares no selector for. aria-hidden="false" is
+  the authored half of the ARIA mirror report.js maintains at run time.
 
-  TWO STATE MECHANISMS, NEVER ON ONE ELEMENT. The element, steps and message
-  containers belong to the vendored collapse widget, driven by its
-  data-toggle and data-target attributes; they carry no report.js state hook,
-  because two state machines on one container desynchronise the moment a
-  reader touches either. step_row's own toggle and detail region live INSIDE a
-  step, which is a leaf here, so it never competes - that nesting is expected
-  and correct. Selection attributes are a different thing and are allowed:
-  data-report-filterable with data-report-status is emitted on each element so
-  a page's status filter can hide it.
+  WHAT THIS FILE THEREFORE NEVER EMITS: presentation state of any kind - none
+  of the three runtime state classes app/static/js/report.js sets and
+  app/static/css/main.css reads, report-is-collapsed, report-is-filtered-out
+  and report-lightbox-is-open, and no state attribute either. The stylesheet
+  reads the absence of all three as expanded, visible and closed, so server
+  output always describes a fully expanded, fully visible page. Every sibling template in this port holds to
+  the same rule.
+
+  SELECTION ATTRIBUTES ARE A DIFFERENT THING AND ARE EMITTED: data-report-
+  detail on each region, data-report-toggle with aria-controls on each control,
+  and data-report-filterable with data-report-status on each element so a
+  page's status filter can hide it. step_row's own toggle and detail region
+  live INSIDE a step, which is a leaf here, so they never compete with the
+  element's - that nesting is expected and correct, and both now speak the
+  same vocabulary.
 
   THE FILTER UNIT IS THE ELEMENT, so step_row is called with filterable=false.
   Hiding an element hides its whole subtree, and step_row documents that a
@@ -233,10 +264,10 @@
   rather than registering every descendant a second time. A reader filtering a
   report wants the failing SCENARIOS, with all of their steps intact.
 
-  NO INLINE JAVASCRIPT, in any form. Collapsing belongs to the vendored
-  widget, filtering and the screenshot overlay to report.js, and the
-  tablesorter and chart initialisations to _layout.html and the two overview
-  pages. Nothing here reimplements any of them.
+  NO INLINE JAVASCRIPT, in any form. Collapsing, filtering and the screenshot
+  overlay all belong to report.js, and the tablesorter and chart
+  initialisations to _layout.html and the two overview pages. Nothing here
+  reimplements any of them, and no control here carries a handler attribute.
 
   ---------------------------------------------------------------------------
   DECISIONS TAKEN HERE, AND WHY
@@ -263,7 +294,7 @@
      <time> element beside the duration. A Background has no timestamp and
      renders none.
 
-  4. SCREENSHOTS ARE RENDERED ONCE PER ELEMENT, inside its collapse container
+  4. SCREENSHOTS ARE RENDERED ONCE PER ELEMENT, inside its collapsible region
      after the steps group. Embeddings live on a scenario's after-hook list,
      never on a step, and the lightbox partial flattens that one level itself,
      so the hook list is handed straight to it. It is called on every element,
@@ -286,10 +317,13 @@
      occurrences carry zero steps and the reference renders each as
      div.brief.passed. The three status macros therefore default to 'passed'
      for the empty case and take the sibling's answer as a parameter, so
-     neither reading is lost. The .in rule additionally counts a failed
+     neither reading is lost. contains_failure additionally counts a failed
      after-hook, mirroring app/reporting/rerun_report.py's own failure test: a
-     scenario whose teardown failed is one a reader needs opened, even though
-     its steps alone decide the colour of its brief.
+     scenario whose teardown failed is one a reader needs to see listed, even
+     though its steps alone decide the colour of its brief. It is a SELECTION
+     predicate now, not a state one - overview_failures.html asks it which
+     scenarios to list - because no region's authored state depends on a
+     failure any more.
 
   6. NO tqa- CLASS GOES ON A NAME SPAN. main.css declares tqa-feature-name and
      tqa-scenario-name as flex containers, which is right for the heading
@@ -308,15 +342,24 @@
      generator's step-name-<Keyword> class, so the two can never disagree.
      Nothing is trimmed inline.
 
-  8. NO FILENAME IS EVER COMPUTED HERE. Every href is a value the caller
-     passed in. Detail-page filenames are numeric hashes -
-     report-feature_<hash>.html and report-tag_<hash>.html, a fixed prefix, an
-     unsigned decimal hash and the extension - whose algorithm belongs to
-     app/reporting/pretty_reports.py, which derives it from cucumber-reporting
-     5.6.1 and confirms it against a regenerated baseline. Feature-page names
-     necessarily change because the feature URI moves into features/, which is
-     expected. A tag with no href renders as a plain chip rather than as a
-     dead link.
+  8. NO FILENAME IS EVER COMPUTED HERE, AND NO PASSED-IN ONE IS TRUSTED.
+     Every href is a value the caller passed in, and every one of them goes
+     through local_page_href - the allowlist
+     app/reporting/pretty_reports.py registers as a global of the one
+     environment that renders this folder - before it reaches an attribute.
+     Detail-page filenames are numeric hashes - report-feature_<hash>.html and
+     report-tag_<hash>.html, a fixed prefix, an unsigned decimal hash and the
+     extension - whose algorithm belongs to that module, which derives it from
+     cucumber-reporting 5.6.1 and confirms it against a regenerated baseline;
+     the allowlist is built from the same constants, so it cannot drift from
+     the names the writer emits. Feature-page names necessarily change because
+     the feature URI moves into features/, which is expected. A tag with no
+     href, and a destination the allowlist rejects, both render as a plain
+     chip rather than as a dead or active link: the failures page resolves its
+     feature destinations from the result document, and a run's JSON is data
+     this vocabulary reads rather than code it trusts. Autoescaping does not
+     cover this - it escapes HTML, and a javascript: URL contains nothing HTML
+     escaping touches.
 
   9. THE TAG PAGE SHARES THE FAILURES PAGE'S TWO VARIATIONS. Measured:
      report-tag_4059758862.html carries div.elements without inner-level and
@@ -365,73 +408,75 @@
     - CLASS VOCABULARY: the bare generator classes the vendored stylesheet
       declares - feature, tags, indention, brief, name, keyword, description,
       elements, inner-level, element, lead-duration, duration, steps, step,
-      step-name-<Keyword>, message, embedding, chevron, collapse,
-      collapsable-details, collapsable-control, argument and the lowercase
-      status words - and alongside them the port's own tqa- classes and its
-      data-tqa-status and data-report-* hooks. main.css is entirely tqa-
-      prefixed with no bare element, class or id selector, so the two sets are
-      declared over disjoint selectors. No name is invented in either
-      namespace.
+      step-name-<Keyword>, message, embedding, collapsable-details,
+      collapsable-control, argument and the lowercase status words - and
+      alongside them the port's own tqa- classes, including tqa-toggle on
+      every collapse button, and its data-report-status, data-report-toggle,
+      data-report-detail and data-report-filterable hooks. The vendored
+      widget's own collapse and in classes are deliberately NOT among them,
+      for the reason COLLAPSE OWNERSHIP records, and neither is the decorative
+      i.chevron, whose glyph flip came from .collapsed .chevron:after - a
+      class report.js never writes - and whose job main.css's
+      .tqa-toggle::before now does from the control's own aria-expanded.
+      Every main.css selector is led by a tqa- class, a data-report- hook or
+      one of the three report-is- runtime classes, so the two sets meet in
+      exactly one deliberate place - main.css restates the bare status
+      classes, scoped inside this project's own containers, where the vendored
+      palette's colour is not the one the required palette specifies - and are
+      disjoint everywhere else. No name is invented in either namespace.
     - NO COLOUR, dimension or presentation attribute in the markup, and no
       embedded stylesheet block. Status colour comes from the vendored
-      stylesheet's status classes and from main.css's data-tqa-status tokens,
-      which between them cover all seven statuses.
+      stylesheet's status classes and from main.css's data-report-status
+      tokens, which between them cover all seven statuses.
 
-      WHICH PALETTE WINS WHERE, MEASURED IN A BROWSER, because a reader of
-      the rendered page will notice the difference: the feature, element and
-      steps briefs carry no tqa- class, so the vendored palette governs them
-      and they render its exact colours - a failed brief measured
-      rgb(242, 146, 140) and a passed brief rgb(146, 221, 150). A STEP row
-      also carries partials/step_row.html's own tqa-step, for which both
-      stylesheets declare a background at equal specificity, and main.css is
-      linked last on purpose - so its data-tqa-status palette wins there, a
-      skipped step measuring rgb(253, 239, 224) rather than the vendored
-      blue. That is _layout.html's stated reason for the link order rather
-      than a collision; both palettes satisfy the plan's status-colour
-      requirement, and neither is written into the markup.
+      WHICH PALETTE WINS WHERE, and it is now one palette rather than two.
+      The vendored stylesheet colours the bare status words, and its choice
+      for one of them is not this project's: skipped is a light blue there,
+      where the plan requires skipped and pending to be yellow or orange.
+      main.css therefore restates all seven of those bare classes inside this
+      project's own containers - the statistics tables and the feature,
+      element and steps briefs - at a specificity the single-class vendored
+      rules cannot reach, so the required palette governs every status-bearing
+      surface of this tree in any link order. A step row additionally carries
+      partials/step_row.html's tqa-step and its own data-report-status, which
+      resolves to the same palette. Neither colour is written into the
+      markup, and every status is spelt out in words beside it.
 
   ACCESSIBILITY
   -------------
-  Invisible accessibility is applied because it costs nothing visually: the
-  decorative chevron is hidden from assistive technology, each collapse
-  control names the region it controls and reports its expanded state - which
-  is the vendored widget's own documented contract and what it maintains at
-  runtime - and every status is spelt out in words rather than carried by
-  colour alone. The error message is a preformatted block, which is what the
-  plan requires for text carrying tracebacks and what preserves its lines with
-  no bypass of escaping.
+  Invisible accessibility is applied because it costs nothing visually: each
+  collapse control names the region it controls through aria-controls and
+  reports its expanded state through aria-expanded - which report.js then
+  maintains at run time - and every status is spelt out in words rather than
+  carried by colour alone. The error message is a preformatted block, which is
+  what the plan requires for text carrying tracebacks and what preserves its
+  lines with no bypass of escaping.
 
-    BLITZY [A11Y]: the collapse control is a <span> at element level and a
-      <div> at steps level, as measured, and receives neither a role nor a
-      tabindex. Confirmed in a browser: the six collapse controls of a page
-      are mouse-operable and absent from the tab order, and a collapsed
-      container is display:none, so the steps of a passing scenario cannot be
-      reached without a pointer. Neither available correction is free.
-      Adding tabindex alone yields a focusable control that Enter and Space
-      do nothing to, since the vendored widget binds click only; writing that
-      key handling here would put a second state machine on a container the
-      widget owns; and turning the control into an anchor - the vendored
-      widget's own keyboard-capable form - changes the emitted element type
-      and so departs from the artifact this template is accepted against,
-      structure for structure. Implemented as measured and flagged for a
-      designer decision rather than half-fixed. What survives regardless: the
-      failure-bearing containers, which are what a report is opened for, ship
-      expanded and are therefore always reachable, and the report script's own
-      step-detail toggles are real buttons.
+  THE THREE COLLAPSE CONTROLS ARE REAL BUTTONS, which is what corrects the
+  three defects the measured markup carried at once. Each is
 
-    BLITZY [A11Y]: on paper, a collapsed container stays hidden - measured,
-      12 of 18 containers and 46 report-data leaves absent from a print
-      rendering of a feature page. It follows from the two rules above it: the
-      measured .in rule expands failure-bearing containers only, and the
-      vendored widget's collapsed state is display:none. main.css's print
-      block forces open exactly the regions the PORT's own state hooks
-      collapsed, and it cannot reach the vendored class because it declares no
-      bare selector anywhere - by design - while putting one of those hooks on
-      these containers is forbidden here and would not work through a hidden
-      ancestor anyway. The reference artifact prints the same way. Every
-      failure, traceback and screenshot does print, which is the case a
-      failures report exists for. Flagged rather than corrected by a rule this
-      file has no place writing.
+      <button type="button" class="collapsable-control tqa-toggle"
+              data-report-toggle aria-controls="<region id>"
+              aria-expanded="true" aria-label="<what it opens>"></button>
+
+  so it is in the tab order, Enter and Space activate it with no key handling
+  written anywhere, and its 28px minimum box in main.css makes it a touch
+  target rather than a glyph. It is not an anchor: report.js suppresses no
+  default action by design, so a navigating control would navigate. The name
+  is specific on purpose - the element's keyword and name, "Steps of <that
+  element>", or the failure's own first line - because 19 controls all named
+  "Toggle" tell a screen-reader user nothing about which one to press. The
+  brief stays a div with its status class: it is what paints the row, and
+  main.css's transparent .tqa-toggle background would erase that colour if the
+  brief itself became the button, quite apart from a button being unable to
+  contain the block content a brief carries.
+
+  NOTHING IS HIDDEN ON PAPER OR WITHOUT SCRIPTING any more. Every region is
+  authored expanded and carries no state class, so a print rendering and a
+  scripting-disabled read both show the whole tree; the print block in
+  main.css additionally forces open anything report.js collapsed before the
+  reader printed, and hides the controls themselves.
+
 -#}
 
 {#- Imports: the four dependency templates, and nothing else. Each is the
@@ -558,10 +603,12 @@
 {%- endmacro -%}
 
 
-{#- Whether a node records a failure, which is what decides the .in rule.
+{#- Whether a node records a failure, which is what overview_failures.html
+    selects the scenarios it lists by. No region's authored state depends on
+    it: every region ships expanded, per the collapse-ownership section.
     Steps AND after-hook entries take part, mirroring the failure test
     app/reporting/rerun_report.py applies for the same reason: a scenario
-    whose teardown failed is one a reader needs opened. A Background carries
+    whose teardown failed is one a reader needs listed. A Background carries
     no after list, so its second group is simply empty. Answers '1' or the
     empty string, since a macro can only answer text. -#}
 {%- macro contains_failure(node) -%}
@@ -584,23 +631,33 @@
 
 
 {#- ===================================================================
-    COLLAPSE STATE AND COLLAPSE IDS
+    COLLAPSIBLE REGIONS AND COLLAPSE IDS
     =================================================================== -#}
 
-{#- The control's class string, measured on both states, doubled and trailing
-    spaces included. The collapsed form is what drives the vendored
-    stylesheet's .collapsed .chevron:after rule and therefore the direction
-    the chevron points. -#}
-{%- macro collapse_control_class(expanded) -%}
-    {{- ' collapsable-control' if expanded else ' collapsed  collapsable-control' -}}
-{%- endmacro -%}
+{#- The container's class string: the historical collapsable-details, with
+    inner-level first in the token order on a steps container and absent on an
+    element container - both measured.
 
+    NEITHER VENDORED CLASS IS EMITTED ANY MORE. "collapse" hides a container
+    unless "in" is also present, and "in" is the vendored widget's own
+    expanded-state class; together they made a region's visibility the
+    vendored widget's property, while app/static/js/report.js - the single
+    owner of expand and collapse across all three surfaces of this port - only
+    ever adds and removes its own report-is-collapsed class. A region the
+    vendored widget had collapsed could therefore never be re-expanded by
+    expand-all, and a region it had hidden was gone from a page read with
+    scripting off and from paper. The script wins, so the two classes go: the
+    authored region is visible, and report.js collapses it on request.
 
-{#- The container's class string. inner_level is first in the token order on a
-    steps container and absent on an element container, and the expanded form
-    appends the vendored widget's own "in" - both measured. -#}
-{%- macro collapse_details_class(expanded, inner_level=false) -%}
-    {{- ('inner-level ' if inner_level else '') ~ 'collapse collapsable-details ' ~ (' in ' if expanded else '') -}}
+    collapsable-details itself stays. cucumber.css declares no rule for it -
+    it was the widget's selector hook, not a style - and keeping it keeps the
+    emitted shape the one the reference tree carries.
+
+    There is no expanded argument: every region this file emits is authored
+    expanded, which is what report.js's markup contract requires and what
+    _macros.html's own header states for the whole folder. -#}
+{%- macro collapse_details_class(inner_level=false) -%}
+    {{- ('inner-level ' if inner_level else '') ~ 'collapsable-details' -}}
 {%- endmacro -%}
 
 
@@ -652,7 +709,12 @@
 {%- if names %}
     <b>Tags:</b>
 {%- for name in names %}
-{%- set href = hrefs.get(name) %}
+{#- The tag's page, through the writer's allowlist: tag_hrefs is a mapping a
+    caller assembled, and on the failures page it is assembled from the result
+    document, so a destination that is not one of this tree's page names is
+    dropped here and the tag renders as the plain chip an unlinked tag already
+    renders as. -#}
+{%- set href = local_page_href(hrefs.get(name)) %}
 {%- if href is string and href|trim != '' %}
     <a href="{{ href|trim }}" class="tqa-tag tqa-link">{{ name }}</a>
 {%- else %}
@@ -674,7 +736,13 @@
     text has no accessible name at all; with a name but no destination the
     name renders as plain text rather than as a link that goes nowhere. -#}
 {%- macro feature_link_block(feature_href=none, feature_name=none) -%}
-    {%- set href = (feature_href if feature_href is string else '')|trim -%}
+    {#- The destination, through the writer's allowlist. This macro is called
+        with a value the calling page resolved, and on the failures page that
+        resolution starts from the result document; local_page_href accepts
+        only the page names app/reporting/pretty_reports.py actually emits and
+        answers '' for everything else, which the branch below already renders
+        as plain text. -#}
+    {%- set href = local_page_href((feature_href if feature_href is string else '')|trim) -%}
     {%- set label = (feature_name if feature_name is string else '')|trim -%}
     {%- if href or label %}
   <div class="indention">
@@ -715,8 +783,9 @@
     Exactly one trailing newline is emitted, matching the reference, whether
     or not the model's text already ends in one.
 
-    A message region is ALWAYS expanded, in every reference occurrence, so it
-    takes the expanded class string unconditionally.
+    A message region is ALWAYS expanded, in every reference occurrence - and
+    so is every other region this file emits now, for the reason the
+    collapse-ownership section gives, so there is no state to decide here.
 
     THE LABEL ANCHOR CARRIES main.css's METADATA-VALUE CLASS, and it earns its
     place by measurement rather than by taste: a Selenium message is one
@@ -727,7 +796,10 @@
     class is the project's existing answer to exactly this problem -
     partials/step_row.html applies it to a step location for the same reason
     and records the same 480px measurement - and it wraps the token instead.
-    The anchor still carries no href, so it is text, not a link. -#}
+    The anchor still carries no href, so it is text, not a link, and it stays
+    OUTSIDE the collapse button rather than inside it: as that button's
+    content it would have made this whole 115-character line the control's
+    accessible name. -#}
 {%- macro message_block(error_message, msg_id) -%}
     {%- set error_text = error_message if error_message is string else '' -%}
     {%- if error_text|trim != '' -%}
@@ -736,10 +808,18 @@
         {%- set target = (msg_id if msg_id is string else '')|trim -%}
   <div class="inner-level">
     <div class="message indention">
-      <div data-toggle="collapse" class="{{ collapse_control_class(true) }}" data-target="#{{ target }}" aria-controls="{{ target }}" aria-expanded="true">
-          <a class="tqa-meta-value">{{ label }}</a>
+      {#- The label row: the anchor carries the visible text and the button
+          beside it carries the behaviour. The anchor is NOT nested inside the
+          button - a control's accessible name would then be a 115-character
+          Selenium message, and the wrapping this label needs at a narrow
+          viewport is the anchor's own class. The button's name states which
+          failure it opens, because a page of nothing but failures would
+          otherwise offer a reader several identically named controls. #}
+      <div class="collapsable-control">
+        <button type="button" class="tqa-toggle" data-report-toggle aria-controls="{{ target }}" aria-expanded="true" aria-label="Failure detail: {{ label }}"></button>
+        <a class="tqa-meta-value">{{ label }}</a>
       </div>
-      <div id="{{ target }}" class="{{ collapse_details_class(true) }}">
+      <div id="{{ target }}" class="{{ collapse_details_class() }}" data-report-detail aria-hidden="false">
         <pre class="tqa-error">{{ error_text }}{{ '\n' if not error_text.endswith('\n') else '' }}</pre>
       </div>
     </div>
@@ -825,29 +905,40 @@
     A level the reference emits on every element: a collapse group whose
     keyword is the literal "Steps", whose name is EMPTY and whose brief
     carries the aggregate status of the steps below it. Note the class order
-    on its container - inner-level first, where an element's own container
-    has no inner-level at all.
+    on its region - inner-level first, where an element's own region has no
+    inner-level at all.
 
     status overrides the aggregate, which is how an element hands its own
     already-computed status down so the two briefs cannot disagree.
     uid_prefix is what makes each step's own detail id unique across the page;
-    an element passes its collapse id, so a step's uid reads element-3-4. -#}
-{%- macro steps_group(steps, counter=none, status=none, uid_prefix=none) -%}
+    an element passes its collapse id, so a step's uid reads element-3-4.
+    subject is the element's own display label, and it exists for the collapse
+    control's accessible name: a page carries one of these groups per element,
+    so a name of "Steps" alone would be a dozen identical controls. -#}
+{%- macro steps_group(steps, counter=none, status=none, uid_prefix=none, subject=none) -%}
     {%- set ids = counter if (counter is not none and counter.next is defined) else namespace(next=0) -%}
     {%- set items = steps if (steps is sequence and steps is not string and steps is not mapping) else [] -%}
     {%- set token = (status if (status is string and status|trim) else steps_status(items))|string|trim -%}
-    {%- set expanded = contains_failure({'steps': items})|trim != '' -%}
     {%- set steps_id = next_id(ids, 'steps')|string|trim -%}
-    <div class="steps inner-level tqa-steps" data-tqa-status="{{ token }}">
-      <div data-toggle="collapse" class="{{ collapse_control_class(expanded) }}" data-target="#{{ steps_id }}" aria-controls="{{ steps_id }}" aria-expanded="{{ 'true' if expanded else 'false' }}">
-        <div class="brief {{ token }}">
-          <span class="keyword indention">Steps</span>
-          <span class="name"></span>
-          {{ status_badge(token) }}
-          <i class="chevron fa fa-fw" aria-hidden="true"></i>
-        </div>
+    {#- The control's accessible name. Every element on a page has a steps
+        group, so "Steps" alone would name a dozen controls identically; the
+        subject the element passes down disambiguates them, and a caller that
+        passes none still gets a name rather than none. -#}
+    {%- set subject_text = (subject if subject is string else '')|trim -%}
+    <div class="steps inner-level tqa-steps" data-report-status="{{ token }}">
+      {#- div.brief is a direct child again, and it stays a div with its status
+          class: it is what paints the row, and main.css's transparent
+          .tqa-toggle background would erase that colour if the brief itself
+          were the button - quite apart from a button being unable to hold the
+          block content a brief carries. The control sits inside it, where the
+          decorative chevron used to be. #}
+      <div class="brief {{ token }}">
+        <span class="keyword indention">Steps</span>
+        <span class="name"></span>
+        {{ status_badge(token) }}
+        <button type="button" class="collapsable-control tqa-toggle" data-report-toggle aria-controls="{{ steps_id }}" aria-expanded="true" aria-label="Steps{{ ' of ' ~ subject_text if subject_text else '' }}"></button>
       </div>
-      <div id="{{ steps_id }}" class="{{ collapse_details_class(expanded, inner_level=true) }}">
+      <div id="{{ steps_id }}" class="{{ collapse_details_class(inner_level=true) }}" data-report-detail aria-hidden="false">
 {%- for step in items %}
 {{ step_block(step, uid=((uid_prefix ~ '-' ~ loop.index) if uid_prefix else none), counter=ids) }}
 {%- endfor %}
@@ -861,8 +952,8 @@
     ===================================================================
 
     The order of the parts is measured and is not negotiable: the optional
-    feature-link row, the tags row, the duration, the collapse control
-    wrapping the brief, the description, then the collapse container holding
+    feature-link row, the tags row, the duration, the brief - which holds the
+    collapse control - the description, then the collapsible region holding
     the steps group.
 
     A BACKGROUND OCCURRENCE IS AN ORDINARY ELEMENT HERE. It arrives once
@@ -888,11 +979,15 @@
     readable and human readable from the same string the model carries, and a
     Background - which has none - renders nothing.
 
-    THE CONTROL IS A span AT THIS LEVEL and a div at steps level. That is the
-    reference generator's own inconsistency, measured on every element of
-    every detail page, and it is reproduced rather than tidied.
+    THE CONTROL IS A BUTTON AT BOTH LEVELS. The measurement recorded a
+    pointer-only <span> here and a <div> at steps level - the generator's own
+    inconsistency, and at this level invalid as well, since the span wrapped a
+    block div. Neither is reproduced: both are one <button type="button">
+    inside the brief, which is the only form that is focusable, that Enter and
+    Space operate without a line of key handling, and that nests legally. See
+    the collapse-ownership and accessibility sections above.
 
-    SCREENSHOTS ARE RENDERED LAST, inside the collapse container, from the
+    SCREENSHOTS ARE RENDERED LAST, inside the collapsible region, from the
     element's after-hook list. The lightbox partial flattens that one level
     itself and answers nothing at all when there is nothing to show, so it is
     called on every element and its own emptiness decides whether the
@@ -904,9 +999,6 @@
     {%- set steps = element.get('steps') -%}
     {%- set step_items = steps if (steps is sequence and steps is not string and steps is not mapping) else [] -%}
     {%- set token = (status if (status is string and status|trim) else steps_status(step_items))|string|trim -%}
-    {#- The expanded state counts a failed after-hook as well as a failed
-        step, for the reason recorded in the decisions above. -#}
-    {%- set expanded = contains_failure(element)|trim != '' -%}
     {%- set kind = (element.get('type') if element.get('type') is string else '')|trim|lower -%}
     {%- set keyword_text = (element.get('keyword') if element.get('keyword') is string else '')|trim -%}
     {%- set keyword_label = keyword_text if keyword_text else ('Background' if kind == 'background' else ('Scenario' if kind == 'scenario' else '')) -%}
@@ -916,25 +1008,41 @@
     {%- set description_text = element.get('description') if element.get('description') is string else '' -%}
     {%- set started = timestamp_text(element.get('start_timestamp'))|string|trim -%}
     {%- set element_id = next_id(ids, 'element')|string|trim -%}
-    {%- set shots = screenshots(element.get('after')) -%}
-<div class="element {{ 'tqa-background' if kind == 'background' else 'tqa-scenario' }}" data-tqa-status="{{ token }}"{% if filterable %} data-report-filterable data-report-status="{{ token }}"{% endif %}>
+    {#- The control's accessible name: this element's own keyword and name,
+        which is what tells one of a page's dozen collapse controls from the
+        next. A nameless, keywordless element still gets a name, because a
+        control with an empty one has no accessible name at all. -#}
+    {%- set subject_text = ((keyword_label ~ ' ' ~ name_text)|trim) or 'Unnamed scenario' -%}
+    {#- The element's own heading, handed to the screenshot macro as the
+        caption of last resort. It never displaces an embedding's own name;
+        it is what stops a blank name leaving failure evidence with an empty
+        alt attribute and no caption, on the one surface where the reader
+        cannot tell from anything else which scenario the image came from.
+        Built from the same two values the brief below renders, so the
+        caption and the heading can never name different scenarios. -#}
+    {%- set element_heading = ((keyword_label ~ ': ' ~ name_text) if (keyword_label and name_text|trim) else (name_text if name_text|trim else keyword_label))|string|trim -%}
+    {%- set shots = screenshots(element.get('after'), fallback_caption=element_heading) -%}
+<div class="element {{ 'tqa-background' if kind == 'background' else 'tqa-scenario' }}" data-report-status="{{ token }}"{% if filterable %} data-report-filterable{% endif %}>
 {{- feature_link_block(feature_href, feature_name) }}
 {{ tags_block(element.get('tags'), tag_hrefs=tag_hrefs) }}
   {{ duration_span(element_duration_ns(element)|int) }}
 {%- if started %}
   <time class="tqa-timestamp" datetime="{{ started }}">{{ started }}</time>
 {%- endif %}
-  <span data-toggle="collapse" class="{{ collapse_control_class(expanded) }}" data-target="#{{ element_id }}" aria-controls="{{ element_id }}" aria-expanded="{{ 'true' if expanded else 'false' }}">
-    <div class="brief {{ token }}">
-      <span class="keyword indention">{{ keyword_label }}</span>
-      <span class="name">{{ name_text }}</span>
-      {{ status_badge(token) }}
-      <i class="chevron fa fa-fw" aria-hidden="true"></i>
-    </div>
-  </span>
+  {#- div.brief is a direct child of the element again - the <span> that used
+      to wrap it was a phrasing element holding a block div, which is invalid
+      and was emitted 19 times in one representative page - and the control
+      sits inside it, in the decorative chevron's place. The brief stays a div
+      with its status class for the reason recorded in the notes above. #}
+  <div class="brief {{ token }}">
+    <span class="keyword indention">{{ keyword_label }}</span>
+    <span class="name">{{ name_text }}</span>
+    {{ status_badge(token) }}
+    <button type="button" class="collapsable-control tqa-toggle" data-report-toggle aria-controls="{{ element_id }}" aria-expanded="true" aria-label="{{ subject_text }}"></button>
+  </div>
   <div class="description indention">{{ description_text }}</div>
-  <div id="{{ element_id }}" class="{{ collapse_details_class(expanded) }}">
-{{ steps_group(step_items, counter=ids, status=token, uid_prefix=element_id) }}
+  <div id="{{ element_id }}" class="{{ collapse_details_class() }}" data-report-detail aria-hidden="false">
+{{ steps_group(step_items, counter=ids, status=token, uid_prefix=element_id, subject=subject_text) }}
 {%- if shots|trim %}
     <div class="inner-level">
       <div class="embedding indention">{{ shots }}</div>
@@ -990,7 +1098,7 @@
 
     The whole div.feature, as a feature page renders it: tags, brief,
     description, elements. There is no duration and no collapse control at
-    this level - measured - so the feature brief carries no chevron and its
+    this level - measured - so the feature brief carries no control and its
     status arrives from the worst status across all of its elements'
     steps, Background occurrences included.
 
@@ -1009,7 +1117,7 @@
     {%- set keyword_text = (feature.get('keyword') if feature.get('keyword') is string else '')|trim -%}
     {%- set name_text = feature.get('name') if feature.get('name') is string else '' -%}
     {%- set description_text = feature.get('description') if feature.get('description') is string else '' -%}
-<div class="feature tqa-feature" data-tqa-status="{{ token }}">
+<div class="feature tqa-feature" data-report-status="{{ token }}">
 {{ tags_block(feature.get('tags'), tag_hrefs=tag_hrefs) }}
   <div class="brief {{ token }}">
     <span class="keyword indention">{{ keyword_text if keyword_text else 'Feature' }}</span>

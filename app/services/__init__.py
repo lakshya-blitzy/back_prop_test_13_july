@@ -103,10 +103,14 @@ from .test_run_service import (
     default_worker_count,
     merge_worker_results,
     prepare_workers_dir,
+    reclaim_workers_root,
+    run_directory_is_active,
+    run_directory_owner,
     run_suite,
     select_rerun_scenarios,
     select_scenarios,
     shard_scenarios,
+    terminate_live_workers,
 )
 
 # Grouped by owning module - every ``test_run_service`` name first, then every
@@ -127,10 +131,18 @@ __all__ = [  # noqa: RUF022
     "select_scenarios",
     "select_rerun_scenarios",
     "shard_scenarios",
-    # One worker invocation, and the intermediate directory it writes into.
+    # One worker invocation, and the intermediate directory it writes into -
+    # one directory per run, created and removed by the service that owns it.
     "build_worker_command",
     "prepare_workers_dir",
     "cleanup_workers_dir",
+    # Reclaiming that directory across invocations: what an abandoned run
+    # left behind goes, what a run still in progress holds stays.
+    "reclaim_workers_root",
+    "run_directory_owner",
+    "run_directory_is_active",
+    # Stopping the workers a run started, for an interrupted run.
+    "terminate_live_workers",
     # Putting the shards back together, and the whole run in one call.
     "merge_worker_results",
     "run_suite",

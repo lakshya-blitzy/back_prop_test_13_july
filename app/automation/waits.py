@@ -170,6 +170,12 @@ rereading the Java source.  Every item is reachable with a stubbed driver.
 6. **The seam works as documented** - with no ``driver`` argument,
    :func:`get_driver` is called exactly once; with one, it is not called at
    all.
+7. **A visibility wait locates inside the predicate** - given a stub driver
+   whose lookup raises ``NoSuchElementException`` for the first few polls and
+   then answers a visible element, :func:`wait_visible_element` still
+   resolves, and the stub's lookup count is greater than one, which is what
+   distinguishes a locator resolved per poll from an element resolved once
+   before the wait was constructed.
 
 The public surface
 ------------------
@@ -177,7 +183,7 @@ The public surface
 Helper                        Predicate it waits on
 ============================  =====================================
 :func:`wait_visible`          ``visibility_of_element_located``
-:func:`wait_visible_element`  ``visibility_of``
+:func:`wait_visible_element`  ``visibility_of_element_located``
 :func:`wait_present`          ``presence_of_element_located``
 :func:`wait_clickable`        ``element_to_be_clickable``
 :func:`wait_invisible`        ``invisibility_of_element_located``
@@ -186,6 +192,35 @@ Helper                        Predicate it waits on
 :func:`wait_title_is`         ``title_is``
 :func:`wait_url_contains`     ``url_contains``
 ============================  =====================================
+
+The two visibility rows name the same predicate on purpose, because the two
+helpers port *different* Java predicates onto it and only one of those two is
+ever used by the reference:
+
+* :func:`wait_visible_element` ports
+  ``ExpectedConditions.visibilityOf(<annotated field>)``, which is the suite's
+  **only** visibility predicate - all 42 of its visibility waits, of which
+  ``Calendar.java:20`` is the shape.  The field handed to it is a
+  ``PageFactory`` proxy, so the element lookup re-runs *inside* the predicate
+  on every poll, and a locator that has not appeared yet raises the not-found
+  error both bindings' wait already tolerates, which simply repeats the poll.
+  Reproducing that means taking the **locator** the proxy would have
+  re-located and resolving it per poll, which is why this helper's row names
+  the located form.  Accepting an already-resolved element instead would move
+  the lookup out of the wait and under the ten-second implicit wait
+  ``driver.py`` sets, and the call site's 2, 3, 4 or 20 seconds would never
+  gate that lookup at all - the parity defect this shape exists to avoid.
+* :func:`wait_visible` ports
+  ``ExpectedConditions.visibilityOfElementLocated``, which the reference calls
+  nowhere (``grep -rn visibilityOfElementLocated`` over its sources returns
+  zero hits).  It is named in the export surface AAP 0.4.2 fixes and is the
+  locator-shaped helper all ten page modules name when they document what
+  their upper-case constants are for, so it keeps its own name and its own row
+  rather than being folded away.
+
+Having arrived at one predicate, they share one body: the element-named helper
+delegates to the locator-named one, so a future change to how visibility is
+awaited has a single site to change and the two cannot drift apart.
 
 The membership is fixed and closed.  It covers what the ported step classes
 actually do - gating on visibility before an interaction, clickability before
@@ -292,13 +327,24 @@ def wait_visible(
 
 
 def wait_visible_element(
-    element: "WebElement",
+    locator: Locator,
     timeout: int | float,
     *,
     driver: "WebDriver | None" = None,
 ) -> "WebElement":
-    """Wait on ``visibility_of(element)``; returns that web element."""
-    return _until(EC.visibility_of(element), timeout, driver)
+    """Wait on ``visibility_of_element_located(locator)``; returns the element.
+
+    The port of ``ExpectedConditions.visibilityOf`` applied to a
+    ``PageFactory`` field, which is every one of the reference's 42 visibility
+    waits.  That field is a proxy that re-locates on each touch, so the lookup
+    happened inside the predicate, once per poll, and the wait's own timeout
+    governed it; this helper therefore takes the locator - a page object's
+    upper-case constant, ``page.CALENDAR_BUTTON`` - and not an element already
+    resolved through the lower-case accessor, which would be looked up before
+    the wait exists.  The module docstring's surface table explains why the two
+    visibility helpers share one predicate and why both names stay.
+    """
+    return wait_visible(locator, timeout, driver=driver)
 
 
 def wait_present(
@@ -370,4 +416,3 @@ def wait_url_contains(
 ) -> bool:
     """Wait on ``url_contains(fragment)`` for a substring of the URL; returns a bool."""
     return _until(EC.url_contains(fragment), timeout, driver)
-

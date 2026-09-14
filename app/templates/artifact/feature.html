@@ -197,19 +197,23 @@
   app/static/js/report.js, with nothing invented in either namespace:
       tqa-feature, tqa-feature-name, tqa-feature-desc, tqa-tags, tqa-tag,
       tqa-meta, tqa-meta-item, tqa-meta-label, tqa-meta-value, tqa-empty
-      data-tqa-status, data-report-filterable, data-report-status
+      data-report-status
   The stylesheet carries no selector outside that namespace, so an invented
   class would render silently; elements it declares no rule for - the code
   element used for the two machine-readable values - fall back to the
   browser's own defaults, which is the intent.
 
-  The filter pair sits on the feature root, which is the unit the status
-  filter hides at this level: hiding a filterable element hides its whole
-  subtree, so filtering to one status can hide an entire feature whose
-  rolled-up status is another. Each element registers the same pair on itself,
-  and the behaviour script evaluates every filterable element independently,
-  so the nesting is deliberate and safe - a feature that survives the filter
-  still hides the scenarios inside it that do not.
+  THE FEATURE ROOT IS NOT A FILTER UNIT, and that is deliberate: its status
+  is an aggregate of its elements, while hiding a filterable element hides
+  its whole subtree, so registering the feature would hide every passed
+  scenario that happens to sit inside a feature rolled up to failed. The
+  status hook therefore stands alone here - it is the stylesheet's accent and
+  print hook, which is why it stays on the root and the feature keeps its
+  colour - and the filter registers one level down, on the scenarios and
+  backgrounds the element template of this folder emits, where a status is
+  the element's own and nobody else's. The behaviour script evaluates each of
+  those independently, so filtering to one status thins the scenarios inside
+  a feature and never removes the feature around them.
 
   NO TOGGLE CONTROL IS EMITTED HERE. Interactivity at this level would need a
   collapsible region wrapping the elements, and the stylesheet declares no
@@ -265,8 +269,9 @@
         The badge partial is the single normaliser in the project and answers
         "unknown" for an absent or unrecognised value, so one reading of a
         status can never disagree with another; the same token feeds the
-        stylesheet hook, the filter hook and the badge, which is what keeps
-        them consistent by construction. -#}
+        stylesheet hook and the badge, which is what keeps them consistent by
+        construction. It feeds no filter hook, because an aggregate is not a
+        filter unit here - see VOCABULARY AND ACCESSIBILITY above. -#}
     {%- set token = badge.status_token(feature.get('status')) -%}
 
     {#- ---- heading ------------------------------------------------------
@@ -324,7 +329,7 @@
     {%- set raw_elements = feature.get('elements') -%}
     {%- set element_items = raw_elements if (raw_elements is sequence and raw_elements is not string and raw_elements is not mapping) else [] -%}
 
-<section id="{{ feature_dom_id }}" class="tqa-feature{% if extra %} {{ extra }}{% endif %}" data-tqa-status="{{ token }}" data-report-filterable data-report-status="{{ token }}" aria-labelledby="{{ heading_dom_id }}">
+<section id="{{ feature_dom_id }}" class="tqa-feature{% if extra %} {{ extra }}{% endif %}" data-report-status="{{ token }}" aria-labelledby="{{ heading_dom_id }}">
     <h2 class="tqa-feature-name" id="{{ heading_dom_id }}">{{ heading_text }}
         {{ badge.status_badge(token) }}
     </h2>

@@ -41,7 +41,8 @@
   ---------------------------------------------------------------------------
   MACRO 2 - step_row(step, uid=none, extra_classes={}, filterable=true,
                      duration_fallback=none, inline_args=false,
-                     show_location=false, embeddings=none)
+                     show_location=false, embeddings=none,
+                     screenshot_fallback_caption=none)
   ---------------------------------------------------------------------------
       step               REQUIRED. The step mapping described under THE INPUT
                          MODEL below. A step that is not a mapping - none, a
@@ -98,6 +99,20 @@
                          list, never on a step, so the calling template
                          decides which step - if any - carries them; passing
                          that list in unchanged is supported.
+
+      screenshot_fallback_caption
+                         OPTIONAL, default none. Forwarded to the lightbox
+                         partial as its fallback caption, which that partial
+                         uses ONLY when the embedding's own name carries no
+                         text. It exists because an embedding belongs to the
+                         scenario while this macro renders a step: when a
+                         caller routes a scenario's captures through the step
+                         that failed, the scenario's own heading is the label
+                         for them, and without this parameter a capture whose
+                         name arrived blank rendered with an empty alt, no
+                         caption and no accessible name on its trigger - an
+                         unlabelled image standing in for failure evidence.
+                         It never displaces a name the model carries.
 
   SLOTS - the keys extra_classes may carry, each a string of class tokens
   appended after this project's own class on that element:
@@ -280,20 +295,68 @@
   app/static/js/report.js, with nothing invented in either namespace:
       tqa-step, tqa-step-keyword, tqa-step-name, tqa-step-args,
       tqa-step-detail, tqa-duration, tqa-error, tqa-toggle, tqa-meta-value
-      data-tqa-status, data-report-filterable, data-report-status,
-      data-report-toggle, data-report-detail
+      data-report-status, data-report-filterable, data-report-toggle,
+      data-report-detail
+
+  ONE STATUS ATTRIBUTE PER ROW, ALWAYS: data-report-status, whatever the row's
+  filterability. data-report-filterable is the separate, conditional fact -
+  whether the status filter may hide this row - and it carries no value.
+  Colouring a row and filtering it are therefore driven by the same single
+  attribute, so a non-filterable row is still coloured and a filterable one
+  carries no duplicate of its own status.
+
+  THE MATCHED ARGUMENTS are one inline container of inline values, not a
+  table: the model carries a flat list of matched strings with no header row
+  and nothing to align in columns, and the stylesheet draws each value as its
+  own chip.
 -#}
 
 {%- from 'partials/status_badge.html' import status_badge, status_token -%}
 {%- from 'partials/lightbox.html' import screenshots -%}
 
-{#- The keyword, trimmed once for the whole project. Guarded with a type test
-    rather than a truth test, because a truth test on an undefined name is
-    what raises under a strict undefined policy - and an omitted argument is
-    exactly how an undefined name arrives here. -#}
+{#- The keyword, normalised once for the whole project, and this macro is the
+    project's only keyword transformation.
+
+    EXACTLY THE ONE TRAILING SPACE THE SOURCE CARRIES IS REMOVED, and nothing
+    else. A step keyword in the result model is "Given ", "When ", "Then " or
+    "And " - the word plus a single trailing space, which the schema requires
+    and which exists only to separate the keyword from the step name in a
+    reconstructed line. Rendered into its own element that space is dead
+    whitespace, so it goes; the word itself is emitted byte for byte.
+
+    A blanket trim would take leading whitespace with it, which is not the
+    same transformation: leading whitespace is not part of the schema's
+    keyword convention, so a value carrying it is a value the model records
+    that way, and silently rewriting it would make the rendered keyword differ
+    from the keyword the artifact reports. Only a single trailing space is
+    dropped, and only when there is one.
+
+    Guarded with a type test rather than a truth test, because a truth test on
+    an undefined name is what raises under a strict undefined policy - and an
+    omitted argument is exactly how an undefined name arrives here. -#}
 {%- macro step_keyword(step) -%}
     {%- set keyword = step.get('keyword') if step is mapping else none -%}
-    {{- (keyword if keyword is string else '')|trim -}}
+    {%- set text = keyword if keyword is string else '' -%}
+    {{- text[:-1] if text.endswith(' ') else text -}}
+{%- endmacro -%}
+
+{#- THE PROJECT'S DURATION PREDICATE, exported so that one reading of a
+    duration serves every surface.
+
+    A duration is usable exactly when it is a non-negative integer that is not
+    a boolean. Each part of that answers to the model: the schema carries
+    nanoseconds as an integer, so a float is not a duration this project
+    produced; a negative count is not a duration at all; and Jinja's number
+    test admits booleans, so True would otherwise arrive as the duration 1
+    nanosecond. Zero IS a real value - a skipped or undefined step records it
+    - and is usable, which is why the test is not a truth test.
+
+    Every aggregate over durations uses this macro rather than its own test.
+    Without it a value this row declines to render still reached a total, so a
+    page could show a step with no duration inside a feature whose total had
+    counted it. -#}
+{%- macro duration_is_usable(value) -%}
+    {{- 'yes' if (value is integer and value is not boolean and value >= 0) else '' -}}
 {%- endmacro -%}
 
 {#- One step, with its detail. Every guard below is a type test rather than a
@@ -301,7 +364,7 @@
     to get wrong: a skipped or undefined step's duration is the INTEGER ZERO,
     which is falsy, so a truth test would silently drop a duration the model
     really carries. -#}
-{%- macro step_row(step, uid=none, extra_classes={}, filterable=true, duration_fallback=none, inline_args=false, show_location=false, embeddings=none) -%}
+{%- macro step_row(step, uid=none, extra_classes={}, filterable=true, duration_fallback=none, inline_args=false, show_location=false, embeddings=none, screenshot_fallback_caption=none) -%}
 {%- if step is mapping -%}
 
     {#- ---- extra classes, one slot at a time -----------------------------
@@ -343,7 +406,9 @@
         renders as 0.000; a boolean, a float, a negative and a non-number all
         count as no duration. -#}
     {%- set duration = result.get('duration') -%}
-    {%- set has_duration = duration is integer and duration is not boolean and duration >= 0 -%}
+    {#- Read through the exported predicate, never restated here, so this row
+        and every aggregate over these rows accept exactly the same values. -#}
+    {%- set has_duration = duration_is_usable(duration)|trim != '' -%}
     {%- set duration_text = ('%d.%03d'|format(duration // 1000000000, (duration % 1000000000) // 1000000)) if has_duration else '' -%}
     {%- set fallback_text = (duration_fallback|string|trim) if (duration_fallback is string or (duration_fallback is number and duration_fallback is not boolean)) else '' -%}
     {%- set show_duration = has_duration or fallback_text != '' -%}
@@ -401,7 +466,7 @@
     {#- Called once, and its own emptiness is the test. A failed scenario
         carrying no screenshot is a wholly normal state, because a capture
         that fails is logged and suppressed. -#}
-    {%- set shots = screenshots(embeddings) -%}
+    {%- set shots = screenshots(embeddings, fallback_caption=screenshot_fallback_caption) -%}
     {%- set show_shots = shots|trim != '' -%}
     {%- set has_detail = show_args_block or show_location_block or show_error or show_shots -%}
 
@@ -423,7 +488,7 @@
     {%- set step_label = (keyword_text ~ ' ' ~ name)|trim -%}
     {%- set toggle_label = ('Toggle detail for step: ' ~ step_label) if step_label != '' else 'Toggle step detail' -%}
 
-<div class="tqa-step{% if cls_step %} {{ cls_step }}{% endif %}" data-tqa-status="{{ token }}"{% if filterable %} data-report-filterable data-report-status="{{ token }}"{% endif %}>
+<div class="tqa-step{% if cls_step %} {{ cls_step }}{% endif %}" data-report-status="{{ token }}"{% if filterable %} data-report-filterable{% endif %}>
     <span class="tqa-step-keyword{% if cls_keyword %} {{ cls_keyword }}{% endif %}">{{ keyword_text }}</span>
     <span class="tqa-step-name{% if cls_name %} {{ cls_name }}{% endif %}">
         {#- Sliced, never search-and-replaced: a value such as "2" occurs more

@@ -138,6 +138,40 @@ Each item is behaviour to preserve, not an omission:
   page-load nor a script timeout, so neither is set here.  Explicit waits are
   a separate module with a per-call-site timeout.
 
+Nothing bounds provisioning or a command in wall-clock time
+-----------------------------------------------------------
+Stated because it is a real limit of this module rather than an oversight in
+it: ``webdriver-manager``'s provisioning HTTP - the ``.install()`` calls below
+- carries no application timeout, and Selenium's transport passes no timeout
+of its own, so its socket deadline is whatever ``socket.getdefaulttimeout()``
+returns, which is ``None`` unless something in the process has set it.  Both
+``.install()`` and any subsequent WebDriver command can therefore block
+indefinitely, and the port supplies no parent cancellation boundary that would
+end such a wait from outside.
+
+This is inherited, not introduced: ``Driver.java:29-41`` constructs both
+browsers bare and configures no transport, and the two settings it does apply
+are reproduced exactly (maximize, then a 10-second implicit wait, which is a
+per-command element-lookup budget and not a network bound).  It is
+deliberately not changed here.  A download limit, a socket or transport
+timeout, a ``ClientConfig``, a retry policy or a cancellation policy would all
+be behaviour this port added on its own, and AAP 0.1.3 owns "every deviation
+in this plan" with an inventory that closes at item 19 - so any wall-clock
+bound over provisioning or over a command requires user authorization as a new
+deviation, and none is asserted by this module.
+
+So the position this module ships is an accepted risk, stated rather than
+silently taken: an unreachable driver-binary host or an unresponsive browser
+stalls the worker that hit it for as long as the operator lets the run stand,
+and a run's own wall-clock is the only thing that ends it.  Two changes would
+remove that, and both are outside this module: a provisioning and transport
+bound, which is a ``ClientConfig`` on each constructor below plus a download
+timeout on the two manager calls, and a parent cancellation boundary in
+``app/services/test_run_service.py``, which owns the worker processes and is
+the only place a stalled child can be terminated and its session cleaned up.
+Neither is in place and neither is authorized: this paragraph records that
+state exactly, and asserts no change beyond it.
+
 Import boundary (AAP 0.4.2)
 ---------------------------
 This module and its two siblings are the only place ``selenium`` is imported,
@@ -183,11 +217,16 @@ a real browser, a live system under test, or a populated properties file.
    returns without raising and without calling anything.
 6. **Teardown clears the slot** (``:52-53``) - ``quit()`` is called exactly
    once and the following :func:`get_driver` constructs a *new* session.
-7. **A failing ``quit()`` is contained** - it is logged and suppressed, and
-   the slot is cleared anyway.
+7. **A failing ``quit()`` propagates, and the slot is cleared anyway** - a
+   stub whose ``quit()`` raises makes :func:`quit_driver` raise that exception
+   while the following :func:`_session` reads ``None``.  :func:`quit_driver`
+   offers no "never raises" guarantee: ``Driver.closeDriver()`` installs no
+   handler, and a browser that would not close has to be visible.  Under
+   behave the caller is ``after_scenario``, and behave 1.3.3's
+   ``runner.run_hook`` turns that into ``HOOK-ERROR in after_scenario: ...``
+   with the scenario's status set to ``hook_error``, without aborting the run.
 """
 
-import logging
 import threading
 
 from selenium import webdriver
@@ -199,12 +238,6 @@ from webdriver_manager.firefox import GeckoDriverManager
 from app.config import get_browser
 
 __all__ = ["get_driver", "quit_driver"]
-
-# Records propagate to the ``app`` package logger, where ``configure_logging()``
-# installs the split that sends WARNING and above to stderr and everything
-# below it to stdout.  The stdlib call is deliberate: ``app/logging_config.py``
-# configures handlers and exposes no logger factory of its own.
-logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -372,23 +405,11 @@ def get_driver() -> webdriver.Remote | None:
             # Driver.java:38, likewise bare.
             _adopt_session(webdriver.Firefox(service=service))
 
-        else:
-            # Driver.java:29-42 has no ``default:`` label, so there is nothing
-            # to port into this branch and nothing may be added to it: no
-            # fallback browser, no substitution, no exception and no warning
-            # that would imply one is coming.  It exists only to record that
-            # the omission is deliberate, and it logs at DEBUG so an operator
-            # diagnosing "the browser never opened" can see the name that
-            # reached this point.  The name is one of the six configuration
-            # keys' values and carries no credential.
-            logger.debug(
-                "Configured browser %r matches neither 'chrome' nor "
-                "'firefox', the two branches this port constructs; no session "
-                "was created and the slot stays empty, so the failure "
-                "surfaces at first use - Driver.java:29-42 has no default "
-                "branch",
-                browser,
-            )
+        # No ``else``.  Driver.java:29-42 has no ``default:`` label, so there
+        # is no branch here either: an unmatched name leaves the slot empty
+        # and falls through to the unconditional return below.  Nothing is
+        # substituted, raised, validated or logged - a record naming the
+        # configured value would be a behaviour this port added on its own.
 
     # Driver.java:44-45 - ``return driverPool.get();``.  Unconditional, and
     # therefore ``None`` when no branch above matched.
@@ -417,19 +438,31 @@ def quit_driver() -> None:
       the slot is emptied, so the next :func:`get_driver` builds a fresh
       session.  That is the half of the lifecycle contract which guarantees
       "every scenario gets a fresh session".
+    * **A failing ``quit()`` propagates.**  A dead session or an
+      already-gone browser process raises on ``quit()``, and nothing here
+      catches it: ``Driver.closeDriver()`` installs no handler, and AAP
+      0.1.3's deviation 19 authorizes suppression for screenshot capture and
+      for nothing else.  A browser that could not be closed may still be
+      running, so the failure has to reach the caller; absorbing it would let
+      teardown report success over a leaked process.
     * **The slot is cleared even when ``quit()`` fails.**  A session that
       could not be closed must never be handed to a later scenario, which is
       what the contract's "no code ever touches a driver after ``quit()``"
-      forbids, so the clear happens in a ``finally``.
-    * **A failing ``quit()`` is logged and suppressed.**  A dead session or an
-      already-gone browser process raises on ``quit()``, and this runs during
-      teardown: letting it propagate would corrupt the scenario result the
-      reporting layer is about to record, turning a browser-cleanup nuisance
-      into a wrong test outcome.  The report is a WARNING, which the port's
-      logging configuration routes to stderr.
+      forbids, so the clear happens in a ``finally`` while the failure travels
+      on past it.
 
-    :returns: ``None``.  This function never raises, by design: teardown must
-        not be able to change a scenario's recorded outcome.
+    In production the caller is ``after_scenario``, and behave 1.3.3's
+    ``runner.run_hook`` catches what a hook raises: it prints
+    ``HOOK-ERROR in after_scenario: ...``, counts a hook failure and sets that
+    scenario's status to ``hook_error``, then continues with the remaining
+    scenarios, so all four artifacts are still written and the port's own exit
+    contract still returns 0 for any test outcome.
+
+    :returns: ``None`` on success.
+    :raises Exception: Whatever the browser session raises from ``quit()``.
+        This function is deliberately **no longer** a "never raises"
+        guarantee: the slot is always emptied, but a teardown failure is
+        reported rather than hidden.
     """
     driver = _session()
 
@@ -438,21 +471,32 @@ def quit_driver() -> None:
     if driver is None:
         return
 
+    # No ``except`` clause of any kind.  ``Driver.closeDriver()`` installs no
+    # handler, so a failed ``quit()`` propagates to the caller exactly as it
+    # does in Java, and AAP 0.1.3's deviation 19 sanctions suppression for
+    # screenshot capture alone - never for browser teardown.  A session that
+    # refused to close may have left a live browser process behind, and that
+    # has to be visible rather than absorbed here.
     try:
         # Driver.java:52 - ``driverPool.get().quit();``
         driver.quit()
-    except Exception as exc:
-        # Never a bare ``except``: this catches failures of the browser
-        # session, and deliberately not ``BaseException``, so a
-        # ``KeyboardInterrupt`` or a worker shutdown still propagates.
-        logger.warning(
-            "Closing the browser session failed and was suppressed so that "
-            "teardown cannot alter the scenario result: %s",
-            exc,
-            exc_info=True,
-        )
     finally:
-        # Driver.java:53 - ``driverPool.remove();`` - reached on both paths,
-        # so a session that refused to close is still forgotten here.
+        # Driver.java:53 - ``driverPool.remove();``.  The Java line is reached
+        # only when ``quit()`` returned; this one is reached on both paths,
+        # which is the single deliberate departure from the source statement
+        # order.  It is an adjudication rather than an oversight, and AAP
+        # 0.3.3 is the authority for it: the lifecycle contract there states
+        # that ``after_scenario`` "calls quit(), and clears the slot" so that
+        # "no code ever touches a driver after quit()".  Clearing only on
+        # success would leave a quit-attempted session in the slot, and
+        # :func:`get_driver`'s create-on-demand guard - "the slot is empty" -
+        # would hand that dead session straight to the next scenario in this
+        # worker, and to every scenario after it, each failing on a browser
+        # that is already gone.  Reproducing the Java line exactly would
+        # therefore trade one visible teardown failure for a silently poisoned
+        # worker, which the contract forbids.  Clearing here changes nothing
+        # about the failure itself, which still propagates out of the ``try``
+        # unsuppressed; if the source's exact statement order is wanted
+        # instead, that is a deliberate relaxation of AAP 0.3.3 and a decision
+        # for the plan's owner rather than for this module.
         _clear_session()
-

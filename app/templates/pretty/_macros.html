@@ -1,7 +1,8 @@
 {#-
   ---------------------------------------------------------------------------
   pretty/_macros.html - the single owner of duration, count-cell, percentage,
-  status-label and timestamp formatting for the emitted report tree.
+  status-label and timestamp formatting for the emitted report tree, and of
+  the collapse-all control its two detail pages share.
   ---------------------------------------------------------------------------
 
   A macro-only template. It renders no page, is never rendered standalone and
@@ -30,6 +31,17 @@
   place. This is the same discipline app/utils/paths.py applies to artifact
   paths and app/templates/partials/status_badge.html applies to status
   normalisation.
+
+  THE COLLAPSE-ALL CONTROL IS HERE FOR THE SAME REASON. Both detail pages -
+  feature.html and tag.html - carry the pair TWICE, once above the element
+  tree and once below it, which is measured on the clean reference pages of
+  both kinds. That is four blocks whose markup must be identical: they address
+  the same regions through the same script, so a control that drifts on one
+  page is a control that behaves differently on two pages of one report. One
+  macro, four call sites, no drift. It lives in this file rather than in
+  either page because neither page may import the other - a page template
+  extends the layout and imports helpers, and two pages importing each other
+  is a dependency this folder does not have.
 
   ---------------------------------------------------------------------------
   THE DURATION RULE - MEASURED, NOT DOCUMENTED
@@ -116,15 +128,27 @@
         the reference result set three steps are skipped and only one of them
         has the key, so both shapes reach this macro and neither may raise.
 
+    duration_unavailable()
+        The fallback a duration CELL shows when there is no usable duration:
+        an em dash for a sighted reader and visually hidden words for a screen
+        reader. One macro, because two cells show it.
+
     duration_cell(ns, extra_classes='')
         The sortable statistics cell. Omits the sort attribute entirely, rather
-        than emitting an empty one, when there is no duration.
+        than emitting an empty one, when there is no duration - and shows
+        duration_unavailable() in the cell, because an empty cell reads as a
+        rendering fault rather than as missing data.
 
     duration_span(ns)
-        The inline duration in the element tree.
+        The inline duration in the element tree. NO fallback here, and that
+        asymmetry is deliberate: an empty CELL is a visible blank box in a
+        grid of numbers, which reads as a rendering fault, while an empty
+        inline span takes no room at all in the flow beside a brief that
+        already names the element and its state. A dash there would read as
+        content rather than as an absence.
 
     duration_total_cell(ns, extra_classes='')
-        The footer total.
+        The footer total, with the same cell fallback as duration_cell.
 
     count_cell(value, status_class='')
         A numeric statistics cell. The status class is applied ONLY when the
@@ -156,6 +180,13 @@
         carries it. The empty string when absent: a Background element carries
         no start timestamp at all, along with no id and no tags.
 
+    collapse_all_control()
+        The expand-all / collapse-all pair of the two detail pages, in the
+        measured Bootstrap wrapper. The one macro here that emits a control
+        rather than formatting a value; its own note below records why the
+        two controls are buttons, what drives them and why neither carries
+        aria-expanded.
+
   STATUS NORMALISATION IS BORROWED, NEVER REIMPLEMENTED. status_label folds its
   argument with status_token from partials/status_badge.html, which that file
   documents as the single place normalisation happens project-wide. A second
@@ -175,12 +206,13 @@
   ---------------------------------------------------------------------------
   CONSTRAINTS THIS FILE HOLDS TO
   ---------------------------------------------------------------------------
-    - It formats values and nothing else. It contains no path, no file name,
-      no link and no application endpoint lookup, because these pages are
-      written to disk and opened from a file path or a build workspace where
-      an application route cannot resolve. Every name and destination the
-      report tree links to is a value its caller passes in, owned by
-      app/reporting/pretty_reports.py.
+    - It formats values, plus the one shared control above, and nothing else.
+      It contains no path, no file name, no link and no application endpoint
+      lookup, because these pages are written to disk and opened from a file
+      path or a build workspace where an application route cannot resolve.
+      Every name and destination the report tree links to is a value its
+      caller passes in, owned by app/reporting/pretty_reports.py. The control
+      is no exception: it navigates nowhere and carries no href at all.
 
     - It declares no value pre-trusted and marks no output as ready-made
       markup, leaning on the engine's own escaping of HTML templates instead.
@@ -201,20 +233,33 @@
       sets. The stylesheet takes their absence to mean expanded, visible and
       closed, so server output always describes a fully expanded, fully
       visible page - which is what keeps the emitted tree legible with
-      scripting off and correct on paper.
+      scripting off and correct on paper. The control's
+      data-report-toggle-all is neither of those: it is a SELECTION attribute,
+      naming an action for the script to attach to, and it describes no state.
+
+    - NO INLINE JAVASCRIPT, in any form. The control carries no handler
+      attribute, no javascript: destination and no script block; expand and
+      collapse belong to app/static/js/report.js, which AAP 0.3.4 names as
+      their owner.
 
     - It introduces no component library. The Bootstrap, jQuery, chart,
       table-sorting, date and icon-font files inside the emitted tree are the
       reference generator's own output, not a design system this port adopts,
-      so the only class names here are the ones measured in that output:
-      duration, lead-duration, total, and the bare status words.
+      so every class name here is one measured in that output or one the
+      vendored stylesheets already declare.
 
-  CLASS VOCABULARY - the vendored generator stylesheet, and nothing else. It
-  declares the five status words passed, failed, skipped, pending and
-  undefined, plus duration, lead-duration and total. It carries no rule for
-  untested, ambiguous or unknown, so a label in one of those states renders
-  uncoloured inside the emitted tree; the port's own stylesheet covers them on
-  the surfaces it controls. No class is invented here.
+  CLASS VOCABULARY - the vendored stylesheets, and nothing else. The generator
+  stylesheet declares the five status words passed, failed, skipped, pending
+  and undefined, plus duration, lead-duration, total and collapsable-control,
+  and the vendored Font Awesome the fa, fa-2x and chevron classes; the
+  vendored bootstrap.min.css declares the grid classes, btn, btn-default,
+  btn-lg and sr-only. The generator stylesheet carries no rule for untested,
+  ambiguous or unknown, so a label in one of those states renders uncoloured
+  inside the emitted tree; the port's own stylesheet covers them on the
+  surfaces it controls. No class is invented here, and none of main.css's own
+  tqa- classes is applied: tqa-toggle in particular would put a second,
+  decorative glyph on the chevron, erase the button's surface and drop the
+  control from the printed page.
 -#}
 
 {#- Status normalisation, borrowed from its single owner. -#}
@@ -268,13 +313,47 @@
 {%- endmacro -%}
 
 
+{#- The fallback a duration CELL shows when there is no usable duration to
+    show. An em dash is the typographic convention for "no value here", and it
+    is paired with visually hidden words because a dash alone is announced
+    either as nothing or as a stray punctuation character - so a screen-reader
+    user would hear a cell that a sighted reader can see is deliberately
+    blank. The dash is therefore hidden from assistive technology and the
+    words are hidden from view, which is the same split the layout's navbar
+    toggle uses. .sr-only is the vendored bootstrap.min.css class every page in
+    this folder already links, so no stylesheet is added.
+
+    It exists as its own macro for the reason duration_value does: two cell
+    macros show this fallback, and a report whose statistics table words an
+    absent duration differently from its own footer is wrong in a way no
+    reader can diagnose.
+
+    The dash is written as a character reference rather than as the literal
+    character: these pages are written to disk and opened over the file
+    protocol or from a build workspace, and a reference renders identically
+    whatever an opener assumes about the encoding. The markup is authored
+    template text, so nothing here is declared pre-escaped or trusted - the
+    file's constraint against marking output as ready-made markup still
+    holds. -#}
+{%- macro duration_unavailable() -%}
+<span aria-hidden="true">&#8212;</span><span class="sr-only">Not available</span>
+{%- endmacro -%}
+
+
 {#- The sortable statistics cell. The sort attribute carries the raw count and
     is omitted altogether when there is none, since an empty one would sort as
-    a value rather than as a gap. -#}
+    a value rather than as a gap.
+
+    The CELL is never left empty, though: an empty cell reads as a rendering
+    fault rather than as missing data, and a missing duration is a real state -
+    a skipped step legitimately carries no duration key at all. So the sort
+    attribute is withheld and the fallback above is shown. A genuine zero is a
+    different reading and keeps its own: duration_value answers the string "0",
+    which is truthy, so 0 renders 0.000 and carries data-value="0". -#}
 {%- macro duration_cell(ns, extra_classes='') -%}
     {%- set value = duration_value(ns) -%}
     {%- set extra = (extra_classes|default('', true)|string).split()|join(' ') -%}
-    <td class="duration{% if extra %} {{ extra }}{% endif %}"{% if value %} data-value="{{ value }}"{% endif %}>{{ duration_text(ns) }}</td>
+    <td class="duration{% if extra %} {{ extra }}{% endif %}"{% if value %} data-value="{{ value }}"{% endif %}>{% if value %}{{ duration_text(ns) }}{% else %}{{ duration_unavailable() }}{% endif %}</td>
 {%- endmacro -%}
 
 
@@ -286,10 +365,13 @@
 
 
 {#- The footer total. A footer row is not sorted, so no sort attribute exists
-    in this macro to emit by accident. -#}
+    in this macro to emit by accident - and the same fallback duration_cell
+    shows for an absent duration is shown here, from the one macro, so the
+    table and its own footer cannot word it differently. -#}
 {%- macro duration_total_cell(ns, extra_classes='') -%}
+    {%- set value = duration_value(ns) -%}
     {%- set extra = (extra_classes|default('', true)|string).split()|join(' ') -%}
-    <td class="duration{% if extra %} {{ extra }}{% endif %}">{{ duration_text(ns) }}</td>
+    <td class="duration{% if extra %} {{ extra }}{% endif %}">{% if value %}{{ duration_text(ns) }}{% else %}{{ duration_unavailable() }}{% endif %}</td>
 {%- endmacro -%}
 
 
@@ -340,4 +422,71 @@
 {%- macro timestamp_text(value) -%}
     {%- set raw = value|default(none) -%}
     {%- if raw is not none -%}{{- raw|string|trim -}}{%- endif -%}
+{%- endmacro -%}
+
+
+{#- THE COLLAPSE-ALL CONTROL of the two detail pages, defined once and called
+    four times - twice from feature.html and twice from tag.html, above and
+    below the element tree on each - so the four blocks cannot drift apart.
+    Both positions are measured on the clean reference pages of both kinds:
+    report-tag_4059758862.html carries the pair immediately above its
+    div#report and again below the tree before the page's trailing <br/>, and
+    the two reference feature pages carry it in the same two places.
+
+    THE WRAPPER IS THE MEASURED ONE - container-fluid > row >
+    col-md-1.col-md-offset-10 - and the two controls sit inside it in the
+    measured order, expand before collapse.
+
+    THE DRIVER IS app/static/js/report.js, declaratively. Each control carries
+    data-report-toggle-all, which that script answers by expanding or
+    collapsing every [data-report-detail] region in the control's scope - its
+    closest [data-report-root], the whole document where there is none - and
+    then re-deriving aria-expanded on every [data-report-toggle] in that
+    scope, so an all-control and the per-region controls cannot disagree. AAP
+    0.3.4 gives that script sole ownership of expand and collapse; the
+    reference reached for inline jQuery only because the vendored plugin has
+    no declarative way to say show-all or hide-all, and _element_tree.html no
+    longer attaches that plugin to anything.
+
+    EACH CONTROL IS A REAL BUTTON, which corrects the reference's <i> glyph
+    rather than reproducing it. The glyph was unfocusable, absent from the tab
+    order, operable by pointer alone - Enter and Space do nothing to a click
+    handler on an <i> - exposed neither the region it acted on nor any state,
+    and was a ~28px target. A <button type="button"> is focusable, is operated
+    by Enter and Space with no key handling of this file's own, announces
+    itself as a control, and is what the script requires of a hook, since it
+    suppresses no authored default action. The chevron survives inside it as a
+    decorative glyph, hidden from assistive technology, and the accessible
+    name is the button's own label. The target size comes from the vendored
+    .btn.btn-default.btn-lg box - 10px/16px padding and an 18px line-box
+    around the 28px .fa-2x glyph - and MEASURED IN A BROWSER over the emitted
+    tree it renders 65x59 CSS px, which clears the 44x44 minimum. Vendored
+    Bootstrap does that work: no dimension, no style attribute and no
+    stylesheet rule is added here.
+
+    NEITHER CARRIES aria-expanded. These are action buttons, not disclosure
+    controls: they own no single region whose state they could report, they
+    address every region in scope, and the script matches [data-report-toggle]
+    by exact attribute name, so it never synchronises a control carrying
+    data-report-toggle-all. A static value would therefore be a permanent lie.
+    aria-controls names the region they act on - div#report, which each detail
+    page emits exactly once, on its element-tree container - and the
+    disclosure controls inside that region keep their own synchronized
+    aria-expanded.
+
+    IT TAKES NO ARGUMENT AND CONSUMES NO COLLAPSE ID. Both pages emit the same
+    region id, both emit it once, and nothing here is numbered. -#}
+{%- macro collapse_all_control() -%}
+<div class="container-fluid">
+  <div class="row">
+    <div class="col-md-1 col-md-offset-10">
+      <button type="button" class="btn btn-default btn-lg collapsable-control"
+        data-report-toggle-all="expand" aria-controls="report"
+        aria-label="Expand all scenarios and steps"><i class="fa fa-chevron-circle-down fa-2x" aria-hidden="true"></i></button>
+      <button type="button" class="btn btn-default btn-lg collapsable-control"
+        data-report-toggle-all="collapse" aria-controls="report"
+        aria-label="Collapse all scenarios and steps"><i class="fa fa-chevron-circle-up fa-2x" aria-hidden="true"></i></button>
+    </div>
+  </div>
+</div>
 {%- endmacro -%}

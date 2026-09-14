@@ -11,7 +11,18 @@
 # supported build inputs after the port.
 
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+# The build backend is exact-pinned like every application and test pin, and
+# for the same reason: a floating requirement lets a later clean build silently
+# select a different backend version, and the backend is what turns this
+# manifest - including the dynamic dependency table below - into metadata, so a
+# different version can change the distribution without a change to any file.
+# 84.0.0 is the version verified on the pinned 3.14.6 interpreter. `wheel` is
+# deliberately not listed: setuptools.build_meta builds the wheel itself and no
+# longer needs that distribution, and an unused build requirement is one more
+# thing to float. This remains a pin and not a lockfile: the backend's own
+# transitive closure is left unpinned and unhashed, exactly as for the runtime
+# and test pins.
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -25,31 +36,42 @@ readme = "README.md"
 # development must not drift apart (see .python-version).
 requires-python = "==3.14.*"
 
-# Direct runtime dependencies, exact-pinned. These are the same seven
-# distributions at the same seven versions as requirements.txt, which is the
-# list every installer in the port consumes (both runner scripts run
-# `pip install -r requirements.txt -r requirements-test.txt`); the two must be
-# kept identical. The resolved transitive closure is intentionally left
-# unpinned, matching the source POM, which pins direct artifacts only.
-dependencies = [
-    "Flask==3.1.3",
-    "Jinja2==3.1.6",
-    "click==8.5.0",
-    "behave==1.3.3",
-    "cucumber-tag-expressions==11.0.1",
-    "selenium==4.48.0",
-    "webdriver-manager==4.1.2",
-]
+# Direct runtime dependencies are not written out here. requirements.txt is the
+# one authoritative list - it is what every installer in the port already
+# consumes (both runner scripts run
+# `pip install -r requirements.txt -r requirements-test.txt`) - and this
+# manifest derives its metadata from that file through the
+# [tool.setuptools.dynamic] table below, so the two consumed declarations
+# cannot state different versions. Restating the pins as a literal array here
+# is what made drift possible, since nothing mechanically compared the copies.
+# The regime the pins themselves follow is unchanged: direct dependencies only,
+# exact `==`, and the resolved transitive closure intentionally left unpinned,
+# matching the source POM, which pins direct artifacts only. No lockfile and no
+# hashes.
+dynamic = ["dependencies"]
 
 # No extras table is declared. The test-only pins (pytest, pytest-cov) live in
-# requirements-test.txt and are not restated here, so each dependency set has
-# exactly one hand-maintained source and the two cannot drift apart.
+# requirements-test.txt, which stays a separate test-only list: it is not
+# chained from the runtime list, not restated here, and not part of the dynamic
+# metadata above, so an installed distribution never carries the test tooling.
 
 # The single command surface: the Gherkin suite runner. Invoked from
 # scripts/run_tests.sh, scripts/run_tests.ps1, the Makefile and the README via
 # the virtual environment's bin/Scripts directory - never through the Flask CLI.
 [project.scripts]
 run-tests = "app.cli:run_tests"
+
+# Resolves the dynamic `dependencies` field declared above. The backend reads
+# the file at build time, discards comment and blank lines, and emits each
+# surviving requirement line as a Requires-Dist entry - which is what lets
+# requirements.txt be the single authoritative runtime list with no generator,
+# no check script and no second copy of the pins to maintain. The path is
+# relative to this manifest, and requirements.txt has to stay committed beside
+# it: a build whose source tree lacks that file emits no warning and simply
+# declares no dependencies at all, so the file is load-bearing here and not
+# merely a convenience for `pip install -r`.
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
 
 # Flat layout: `app` and its sub-packages are the only installable code.
 # features/, tests/ and scripts/ sit alongside app/ at the repository root and

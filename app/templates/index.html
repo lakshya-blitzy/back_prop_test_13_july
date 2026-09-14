@@ -58,6 +58,30 @@
   answers 404 for anything not on disk and a link that is certain to fail is
   worse than no link.
 
+  NO REPORT DESTINATION IS OFFERED FROM THIS PAGE, and that is a decision
+  rather than an omission. The four report routes share one data-availability
+  rule - results that are absent, UNREADABLE or UNPARSEABLE all answer 404
+  alike - so a link to any of them is actionable only when the results are
+  known to be usable. This page cannot know that. It is handed presence and
+  modification times, nothing else, and presence is not usability: a complete
+  artifact set whose results file will not parse answers 404 on every report
+  route while every card above still reports the artifact as on disk. Gating a
+  link on presence would therefore put an actionable certain-404 back on the one
+  page a reader reaches before anything has run, which is the defect the shell
+  was corrected for; and a template cannot settle the question itself, because
+  it cannot parse the results file and may not name one artifact - those names
+  belong to app/utils/paths.py and no template restates one.
+
+  So the shell offers no report destination here (base.html, ACTIVE
+  NAVIGATION), and neither does this body. What would change that is one
+  context key: a boolean from the view function, true only when the results
+  file was read and parsed into a usable feature list - the same operation the
+  report routes perform before answering 200. Adding it belongs to
+  app/web/routes.py, and with it in the context this page would emit the two
+  report links under that key and nothing else would need to change. Until then
+  the rendered report the reader can open from here is the HTML artifact itself,
+  linked in its card above like every other artifact on disk.
+
   CLASSES - app/static/css/main.css, used as written there: tqa-artifacts is a
   responsive grid list, tqa-artifact one card in it, tqa-artifact-missing the
   warning variant, tqa-empty the guidance box, with tqa-link and tqa-timestamp

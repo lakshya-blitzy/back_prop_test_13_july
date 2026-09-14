@@ -23,6 +23,17 @@ name ``"web"`` for the same reason, so a renamed view function would break six
 templates at render time.  The view functions are therefore named after their
 endpoints and no explicit ``endpoint=`` argument is passed anywhere.
 
+Binding, and why it runs in one direction
+-----------------------------------------
+The six views are plain functions here, bound to the blueprint by
+:func:`register_routes`, which the package's ``__init__`` calls once with the
+blueprint it owns.  Nothing in this module imports ``app.web``: a decorator
+naming the blueprint would have meant importing the package that imports this
+module, a reciprocal pair that resolves only because of the order two
+statements happen to be written in.  With the binding inverted the import edge
+runs one way - package to module - so either module may be imported first, and
+importing this one on its own binds nothing and has no side effect at all.
+
 Provenance
 ----------
 There is no Java counterpart.  The implementation this project ports exposes no
@@ -74,8 +85,8 @@ Two consequences are easy to get backwards, so both are stated:
   scenario still writes all four artifacts, so ``[]`` renders at 200 with every
   tally at zero.  Only a missing or corrupt artifact is a 404.
 * ``GET /`` **has no data-availability precondition at all** and answers 200
-  always, including on a checkout where ``target/`` has never existed.  That
-  directory is generated output; the landing page has to be useful before
+  always, including on a checkout where the artifact root has never existed.
+  That directory is generated output; the landing page has to be useful before
   anything has ever run.
 
 Every failure is signalled with a bare ``abort(404)`` and this module returns no
@@ -121,9 +132,17 @@ import json
 import logging
 from datetime import UTC, datetime
 from pathlib import Path
+from stat import S_ISDIR, S_ISREG
 from typing import Any, Final, NamedTuple
 
-from flask import Response, abort, jsonify, render_template, send_file
+from flask import (
+    Blueprint,
+    Response,
+    abort,
+    jsonify,
+    render_template,
+    send_file,
+)
 
 from app.utils import (
     ARTIFACT_SPECS,
@@ -139,14 +158,16 @@ from app.utils import (
     target_root,
     workers_dir,
 )
-from app.web import web_bp
 
-#: The six view functions, in the order a linter's natural sort puts them.  The
-#: routes themselves are the module's real surface; these names are exported so
-#: that the surface is greppable and a test can address a view directly.
+#: The six view functions and the one function that binds them, in the order a
+#: linter's natural sort puts them.  The routes themselves are the module's real
+#: surface; these names are exported so that the surface is greppable and a test
+#: can address a view directly.  :func:`register_routes` is exported because it
+#: is how the package wires this module, and the only supported way to do so.
 __all__ = [
     "artifact",
     "index",
+    "register_routes",
     "report_feature",
     "report_scenario",
     "reports_overview",
@@ -331,6 +352,13 @@ def _modification_times(path: Path) -> tuple[str | None, str | None]:
     answer the same "unavailable", which ``index.html`` and the report views
     each render in words.
 
+    The cause never reaches the page and is always logged: the record names the
+    artifact by the final component of the runtime path handed in - no path is
+    spelled here, per specification section 0.4.2 - and carries the exception
+    itself through ``exc_info``, so an operator reading the log can tell an
+    artifact that disappeared under the page from one whose ``stat`` was
+    refused or whose stored time is corrupt.
+
     Args:
         path: The artifact to stat.  Nothing is created and nothing is written.
 
@@ -340,10 +368,28 @@ def _modification_times(path: Path) -> tuple[str | None, str | None]:
     """
     try:
         moment = datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
-    except (OSError, ValueError, OverflowError):
+    except (OSError, ValueError, OverflowError) as exc:
         # ValueError and OverflowError cover a stored timestamp outside the
         # range datetime can represent, which a corrupt filesystem can produce.
-        logger.debug("Modification time unavailable for an artifact")
+        #
+        # The level is chosen by cause, not by site.  An artifact that is simply
+        # not there is the viewer's ordinary state before a run has produced
+        # anything, and every landing-page render would put it on the error
+        # stream, so that case is DEBUG.  A refused stat, a broken symlink chain
+        # or a stored time outside datetime's range is a genuine anomaly an
+        # operator has to see, so those are WARNING.
+        if isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+            logger.debug(
+                "Modification time unavailable for artifact %r: it is absent",
+                path.name,
+                exc_info=exc,
+            )
+        else:
+            logger.warning(
+                "Modification time unavailable for artifact %r",
+                path.name,
+                exc_info=exc,
+            )
         return None, None
     return _iso_millis_z(moment), _display_utc(moment)
 
@@ -383,16 +429,61 @@ def _artifact_exists(path: Path, *, is_dir: bool) -> bool:
             presence.
 
     Returns:
-        ``True`` only for a present artifact of the expected kind.  An
-        ``OSError`` - a denied traversal, a name too long for the platform, a
-        broken symlink chain - is an absence, because the landing page answers
-        200 unconditionally and has nothing to gain from telling those apart.
+        ``True`` only for a present artifact of the expected kind.  Every
+        failure - a refused traversal, a name too long for the platform, a
+        broken symlink chain, a symlink cycle, a name the platform rejects
+        outright - is an absence, because the landing page answers 200
+        unconditionally and no caller of this function may answer a different
+        status for one cause than for another.  The caller therefore learns
+        nothing beyond "absent" whatever happened, while the log learns the
+        artifact's name and the exception, so the absence is explainable after
+        the fact.
 
     """
+    # ``stat`` and a mode test rather than ``Path.is_file``/``Path.is_dir``,
+    # which are what this function used to call.  Those two delegate to
+    # ``os.path.isfile``/``os.path.isdir``, and those swallow *every*
+    # ``OSError`` and ``ValueError`` internally and answer ``False`` - not
+    # merely the not-found family, as measured on CPython 3.14 with a refused
+    # parent directory, a name too long for the platform, a symlink cycle and
+    # an embedded null byte.  A predicate that cannot fail cannot say why it
+    # failed, which left a refused stat indistinguishable in the log from an
+    # artifact that was never written.  ``stat`` raises, so the cause exists to
+    # be recorded; the mode test below reproduces each predicate exactly,
+    # symlinks followed in both cases, so the answer this function returns is
+    # unchanged for every input.
     try:
-        return path.is_dir() if is_dir else path.is_file()
-    except OSError:
+        mode = path.stat().st_mode
+    except (OSError, ValueError) as exc:
+        # The same split as _modification_times, for the same reason.  An
+        # artifact that is simply not there is the viewer's ordinary state
+        # before a run has produced anything and every landing-page render
+        # would put it on the error stream, so that is DEBUG.  Anything else -
+        # a refused stat, a symlink cycle, a name the platform will not accept
+        # - is a genuine anomaly an operator has to see, so it is WARNING, and
+        # no caller can drive that branch from a request: the path authority
+        # rejects an unresolvable or non-file name before this function is
+        # reached, which was measured for an over-long name, an embedded null
+        # byte and a symlink cycle.  ValueError is caught alongside OSError
+        # because an embedded null byte raises it rather than an OSError.
+        if isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+            logger.debug(
+                "Artifact %r is absent; reporting it absent",
+                path.name,
+                exc_info=exc,
+            )
+        else:
+            logger.warning(
+                "Presence of artifact %r could not be determined; reporting "
+                "it absent",
+                path.name,
+                exc_info=exc,
+            )
         return False
+    # %r on the name, in both records above, because a request-supplied path
+    # component can carry a control character, and the exception travels as
+    # itself so the errno and the traceback survive into the record.
+    return S_ISDIR(mode) if is_dir else S_ISREG(mode)
 
 
 def _describe_artifacts() -> tuple[ArtifactView, ...]:
@@ -439,6 +530,16 @@ def _load_features() -> list[Any]:
     response - no exception text, no path, no hint - which is what keeps the
     four bodies ``app/errors.py`` renders byte-identical across the causes.
 
+    What the log carries is the artifact's own name, taken from the runtime
+    path, and the exception itself through ``exc_info``.  The level separates
+    the one ordinary cause from the anomalies: an artifact that has not been
+    written yet is DEBUG, because a checkout where nothing has run is the
+    viewer's normal state and every request for a report page would otherwise
+    write to the error stream, while a refused read, an undecodable byte
+    sequence, a document that does not parse and one that parses into something
+    other than a list are WARNING - each means a run wrote something unusable,
+    and an operator can only explain the 404 if the record says which.
+
     The file is re-read on every request and never cached.  A cache would serve
     a stale run after a fresh one had overwritten the artifact, and it would be
     hidden state a route test could not control.
@@ -464,14 +565,46 @@ def _load_features() -> list[Any]:
     # are named individually so the intent is legible; RecursionError is what a
     # pathologically nested document raises, and a document too deep to parse is
     # unparseable rather than a server fault.
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, RecursionError):
-        logger.debug("Results artifact absent, unreadable or unparseable")
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+    ) as exc:
+        if isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+            # The pre-run state: nothing has written the artifact, or the
+            # directory that holds it does not exist yet.  DEBUG, so a viewer
+            # running against a fresh checkout does not fill the error stream.
+            logger.debug(
+                "Results artifact %r has not been produced yet; answering 404",
+                path.name,
+                exc_info=exc,
+            )
+        else:
+            # A refused read, a directory standing where the file belongs, an
+            # undecodable byte sequence, a document that does not parse and one
+            # nested too deep to parse.  WARNING: a run produced something
+            # unusable, and this record is the only place that says which.
+            logger.warning(
+                "Results artifact %r is unreadable or unparseable; "
+                "answering 404",
+                path.name,
+                exc_info=exc,
+            )
         abort(404)
 
     if not isinstance(document, list):
         # Specification section 0.6 pins the top level as a list of feature
-        # objects.  Anything else parsed cleanly but describes no run.
-        logger.debug("Results artifact parsed but is not a list of features")
+        # objects.  Anything else parsed cleanly but describes no run, which is
+        # a malformed artifact rather than a pre-run absence - hence WARNING,
+        # naming the type that arrived instead so the log distinguishes a
+        # mapping from a bare scalar without quoting the document itself.
+        logger.warning(
+            "Results artifact %r parsed as %s rather than a list of features; "
+            "answering 404",
+            path.name,
+            type(document).__name__,
+        )
         abort(404)
 
     return document
@@ -648,17 +781,37 @@ def _parse_start(value: str) -> datetime | None:
     every instant this function returns is aware and any two of them compare
     without raising.
 
+    A value that does not parse is dropped from the summary, and the drop is
+    logged rather than silent: the offending string is the only thing that
+    explains a run whose reported start time is ``null`` while the artifact
+    visibly carries timestamps.
+
     Args:
         value: A non-empty timestamp string.
 
     Returns:
-        The instant, or ``None`` if the string is not a timestamp at all.
+        The instant, or ``None`` if the string is not a timestamp at all.  The
+        caller sees only that absence; the log sees the value and the parse
+        error, so nothing about the artifact's contents reaches a response.
 
     """
     text = f"{value[:-1]}+00:00" if value.endswith("Z") else value
     try:
         moment = datetime.fromisoformat(text)
-    except ValueError:
+    except ValueError as exc:
+        # WARNING rather than DEBUG: the writer emits one fixed shape, so a
+        # value it cannot round-trip means the artifact was produced by
+        # something else or edited by hand, and the run's start time silently
+        # disappearing from the summary is exactly the symptom this record
+        # explains.  The value is interpolated through %r so that a newline or
+        # an escape sequence inside it cannot forge a second log line, and the
+        # exception travels as itself rather than as its text.
+        logger.warning(
+            "Scenario start timestamp %r is not a parseable instant; "
+            "it is ignored",
+            value,
+            exc_info=exc,
+        )
         return None
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=UTC)
 
@@ -937,19 +1090,20 @@ def _validated_artifact(name: str) -> Path:
 # The six views.  Every one is synchronous and read-only; none writes, none
 # starts a run, and none builds an error body of its own.  Methods are left at
 # Flask's default, so each answers GET with HEAD and OPTIONS derived from it.
+# They carry no decorator: register_routes() below binds them to the blueprint
+# the package owns, which is what keeps the import edge one-way.
 # --------------------------------------------------------------------------- #
 
 
-@web_bp.route("/")
 def index() -> str:
     """Presence and modification time of each of the four report artifacts.
 
     The one route the data-availability rule does not govern: it answers **200
-    always**, including on a checkout where ``target/`` has never existed, since
-    that directory is generated output and the landing page has to be useful
-    before anything has ever run.  An absent artifact is reported as absent
-    rather than as a failure, and the per-worker intermediates are neither
-    listed nor stat'd - they are never reachable over HTTP.
+    always**, including on a checkout where the artifact root has never
+    existed, since that directory is generated output and the landing page has
+    to be useful before anything has ever run.  An absent artifact is reported
+    as absent rather than as a failure, and the per-worker intermediates are
+    neither listed nor stat'd - they are never reachable over HTTP.
 
     No result counts are computed here; those belong to ``/reports`` and
     ``/reports/summary``.
@@ -961,7 +1115,6 @@ def index() -> str:
     return render_template(_INDEX_TEMPLATE, artifacts=_describe_artifacts())
 
 
-@web_bp.route("/reports")
 def reports_overview() -> str:
     """The run overview, derived by the template from the raw results.
 
@@ -987,7 +1140,6 @@ def reports_overview() -> str:
     )
 
 
-@web_bp.route("/reports/features/<int:findex>")
 def report_feature(findex: int) -> str:
     """One feature, addressed by its zero-based position in the results file.
 
@@ -1017,7 +1169,6 @@ def report_feature(findex: int) -> str:
     )
 
 
-@web_bp.route("/reports/features/<int:findex>/scenarios/<int:sindex>")
 def report_scenario(findex: int, sindex: int) -> str:
     """One scenario, addressed by two positional keys.
 
@@ -1062,7 +1213,6 @@ def report_scenario(findex: int, sindex: int) -> str:
     )
 
 
-@web_bp.route("/reports/summary")
 def reports_summary() -> Response:
     """Counts of features, scenarios and steps by status, and the run's start.
 
@@ -1101,7 +1251,6 @@ def reports_summary() -> Response:
     return jsonify(_summarize(_load_features()))
 
 
-@web_bp.route("/artifacts/<path:name>", merge_slashes=False)
 def artifact(name: str) -> Response:
     """Serve one allowlisted artifact, and nothing else.
 
@@ -1130,3 +1279,78 @@ def artifact(name: str) -> Response:
 
     """
     return send_file(_validated_artifact(name))
+
+
+# --------------------------------------------------------------------------- #
+# Binding.  The one direction the wiring runs: the package that owns the
+# blueprint calls in here, and this module never reaches back for it.
+# --------------------------------------------------------------------------- #
+
+
+def register_routes(blueprint: Blueprint) -> None:
+    """Bind the six views above to ``blueprint``, and nothing else to it.
+
+    The six rows of specification section 0.3.1's route table, in the table's
+    own order, added with ``add_url_rule`` rather than with a decorator so that
+    this module needs no reference to the blueprint at import time.  That is
+    what removes the reciprocal import between this module and its package: the
+    package imports this function, calls it with the blueprint it constructed,
+    and nothing here imports the package.
+
+    Three properties are load-bearing and are obtained rather than restated:
+
+    * **Endpoint names.** ``add_url_rule`` defaults each endpoint to
+      ``view_func.__name__``, which yields ``index``, ``reports_overview``,
+      ``report_feature``, ``report_scenario``, ``reports_summary`` and
+      ``artifact`` under the blueprint's ``web.`` prefix.  No endpoint string
+      is written out here, so the names the six templates resolve with
+      ``url_for`` cannot drift from the functions they address.
+    * **Methods.** None is passed, so Flask keeps its default: each rule
+      answers ``GET``, with ``HEAD`` and ``OPTIONS`` derived from it.  No route
+      accepts a method that could write, which is the read-only guarantee
+      expressed at the router.
+    * **Slash merging.** ``merge_slashes=False`` on the artifact rule only.  A
+      doubled separator - how an absolute path arrives at that rule - is
+      answered 404 by the router instead of redirected, so that *everything
+      else is 404* holds for that route without exception.  The other five
+      rules keep Flask's default, under which the router may redirect a
+      doubled separator to the merged path instead of refusing it.
+
+    Called exactly once per interpreter, from ``app/web/__init__.py``'s module
+    body, immediately after the blueprint is constructed; module caching makes
+    that a single call.  Registering the blueprint on an *application* is a
+    separate act and stays the sole responsibility of ``create_app()``
+    (specification sections 0.3.3 and 0.4.2) - this function touches no
+    application, and calling it does not make any application serve anything.
+
+    Args:
+        blueprint: The blueprint to bind the views to, normally the package's
+            ``web_bp``.  It must not already carry these rules: this function
+            adds them unconditionally, exactly as a decorator would, and
+            calling it twice on one blueprint would register each rule twice.
+
+    Returns:
+        ``None``.  The blueprint is mutated in place, which is how Flask's
+        deferred-registration model works.
+
+    """
+    blueprint.add_url_rule("/", view_func=index)
+    blueprint.add_url_rule("/reports", view_func=reports_overview)
+    blueprint.add_url_rule(
+        "/reports/features/<int:findex>",
+        view_func=report_feature,
+    )
+    blueprint.add_url_rule(
+        "/reports/features/<int:findex>/scenarios/<int:sindex>",
+        view_func=report_scenario,
+    )
+    blueprint.add_url_rule("/reports/summary", view_func=reports_summary)
+    blueprint.add_url_rule(
+        "/artifacts/<path:name>",
+        view_func=artifact,
+        merge_slashes=False,
+    )
+    # DEBUG, and emitted once at import: an operator chasing a missing endpoint
+    # can see which blueprint the surface was bound to, while a normally
+    # configured process never prints it.
+    logger.debug("Read-only viewer routes bound to blueprint %r", blueprint.name)

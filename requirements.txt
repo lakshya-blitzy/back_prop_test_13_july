@@ -3,6 +3,18 @@
 # the resolved transitive closure is intentionally left unpinned, matching the
 # source pom.xml, which pins direct artifacts only).
 #
+# This file is the one authoritative runtime dependency list. pyproject.toml
+# does not restate it: its [project] dependencies field is declared dynamic
+# and setuptools reads the requirement lines below at build time - comment and
+# blank lines stripped - so the installed metadata and what
+# `pip install -r requirements.txt` installs cannot drift apart. Editing a pin
+# here is therefore the whole of the change; nothing has to be mirrored.
+#
+# Test-only pins live in requirements-test.txt, a separate list that this file
+# neither chains nor repeats. There is no lockfile, no hash regime, no
+# constraints file and no environment marker: the exact pins below are the
+# entire declaration.
+#
 # Python: 3.14.6 (see .python-version / pyproject.toml requires-python)
 
 # Web framework hosting the application factory, the read-only artifact viewer
@@ -11,6 +23,14 @@ Flask==3.1.3
 
 # Templating for the two HTML report artifacts and the HTTP views.
 Jinja2==3.1.6
+
+# Escaping primitive the HTML report writer imports by name
+# (`from markupsafe import Markup`). Declared here rather than relied on
+# through Flask/Jinja2: under the direct-pins-only policy above, a
+# distribution this code imports is a direct dependency whatever else happens
+# to pull it in. 3.0.3 is the version Jinja2 3.1.6 resolves to on the verified
+# interpreter.
+MarkupSafe==3.0.3
 
 # Command surface for the `run-tests` entry point.
 click==8.5.0

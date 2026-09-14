@@ -40,9 +40,9 @@ Java line     Java keyword    Phrase
 ============  ==============  =============================================
 
 Each phrase is carried over byte for byte, and each Python function keeps its
-Java method's name so that the ``match.location`` field of
-``target/cucumber.json`` names a recognisable counterpart.  The two Java
-methods written in camelCase (``userClickOnDesiredDateTime`` at ``:161`` and
+Java method's name so that the ``match.location`` field of the merged Cucumber
+JSON report names a recognisable counterpart.  The two Java methods written in
+camelCase (``userClickOnDesiredDateTime`` at ``:161`` and
 ``userEntersInTheBoxAndClicksTheCreateButton`` at ``:167``) become the
 snake_case forms of the same words; the other eleven were already snake_case
 and are unchanged.
@@ -94,7 +94,11 @@ ever creates or quits a driver"*.
 Of the wait family only :func:`~app.automation.waits.wait_visible_element` is
 imported, because all ten waits in ``Calendar.java`` are
 ``ExpectedConditions.visibilityOf`` applied to a **web element** rather than
-to a locator.
+to a locator.  That element was a ``PageFactory`` proxy, re-located on every
+touch, so the Python helper porting the predicate takes the locator - the
+upper-case constant, ``page.DAY`` - and resolves it inside the wait on each
+poll; handing it the lower-case accessor's element instead would move the
+lookup ahead of the two-second window below.
 
 Per-scenario binding
 --------------------
@@ -292,7 +296,7 @@ def user_clicks_on_the_calendar_dashboard(context) -> None:
     """
     page = _page(context)
     page.calendar_button.click()
-    wait_visible_element(page.calendar_button, 2)
+    wait_visible_element(page.CALENDAR_BUTTON, 2)
 
 
 @step("User click on day button")
@@ -309,7 +313,7 @@ def user_clicks_on_day_button(context) -> None:
     """
     page = _page(context)
     page.day.click()
-    wait_visible_element(page.day, 2)
+    wait_visible_element(page.DAY, 2)
 
 
 @step("User click on week button")
@@ -324,7 +328,7 @@ def user_clicks_on_week_button(context) -> None:
     """
     page = _page(context)
     page.week.click()
-    wait_visible_element(page.week, 2)
+    wait_visible_element(page.WEEK, 2)
 
 
 @step("User click on month button")
@@ -339,7 +343,7 @@ def user_clicks_on_month_button(context) -> None:
     """
     page = _page(context)
     page.month.click()
-    wait_visible_element(page.month, 2)
+    wait_visible_element(page.MONTH, 2)
 
 
 @step("User should see the last stage of calendar view")
@@ -376,7 +380,7 @@ def user_should_see_the_last_stage_of_calendar_view(context) -> None:
     title rather than that element.
     """
     page = _page(context)
-    wait_visible_element(page.calendar_module, 2)
+    wait_visible_element(page.CALENDAR_MODULE, 2)
     expected_dashboard = "Meetings - Odoo"
     actual_dashboard = context.driver.title
     assert expected_dashboard == actual_dashboard, "The title is not same as the expected!"
@@ -440,7 +444,7 @@ def user_clicks_day_on_the_calendar_and_display_day(context) -> None:
     """
     page = _page(context)
     page.day.click()
-    wait_visible_element(page.day, 2)
+    wait_visible_element(page.DAY, 2)
     day_calendar = page.day_calendar.text
     month_calendar = int(page.month_and_year_calendar.get_attribute("data-month")) + 1
     year_calendar = int(page.month_and_year_calendar.get_attribute("data-year"))
@@ -493,7 +497,7 @@ def user_click_month_on_the_calendar_and_display_month(context) -> None:
     """
     page = _page(context)
     page.month.click()
-    wait_visible_element(page.month, 2)
+    wait_visible_element(page.MONTH, 2)
     month_calendar = int(page.month_and_year_calendar.get_attribute("data-month")) + 1
     year_calendar = int(page.month_and_year_calendar.get_attribute("data-year"))
 
@@ -622,7 +626,7 @@ def user_can_select_the_note(context) -> None:
     """
     page = _page(context)
     page.select_note.click()
-    wait_visible_element(page.select_note, 2)
+    wait_visible_element(page.SELECT_NOTE, 2)
     assert page.created_modele.is_displayed()
 
 
@@ -663,10 +667,10 @@ def user_can_edit_the_information(context) -> None:
     """
     page = _page(context)
     page.edit_button.click()
-    wait_visible_element(page.edit_button, 2)
+    wait_visible_element(page.EDIT_BUTTON, 2)
     page.edit_text.clear()
     page.edit_text.send_keys("Hello My Friends")
-    wait_visible_element(page.edit_text, 2)
+    wait_visible_element(page.EDIT_TEXT, 2)
     page.tags_checkbox.is_selected()
 
 
@@ -684,4 +688,3 @@ def user_can_save_all_edit(context) -> None:
     """
     page = _page(context)
     page.save_button.click()
-

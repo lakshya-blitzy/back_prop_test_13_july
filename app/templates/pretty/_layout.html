@@ -67,11 +67,16 @@
       head_extra   inside <head>, after the title. Where overview_features and
                    overview_tags inject their chart initialisation, which is
                    where the reference places it.
-      lead         inside the report-lead region. Each page fills it with its
-                   own <h2> and, where it has one, its <p>. The measured texts
-                   are "Features Statistics", "Tags Statistics", "Steps
-                   Statistics", "Failures Overview", "Feature Report" and "Tag
-                   Report", and each belongs to its own page, not here.
+      lead         inside the report-lead region, which this layout places
+                   inside the page's one main landmark. Each page fills it with
+                   its own <h1 class="h3"> - the document's single primary
+                   heading, rendered at the measured 24px by a vendored
+                   typography utility - and, where it has one, its
+                   <p>. The measured texts are "Features Statistics", "Tags
+                   Statistics", "Steps Statistics", "Failures Overview",
+                   "Feature Report" and "Tag Report", and each belongs to its
+                   own page, not here. EXACTLY ONE h1 PER PAGE follows from
+                   that: a page fills this block once.
       content      the page body.
 
   NO FILENAME AND NO LINK TARGET IS EVER COMPUTED IN THIS FOLDER. The four
@@ -129,27 +134,30 @@
 
   THE PRESENTATION-STATE BOUNDARY
   -------------------------------
-  Two independent state mechanisms coexist in this tree and are never mixed on
-  one element:
-    - the vendored collapse widget owns the element and steps containers,
-      driven by its own data attributes and its own "in" class. That class is
-      generator vocabulary applied to failure-bearing containers by the element
-      tree, and it is neither emitted nor stripped here.
-    - app/static/js/report.js owns filtering, step-detail expansion and the
-      screenshot overlay, through its data-report-* selection attributes.
-  This layout emits NO presentation state: none of the stylesheet's three
-  boolean hooks and none of the script's three runtime state classes. Their
-  absence is the no-scripting-safe state - detail expanded, rows visible,
-  overlay closed - so the emitted page is complete and correct with scripting
-  disabled and on paper. Selection attributes are a different thing and are
-  allowed; a page may carry data-report-root on its own report container so
-  the script scopes to it, and the script falls back to the whole document
-  when no such ancestor exists, so this layout adds no wrapper of its own.
+  app/static/js/report.js is the SINGLE owner of report interactivity in this
+  tree - filtering, every collapse and expand, and the screenshot overlay -
+  through its data-report-* selection attributes. The vendored collapse widget
+  drives exactly one thing here, the navigation bar's own toggle below, which
+  no report region competes for; pretty/_element_tree.html records why the two
+  can never share a region (the widget needs its "in" class present to show
+  one, and the script only ever writes its own state class, so a region the
+  widget had collapsed could never be reopened by expand-all).
+
+  This layout emits NO presentation state: none of the script's three runtime
+  state classes and no state attribute of any kind. Their absence is the
+  no-scripting-safe state - detail expanded, rows visible, overlay closed - so
+  the emitted page is complete and correct with scripting disabled and on
+  paper. Selection attributes are a different thing and are allowed; a page
+  may carry data-report-root on its own report container so the script scopes
+  to it, and the script falls back to the whole document when no such ancestor
+  exists, so this layout adds no wrapper of its own.
+
 
   NO INLINE SCRIPT beyond the tablesorter initialisation below and the chart
   initialisation the two overview pages inject through head_extra - both of
-  which the reference itself carries. Collapsing, sorting, charting and the
-  overlay are never reimplemented here.
+  which the reference itself carries - and NO EVENT-HANDLER ATTRIBUTE
+  anywhere in this folder. Collapsing, sorting, charting and the overlay are
+  never reimplemented here.
 
   THE FOOTER IS A DECISION, TAKEN DELIBERATELY. The reference footer credits
   the Java generators with four external repository links. This port does not
@@ -188,21 +196,53 @@
   Invisible accessibility is applied because it costs nothing visually: real
   landmark elements, a real list for the navigation, and aria-current on the
   link of the current page so the state that the active styling shows visually
-  is also announced. Two visible defaults are deliberately NOT corrected,
-  because the measured reference chrome is authoritative over a generic
-  recommendation and silently changing the rendered output would hide what the
-  source actually does:
-    BLITZY [A11Y]: <html> carries no lang attribute, as measured on all eight
-      reference pages. Contract 1 does declare one; this contract does not.
-      Implemented as measured and flagged for review rather than corrected.
-    BLITZY [A11Y]: no viewport meta element, as measured. Adding one changes
-      how every page renders on a small screen, so it is a visible change and
-      the reference wins. The stylesheet's own responsive and print rules
-      still apply. Flagged for review rather than corrected.
+  is also announced. Four corrections go further than the measured chrome,
+  each because the measurement recorded a defect rather than a design:
+
+    lang="en" on the document root. The reference omits it on all eight pages
+      and contract 1 declares one; a document with no language gives assistive
+      technology no pronunciation rule to follow, and the attribute changes
+      nothing that renders. Applied, not flagged.
+    the viewport meta element, paired with the navbar toggle below. Without
+      the meta a small screen renders the page at a desktop width, and without
+      the toggle the four navigation links are display:none below Bootstrap's
+      768px breakpoint with no control that can open them - so the measured
+      chrome loses its whole navigation on a phone. Both are emitted, using
+      only classes the vendored bootstrap.min.css already declares
+      (.navbar-toggle, .icon-bar, .sr-only) and the vendored bootstrap.min.js
+      this head already loads, so no stylesheet and no script is added.
+    ONE main landmark per page, wrapping the lead and the page body, and a
+      real <footer> for the footer. The footer is not navigation and was
+      exposed as a second nav landmark, which leaves a reader two
+      indistinguishable "navigation" regions to choose between; the element
+      changes, every visual class stays.
+    a real h1. Each page's lead heading is the document's primary heading and
+      renders through <h1 class="h3">, so the heading hierarchy starts where a
+      reader's "jump to the top heading" expects it while the rendered size
+      stays the measured one. THE UTILITY CLASS IS h3 AND NOT h2, which reads
+      wrong until the cascade is followed: the measured heading was an <h2>,
+      but cucumber.css:8-10 pins `h2 { font-size: 24px }`, a bare type selector
+      that beats bootstrap.min.css's own `.h2,h2{font-size:30px}` on load
+      order. That type selector cannot match an <h1>, so `<h1 class="h2">`
+      keeps Bootstrap's 30px - measured in Chrome at 30px against the
+      reference's 24px, a quarter larger. `.h3,h3{font-size:24px}` is the
+      vendored utility whose size equals the measurement, and cucumber.css
+      declares no h3 rule to disturb it. Verified in Chrome: 24px, weight 500,
+      identical box width and x-position to the reference heading. That h1
+      belongs to each page template's own lead block, not here.
+
+  One measured absence is still deliberate:
+
+  ONE FURTHER VISIBLE CORRECTION IS MADE, and it is a measured contrast
+  failure rather than a preference. Both chrome bars carry tqa-chrome, because
+  the vendored stylesheet renders their ordinary text at #777 on #f8f8f8 -
+  4.217:1, where WCAG 2.1 AA requires 4.5:1 of normal text. The class and its
+  measurements are recorded at the two elements that carry it.
     BLITZY [A11Y]: no skip-navigation link. The chrome is fixed by measurement
       and the vocabulary available to these pages declares no class for one,
-      so adding a visible control here would depart from the contract.
-      Flagged for review rather than invented.
+      so adding a visible control here would depart from the contract. The
+      main landmark above is what a reader jumps to instead. Flagged for
+      review rather than invented.
 -#}
 {%- from 'partials/lightbox.html' import lightbox_overlay -%}
 {#- Context normalisation. Every guard tests definedness FIRST so a strict
@@ -229,10 +269,25 @@
       ('failures', 'overview-failures.html', 'Failures')
     ] -%}
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 
 <meta http-equiv="Content-Type" content="text/html; charset=UTF-8" />
+{#- The viewport, beside the charset it belongs with. Without it a phone lays
+    the page out at a desktop width and then scales it down, which is what
+    makes the navigation below unreachable rather than merely narrow. The
+    plan's own presentation rule - layout is RESPONSIVE WITH PRINT RULES,
+    binding on both HTML contracts alike - cannot be satisfied without it:
+    app/static/css/main.css, copied into this tree beside the vendored files,
+    is mobile-first and widens only inside "only screen and (min-width: 600px)"
+    and "(min-width: 992px)", so with no viewport meta both breakpoints match
+    on a phone and the desktop layout is what gets shrunk. A meta element
+    declares no address, so every reference in every emitted page still
+    resolves inside the tree. Emitted ONCE PER PAGE, from here and nowhere
+    else, so no page can carry two; the self-contained single-page contract
+    carries the same line for the same reason. The initial scale is 1 and
+    nothing is locked, so a reader may still zoom. -#}
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 
 <script src="js/jquery.min.js"></script>
 <script src="js/jquery.tablesorter.min.js"></script>
@@ -278,10 +333,39 @@ $(document).ready(function() {
     current one takes the generator's own active class; the link additionally
     carries aria-current, which changes nothing visually and lets a screen
     reader announce the state the styling shows. A page that passes no current
-    item - both detail pages - leaves all four plain, as measured. #}
-<nav class="navbar navbar-default navbar-fixed-top" id="navigation">
+    item - both detail pages - leaves all four plain, as measured.
+
+    THE TOGGLE IS THE CANONICAL BOOTSTRAP 3 FORM and it is the ONE place in
+    this whole folder where data-toggle="collapse" is allowed: the vendored
+    widget owns the navigation region and nothing else on these pages
+    competes for it, whereas every report region belongs to
+    app/static/js/report.js. Its three .icon-bar spans are the vendored
+    stylesheet's own hamburger glyph and carry no text, so the control's
+    accessible name comes from the .sr-only span; aria-controls names the
+    region and aria-expanded reports the state the widget then maintains
+    itself. Above the 768px breakpoint bootstrap.min.css hides the button and
+    shows the links, so a desktop page renders exactly as measured.
+
+    tqa-chrome BESIDE the vendored classes, never instead of them: it is the
+    port's own contrast correction and it is on both navigation bars. The
+    vendored stylesheet renders ordinary text in each at #777 on #f8f8f8,
+    measured at 4.217:1 and below the 4.5:1 WCAG 2.1 AA threshold for normal
+    text. main.css's rules for this class restate the foreground at #43494f,
+    which measures 8.1:1 on that same ground, and links at #0b5fa5 at 5.6:1,
+    with hover, focus and focus-visible declared so no interaction reverts to
+    the deficient colour. The vendored file is not edited and no colour is
+    written into the markup. #}
+<nav class="navbar navbar-default navbar-fixed-top tqa-chrome" id="navigation">
   <div class="container-fluid">
-    <div class="collapse navbar-collapse">
+    <div class="navbar-header">
+      <button type="button" class="navbar-toggle collapsed" data-toggle="collapse" data-target="#navigation-collapse" aria-controls="navigation-collapse" aria-expanded="false">
+        <span class="sr-only">Toggle navigation</span>
+        <span class="icon-bar"></span>
+        <span class="icon-bar"></span>
+        <span class="icon-bar"></span>
+      </button>
+    </div>
+    <div class="collapse navbar-collapse" id="navigation-collapse">
       <p class="navbar-text navbar-left">Cucumber Report</p>
       <ul class="nav navbar-nav navbar-right">
 {%- for nav_key, nav_href, nav_label in nav_items %}
@@ -300,10 +384,18 @@ $(document).ready(function() {
   <div class="col-md-5 col-md-offset-1">
 
 <table class="table table-bordered" id="build-info">
+  {#- The table's accessible name. A caption is self-contained - it names the
+      table wherever the table is rendered, without coupling this shared
+      chrome to the heading id of each of the six page templates - and
+      .sr-only is the vendored stylesheet's own visually-hidden class, so the
+      rendered page is unchanged. #}
+  <caption class="sr-only">Build information</caption>
   <thead>
     <tr>
-      <th>Project</th>
-      <th>Date</th>
+      {#- scope on both header cells: two columns of one row each, so a
+          reader hearing a cell hears which column it belongs to. #}
+      <th scope="col">Project</th>
+      <th scope="col">Date</th>
     </tr>
   </thead>
   <tbody>
@@ -319,8 +411,16 @@ $(document).ready(function() {
   </div>
 </div>
 
-{# The report lead. Each page supplies its own heading, and its paragraph
-    where it has one; this layout supplies only the region. #}
+{# The one main landmark of the page, holding the lead and the page body -
+    everything that is this page's own content, and nothing that is chrome.
+    It carries no Bootstrap class and no layout of its own: <main> is
+    display:block, the two regions inside it keep their own container-fluid
+    grid, and the rendered page is therefore identical to the measured one.
+    Exactly one per page, which is what the landmark means. #}
+<main id="report-main">
+{# The report lead. Each page supplies its own heading - an <h1 class="h3">,
+    which is this document's primary heading at the measured 24px - and its
+    paragraph where it has one; this layout supplies only the region. #}
 <div id="report-lead" class="container-fluid">
   <div class="col-md-10 col-md-offset-1">
 {% block lead %}{% endblock %}
@@ -331,15 +431,29 @@ $(document).ready(function() {
     element and the data-report-root selection attribute - belongs to the page
     that fills this block, so no wrapper is imposed here. #}
 {% block content %}{% endblock %}
+</main>
 
-{# The footer. Factual, and it links nowhere: see the footer note above. #}
-<nav class="navbar navbar-default" id="footer">
+{# The footer. Factual, and it links nowhere: see the footer note above.
+
+{# The footer. Factual, and it links nowhere: see the footer note above.
+
+    IT IS A <footer>, NOT A <nav>. The measured element was a nav, which
+    exposed a region holding one sentence and no links as a second navigation
+    landmark indistinguishable from the real one above. Every visual class the
+    measurement recorded is kept - navbar and navbar-default paint it, and the
+    inner markup is untouched - so only the element name and the landmark it
+    reports change.
+
+    It carries tqa-chrome for the same contrast reason as the navigation bar -
+    its small text is the other element the vendored #777 on #f8f8f8 applied
+    to. #}
+<footer class="navbar navbar-default tqa-chrome" id="footer">
   <div class="container-fluid">
     <p class="navbar-text navbar-right">
       <small>Report generated by testinium-qa.&nbsp;&nbsp;</small>
     </p>
   </div>
-</nav>
+</footer>
 
 {# The one screenshot overlay for the whole document, emitted unconditionally
     so that all six pages have exactly one. It is an empty container that

@@ -29,13 +29,14 @@ The two names each field yields, and both are used by the Employee steps:
 
 ===============================  ==========================================
 ``EmployeePage.EMPL_STAGE``      the ``(By.PARTIAL_LINK_TEXT, "Employees")``
-                                 tuple, for ``wait_visible(locator, 3)`` and
-                                 for the parity assertions in
+                                 tuple, for either visibility wait -
+                                 ``wait_visible(locator, 3)`` and
+                                 ``wait_visible_element(locator, 3)`` both
+                                 take it - and for the parity assertions in
                                  ``tests/test_pages.py``
 ``page.empl_stage``              the live element, re-resolved per access,
                                  for ``.click()``, ``.send_keys()``,
-                                 ``.clear()``, ``.is_displayed()`` and
-                                 ``wait_visible_element(element, 3)``
+                                 ``.clear()`` and ``.is_displayed()``
 ===============================  ==========================================
 
 The lower-case accessors are exactly the field names ``EmployeeStage.java``

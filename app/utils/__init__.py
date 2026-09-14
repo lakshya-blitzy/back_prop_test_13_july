@@ -10,7 +10,12 @@ This package holds the two lowest-level modules of the port, and nothing else:
     assigns that ownership explicitly: every writer, the HTTP artifact route,
     the ``--clean`` step and the per-worker engine invocation take their paths
     from this module, and no other Python module in the port spells out a path
-    literal.
+    literal.  Because the build output directory is generated content that
+    outlives a run, the same module also owns *opening* those paths: its
+    no-follow helpers create, write and read an artifact through a held
+    directory descriptor, so a symbolic link left in the build output cannot
+    redirect a writer or the artifact route outside the artifact root, and no
+    caller has to validate a pathname and then re-open it.
 ``properties``
     The ``java.util.Properties``-compatible reader that replaces the Java
     ``ConfigurationReader``, reproducing its one-time load, its tolerance of a
@@ -89,6 +94,7 @@ from .paths import (
     RERUN_TXT_RELPATH,
     TARGET_DIR_NAME,
     WORKERS_DIR_NAME,
+    ArtifactPathError,
     ArtifactSpec,
     artifact_path,
     cucumber_json_path,
@@ -98,10 +104,14 @@ from .paths import (
     features_dir,
     iter_worker_result_paths,
     normalize_feature_uri,
+    open_artifact_read,
+    open_artifact_write,
+    open_resolved_artifact,
     package_root,
     pretty_reports_dir,
     pretty_reports_html_dir,
     pretty_reports_index_path,
+    read_artifact_text,
     rerun_txt_path,
     resolve_artifact,
     static_dir,
@@ -169,8 +179,14 @@ __all__ = [  # noqa: RUF022
     # Directory creation helpers.
     "ensure_dir",
     "ensure_parent",
+    # No-follow artifact I/O, and the error a refused component raises.
+    "ArtifactPathError",
+    "open_artifact_write",
+    "open_artifact_read",
+    "read_artifact_text",
     # Artifact lookup and feature-URI normalization.
     "resolve_artifact",
+    "open_resolved_artifact",
     "normalize_feature_uri",
     # Package-relative locators, independent of the working directory.
     "package_root",

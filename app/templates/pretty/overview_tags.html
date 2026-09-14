@@ -163,7 +163,20 @@
     themselves say to confirm the series against a clean baseline. Three of
     the five differ. The evidence is not only the generator's template: those
     three colour literals sit OUTSIDE every merge-conflict block in the
-    committed page, so both sides of the splice agree on them.
+    committed page, so both sides of the splice agree on them. Four of the
+    five are therefore emitted exactly as measured.
+
+    THE FIFTH IS SKIPPED, AND IT IS ORANGE HERE. Both generator palettes draw
+    it in a light blue - #8AF in this chart, #88AAFF in the doughnuts - and
+    AAP 0.3.4 requires skipped and pending to be yellow or orange, which is
+    the one status colour the plan fixes explicitly. The series is #FF8C00
+    instead, the same orange overview_features.html's skipped segment uses, so
+    one status reads the same way on every surface of the tree; it stays
+    clearly apart from the pending yellow #F5F28F and from the paler undefined
+    #F5B975 in a stacked bar, which is where the two sit beside each other. No
+    stylesheet can make this correction: the colour is a literal inside the
+    chart configuration, painted onto a canvas by the vendored Chart.js.
+    main.css carries the same correction for the class-driven surfaces.
 
     THE DATA. The series carry percentages of that tag's steps, not counts.
     TagsOverviewPage.generateTagValues fills each series with
@@ -286,19 +299,19 @@
                      no reference output shows - the reference run had a tag -
                      and it is the same treatment the sibling steps overview
                      gives its own empty notice.
-      tqa-table      WITHHELD, and not by this page: the table element belongs
-                     to _stats_table.html, which withholds it on a measurement
-                     - its cell rule wins over the twelve header status
-                     backgrounds and collapses them to one grey. Adding a
-                     class to that table from here would defeat that decision
-                     silently, so this page adds nothing to it.
-      tqa-page,      WITHHELD. Both impose their own box on markup the
-      tqa-table-wrap Bootstrap grid already lays out, which is also what
-                     carries this page's responsive and print behaviour.
+      tqa-table      NOT THIS PAGE'S TO ADD, and it does not need to be: the
+                     table element belongs to _stats_table.html, which now
+                     carries the class itself because main.css scopes the
+                     required status palette to it. This page adds nothing to
+                     that table.
+      tqa-page       WITHHELD. It imposes its own box - width, max-width,
+                     margin and padding - on markup the Bootstrap grid already
+                     lays out.
 
-  NO PRESENTATION STATE. None of main.css's three boolean hooks -
-  data-tqa-collapsed, data-tqa-filtered, data-tqa-open - and none of
-  report.js's three run-time state classes. The stylesheet takes their absence
+  NO PRESENTATION STATE. None of the three runtime state classes -
+  report-is-collapsed, report-is-filtered-out, report-lightbox-is-open -
+  which report.js alone writes and main.css alone reads, and which are the
+  whole of this project's state vocabulary. The stylesheet takes their absence
   to mean expanded, visible and closed, so the emitted page is complete with
   scripting disabled and correct on paper. The status hook the table's rows
   carry is a status hook, not a state hook, and it is emitted by the macro
@@ -504,7 +517,8 @@ $(document).ready(function() {
             },
             {
                 label: "Skipped",
-                backgroundColor: "#8AF",
+                {# Orange, not the reference's #8AF: see the palette note. #}
+                backgroundColor: "#FF8C00",
                 data: {{ chart_series[2]|tojson }}
             },
             {
@@ -552,8 +566,20 @@ $(document).ready(function() {
     the features overview has "graphs show". The heading opens on the block
     tag's own line so the layout's surrounding indentation comes out exactly as
     measured; a newline there would insert a blank line the reference does not
-    have, and the paragraph's deeper indentation is the generator's too. -#}
-{% block lead %}    <h2>Tags Statistics</h2>
+    have, and the paragraph's deeper indentation is the generator's too.
+
+    THE HEADING IS AN h1 AT THE MEASURED 24px, THROUGH THE .h3 UTILITY. The
+    reference emits an h2, which leaves the page with no level-one heading for
+    a reader to jump to. The utility class reads wrong until the cascade is
+    followed: cucumber.css:8-10 pins `h2 { font-size: 24px }`, a bare type
+    selector that beats bootstrap.min.css's own `.h2,h2{font-size:30px}` on
+    load order and cannot match an h1 - so `<h1 class="h2">` would render 30px,
+    measured in Chrome against the reference's 24px. `.h3,h3{font-size:24px}`
+    is the vendored utility whose size equals the measurement, and cucumber.css
+    declares no h3 rule to disturb it. Every page in this folder does the same,
+    id included, so the lead is one shape across the emitted tree.
+    -#}
+{% block lead %}    <h1 class="h3" id="report-heading">Tags Statistics</h1>
       <p>The following graph shows passing and failing statistics for tags</p>
 {%- endblock %}
 
@@ -566,7 +592,14 @@ $(document).ready(function() {
 <div class="container-fluid" id="charts">
   <div class="row">
     <div class="col-md-10 col-md-offset-1">
-      <canvas id="tags-chart" height="50" role="img" aria-label="Passing and failing statistics for tags"></canvas>
+      {#- The fallback content inside the element is what a reader gets when
+          the canvas cannot be painted - no canvas support, or the chart
+          script blocked - and it is the one thing the measured markup left
+          out. It names the table that carries the same numbers as text, which
+          is on this page, so the alternative is complete rather than merely
+          present. The three canvases of overview_features.html carry the
+          same pairing of aria-label and fallback. #}
+      <canvas id="tags-chart" height="50" role="img" aria-label="Passing and failing statistics for tags">Passing and failing statistics for tags. The Tag statistics table on this page carries the same numbers as text.</canvas>
     </div>
   </div>
 </div>
@@ -593,4 +626,3 @@ $(document).ready(function() {
 {#- The block closes without a trailing newline: the layout already supplies
     the separation between the page body and the footer. -#}
 {%- endblock %}
-

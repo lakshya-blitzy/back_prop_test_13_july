@@ -90,8 +90,8 @@ resolves by effective step type, and this module leans on the difference twice:
   step that way.
 * ``Sales.feature:10`` invokes the shared precondition as ``Given User login to
   test other features`` while its Java declaration is ``@When``
-  (``Session.java:12``).  The baseline ``target/cucumber.json`` records that
-  step as ``"keyword":"Given "`` matched against
+  (``Session.java:12``).  The baseline JSON report records that step as
+  ``"keyword":"Given "`` matched against
   ``Session.user_login_to_test_other_features()`` - the JVM crossing step types
   in the reference run itself.  That phrase belongs to
   ``features/steps/session_steps.py`` and is deliberately not re-declared here.
@@ -215,7 +215,7 @@ def user_click_on_the_sales_dashboard(context) -> None:
     page = _page(context)
 
     page.sales_partial.click()
-    wait_visible_element(page.sales_partial, 4)
+    wait_visible_element(page.SALES_PARTIAL, 4)
 
 
 @step("User click customers button")
@@ -246,7 +246,7 @@ def user_click_customers_button(context) -> None:
     page = _page(context)
 
     page.customers_button.click()
-    wait_visible_element(page.customers_button, 4)
+    wait_visible_element(page.CUSTOMERS_BUTTON, 4)
 
     # Sales.java:31-32, inverted names and doubled prefix intact. The variable
     # called "actual" holds the constant; the one called "expected" holds the
@@ -296,7 +296,7 @@ def user_can_create_the_customer(context) -> None:
     page = _page(context)
 
     page.create_button.click()
-    wait_visible_element(page.create_button, 4)
+    wait_visible_element(page.CREATE_BUTTON, 4)
     page.customer_name.send_keys("Lucas")
     page.address.send_keys("1 boulevard auguste rodin 75000")
     page.state_options.click()
@@ -331,11 +331,11 @@ def user_can_save_the_customer(context) -> None:
     page = _page(context)
 
     page.save_button.click()
-    wait_visible_element(page.save_button, 4)
+    wait_visible_element(page.SAVE_BUTTON, 4)
     page.create_customer.click()
-    wait_visible_element(page.create_customer, 4)
+    wait_visible_element(page.CREATE_CUSTOMER, 4)
     page.customers_button.click()
-    wait_visible_element(page.customers_button, 4)
+    wait_visible_element(page.CUSTOMERS_BUTTON, 4)
 
 
 @step('User can find his name "{name}" from search bar')
@@ -375,7 +375,7 @@ def user_can_find_his_name_from_search_bar(context, name) -> None:
     page = _page(context)
 
     press_keys(page.search_bar, "ENTER", text=name)
-    wait_visible_element(page.search_bar, 4)
+    wait_visible_element(page.SEARCH_BAR, 4)
 
     # Sales.java:71-72. Both locals go to standard output below and are never
     # compared with one another - the source's behaviour, not an omission of
@@ -413,7 +413,7 @@ def user_can_create_new_customer(context) -> None:
     page = _page(context)
 
     page.create_button.click()
-    wait_visible_element(page.create_button, 4)
+    wait_visible_element(page.CREATE_BUTTON, 4)
     page.create_customer.click()
 
 
